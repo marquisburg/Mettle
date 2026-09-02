@@ -262,6 +262,12 @@ static PtxVal destination_value(PtxFn *fn, const IROperand *dest,
 /* ---- type-name parsing (no symbol table) ---- */
 static MtlcTypeKind base_kind_from_name(const char *s, int *is_unsigned) {
   *is_unsigned = (strstr(s, "uint") != NULL || strstr(s, "bool") != NULL);
+  if (strstr(s, "float16")) {
+    return MTLC_TYPE_FLOAT16;
+  }
+  if (strstr(s, "bfloat16") || strstr(s, "bf16")) {
+    return MTLC_TYPE_BFLOAT16;
+  }
   if (strstr(s, "float32") || strstr(s, "f32")) {
     return MTLC_TYPE_FLOAT32;
   }
@@ -310,6 +316,10 @@ static PtxClass class_of_kind(MtlcTypeKind k, int *is_unsigned) {
   case MTLC_TYPE_FLOAT64:
     *is_unsigned = 0;
     return PC_F64;
+  case MTLC_TYPE_FLOAT16:
+  case MTLC_TYPE_BFLOAT16:
+    *is_unsigned = 0;
+    return PC_F32;
   case MTLC_TYPE_POINTER:
   case MTLC_TYPE_ARRAY:
   case MTLC_TYPE_STRING:
@@ -508,6 +518,9 @@ static const char *mem_type_suffix(MtlcTypeKind elem) {
     return "f32";
   case MTLC_TYPE_FLOAT64:
     return "f64";
+  case MTLC_TYPE_FLOAT16:
+  case MTLC_TYPE_BFLOAT16:
+    return "b16";
   default:
     return "u32";
   }
@@ -6483,6 +6496,9 @@ static const char *param_storage_type(PtxVal value) {
     return "f32";
   case MTLC_TYPE_FLOAT64:
     return "f64";
+  case MTLC_TYPE_FLOAT16:
+  case MTLC_TYPE_BFLOAT16:
+    return "b16";
   default:
     return "u32";
   }
@@ -6787,10 +6803,18 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
     d.idx = new_reg(&fn, d.cls);
     char rn[24];
     reg_name(d.cls, d.idx, rn);
-    sb_printf(&fn.body, "\tld.param.%s %s, [%s_p%zu];\n",
-              func->is_kernel ? param_storage_type(d)
-                              : device_param_storage_type(d),
-              rn, ename, p);
+    if (!d.is_ptr && (d.elem == MTLC_TYPE_FLOAT16 || d.elem == MTLC_TYPE_BFLOAT16)) {
+      char tmp[24];
+      reg_name(PC_B16, new_reg(&fn, PC_B16), tmp);
+      sb_printf(&fn.body, "\tld.param.b16 %s, [%s_p%zu];\n", tmp, ename, p);
+      sb_printf(&fn.body, "\tcvt.f32.%s %s, %s;\n",
+                d.elem == MTLC_TYPE_FLOAT16 ? "f16" : "bf16", rn, tmp);
+    } else {
+      sb_printf(&fn.body, "\tld.param.%s %s, [%s_p%zu];\n",
+                func->is_kernel ? param_storage_type(d)
+                                : device_param_storage_type(d),
+                rn, ename, p);
+    }
     if (func->parameter_names && func->parameter_names[p]) {
       bind_value(&fn, func->parameter_names[p], d);
     }
@@ -7101,10 +7125,15 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
       PtxVal addr = operand_desc(&fn, &in->lhs);
       MtlcTypeKind elem = addr.is_ptr ? addr.elem : MTLC_TYPE_VOID;
       if (elem == MTLC_TYPE_VOID) {
-        /* fall back to size + is_float */
         long long sz = (in->rhs.kind == IR_OPERAND_INT) ? in->rhs.int_value : 4;
         if (in->is_float) {
-          elem = (sz == 4) ? MTLC_TYPE_FLOAT32 : MTLC_TYPE_FLOAT64;
+          if (sz == 2 && in->alias_class == IR_ALIAS_CLASS_F16) {
+            elem = MTLC_TYPE_FLOAT16;
+          } else if (sz == 2 && in->alias_class == IR_ALIAS_CLASS_BF16) {
+            elem = MTLC_TYPE_BFLOAT16;
+          } else {
+            elem = (sz == 4) ? MTLC_TYPE_FLOAT32 : MTLC_TYPE_FLOAT64;
+          }
         } else {
           elem = (sz == 8) ? MTLC_TYPE_INT64
                  : (sz == 2) ? MTLC_TYPE_INT16
@@ -7126,6 +7155,12 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
       if (!space) {
         fn_error(&fn, "PTX: invalid load address space %d",
                  (int)addr.address_space);
+      } else if (elem == MTLC_TYPE_FLOAT16 || elem == MTLC_TYPE_BFLOAT16) {
+        char tmp[24];
+        reg_name(PC_B16, new_reg(&fn, PC_B16), tmp);
+        sb_printf(&fn.body, "\tld%s.b16 %s, [%s];\n", space, tmp, addrreg);
+        sb_printf(&fn.body, "\tcvt.f32.%s %s, %s;\n",
+                  elem == MTLC_TYPE_FLOAT16 ? "f16" : "bf16", dn, tmp);
       } else {
         sb_printf(&fn.body, "\tld%s.%s %s, [%s];\n", space,
                   mem_type_suffix(elem), dn, addrreg);
@@ -7182,7 +7217,13 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
       if (elem == MTLC_TYPE_VOID) {
         long long sz = (in->rhs.kind == IR_OPERAND_INT) ? in->rhs.int_value : 4;
         if (in->is_float) {
-          elem = (sz == 4) ? MTLC_TYPE_FLOAT32 : MTLC_TYPE_FLOAT64;
+          if (sz == 2 && in->alias_class == IR_ALIAS_CLASS_F16) {
+            elem = MTLC_TYPE_FLOAT16;
+          } else if (sz == 2 && in->alias_class == IR_ALIAS_CLASS_BF16) {
+            elem = MTLC_TYPE_BFLOAT16;
+          } else {
+            elem = (sz == 4) ? MTLC_TYPE_FLOAT32 : MTLC_TYPE_FLOAT64;
+          }
         } else {
           elem = (sz == 8) ? MTLC_TYPE_INT64
                  : (sz == 2) ? MTLC_TYPE_INT16
@@ -7204,6 +7245,12 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
       } else if (!space) {
         fn_error(&fn, "PTX: invalid store address space %d",
                  (int)addr.address_space);
+      } else if (elem == MTLC_TYPE_FLOAT16 || elem == MTLC_TYPE_BFLOAT16) {
+        char tmp[24];
+        reg_name(PC_B16, new_reg(&fn, PC_B16), tmp);
+        sb_printf(&fn.body, "\tcvt.rn.%s.f32 %s, %s;\n",
+                  elem == MTLC_TYPE_FLOAT16 ? "f16" : "bf16", tmp, valreg);
+        sb_printf(&fn.body, "\tst%s.b16 [%s], %s;\n", space, addrreg, tmp);
       } else {
         sb_printf(&fn.body, "\tst%s.%s [%s], %s;\n", space,
                   mem_type_suffix(elem), addrreg, valreg);
@@ -7250,6 +7297,34 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
       /* dest = (text) lhs */
       PtxVal target = in->value_type ? descriptor_from_type(in->value_type)
                                      : descriptor_from_typename(in->text);
+      MtlcTypeKind target_elem = target.is_ptr ? MTLC_TYPE_VOID : target.elem;
+      if (!target.is_ptr &&
+          (target_elem == MTLC_TYPE_FLOAT16 || target_elem == MTLC_TYPE_BFLOAT16) &&
+          in->is_float) {
+        char s[24];
+        PtxClass src_cls = (in->float_bits == 64) ? PC_F64 : PC_F32;
+        use_as(&fn, &in->lhs, src_cls, s);
+        target.cls = PC_F32;
+        target = destination_value(&fn, &in->dest, target);
+        char dn[24];
+        reg_name(target.cls, target.idx, dn);
+        char tmp[24];
+        reg_name(PC_B16, new_reg(&fn, PC_B16), tmp);
+        const char *to = (target_elem == MTLC_TYPE_FLOAT16) ? "f16" : "bf16";
+        char f32tmp[24];
+        if (src_cls == PC_F64) {
+          reg_name(PC_F32, new_reg(&fn, PC_F32), f32tmp);
+          sb_printf(&fn.body, "\tcvt.rn.f32.f64 %s, %s;\n", f32tmp, s);
+          sb_printf(&fn.body, "\tcvt.rn.%s.f32 %s, %s;\n", to, tmp, f32tmp);
+        } else {
+          sb_printf(&fn.body, "\tcvt.rn.%s.f32 %s, %s;\n", to, tmp, s);
+        }
+        sb_printf(&fn.body, "\tcvt.f32.%s %s, %s;\n", to, dn, tmp);
+        if (in->dest.name) {
+          bind_value(&fn, in->dest.name, target);
+        }
+        break;
+      }
       char s[24];
       use_as(&fn, &in->lhs, target.cls, s);
       target = destination_value(&fn, &in->dest, target);
