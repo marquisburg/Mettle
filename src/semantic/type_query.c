@@ -151,6 +151,8 @@ static const KindMember g_kind_members[] = {
     {"Uint64", TYPE_UINT64},
     {"Float32", TYPE_FLOAT32},
     {"Float64", TYPE_FLOAT64},
+    {"Float16", TYPE_FLOAT16},
+    {"Bfloat16", TYPE_BFLOAT16},
     {"String", TYPE_STRING},
     {"Pointer", TYPE_POINTER},
     {"Array", TYPE_ARRAY},

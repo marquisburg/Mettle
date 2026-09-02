@@ -466,6 +466,8 @@ Type *type_create(TypeKind kind, const char *name) {
     break;
   case TYPE_INT16:
   case TYPE_UINT16:
+  case TYPE_FLOAT16:
+  case TYPE_BFLOAT16:
     type->size = 2;
     type->alignment = 2;
     break;

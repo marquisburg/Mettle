@@ -51,4 +51,20 @@ void mettle_free_string_array(char **values, size_t count);
 
 double mettle_now_ms(void);
 
+#include <stdint.h>
+uint16_t mettle_f32bits_to_f16bits(uint32_t u);
+uint32_t mettle_f16bits_to_f32bits(uint16_t h);
+uint16_t mettle_f32bits_to_bf16bits(uint32_t u);
+uint32_t mettle_bf16bits_to_f32bits(uint16_t h);
+float mettle_f16bits_to_f32(uint16_t h);
+uint16_t mettle_f32_to_f16bits(float f);
+float mettle_bf16bits_to_f32(uint16_t h);
+uint16_t mettle_f32_to_bf16bits(float f);
+uint16_t mettle_f64bits_to_f16bits(uint64_t u);
+uint16_t mettle_f64bits_to_bf16bits(uint64_t u);
+int mettle_f64_is_exact_f16(double d);
+int mettle_f64_is_exact_bf16(double d);
+int mettle_f32_is_exact_f16(float f);
+int mettle_f32_is_exact_bf16(float f);
+
 #endif

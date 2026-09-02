@@ -2357,7 +2357,8 @@ int parser_is_type_keyword(TokenType type) {
    here keeps the token set unchanged. */
 int parser_is_builtin_type_name(const char *text) {
   return text && (strcmp(text, "bool") == 0 || strcmp(text, "cstring") == 0 ||
-                  strcmp(text, "rawptr") == 0);
+                  strcmp(text, "rawptr") == 0 || strcmp(text, "float16") == 0 ||
+                  strcmp(text, "bfloat16") == 0);
 }
 
 static void parser_free_string_array(char **values, size_t count) {

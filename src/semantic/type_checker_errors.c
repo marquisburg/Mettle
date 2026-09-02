@@ -214,6 +214,11 @@ void type_checker_report_assign_mismatch(TypeChecker *checker,
                         type_checker_is_integer_type(src_type) &&
                         dest_type->kind != TYPE_ENUM &&
                         src_type->kind != TYPE_ENUM;
+  int is_float_narrow = dest_type && src_type &&
+                        type_checker_is_floating_type(dest_type) &&
+                        type_checker_is_floating_type(src_type) &&
+                        (dest_type->kind == TYPE_FLOAT16 || dest_type->kind == TYPE_BFLOAT16) &&
+                        (src_type->kind == TYPE_FLOAT32 || src_type->kind == TYPE_FLOAT64);
   int folds = 0;
   char message[512];
   char help[320];
@@ -221,6 +226,29 @@ void type_checker_report_assign_mismatch(TypeChecker *checker,
   SourceSpan span;
 
   if (!checker) {
+    return;
+  }
+  if (is_float_narrow) {
+    snprintf(message, sizeof(message),
+             "Narrowing conversion from '%s' to '%s' needs a cast", actual,
+             expected);
+    snprintf(help, sizeof(help), "cast explicitly: (%s)value", expected);
+    checker->has_error = 1;
+    free(checker->error_message);
+    checker->error_message = strdup(message);
+    if (!checker->error_reporter) {
+      return;
+    }
+    span = source_span_from_location(where, span_length);
+    error_reporter_add_error_with_span_and_suggestion(
+        checker->error_reporter, ERROR_TYPE, span, message, help);
+    error_reporter_set_last_code(checker->error_reporter, "M0119");
+    {
+      char label[192];
+      snprintf(label, sizeof(label), "'%s' value stored as '%s'", actual,
+               expected);
+      error_reporter_set_last_label(checker->error_reporter, label);
+    }
     return;
   }
   if (!is_integer_pair) {

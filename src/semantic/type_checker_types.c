@@ -867,6 +867,8 @@ void type_checker_init_builtin_types(TypeChecker *checker) {
   // Create built-in floating-point types
   checker->builtin_float32 = type_create(TYPE_FLOAT32, "float32");
   checker->builtin_float64 = type_create(TYPE_FLOAT64, "float64");
+  checker->builtin_float16 = type_create(TYPE_FLOAT16, "float16");
+  checker->builtin_bfloat16 = type_create(TYPE_BFLOAT16, "bfloat16");
 
   // C interop alias: cstring -> uint8*
   checker->builtin_cstring = type_create(TYPE_POINTER, "cstring");
@@ -948,6 +950,8 @@ void type_checker_init_builtin_types(TypeChecker *checker) {
   type_checker_intern_type(checker, checker->builtin_bool);
   type_checker_intern_type(checker, checker->builtin_float32);
   type_checker_intern_type(checker, checker->builtin_float64);
+  type_checker_intern_type(checker, checker->builtin_float16);
+  type_checker_intern_type(checker, checker->builtin_bfloat16);
   type_checker_intern_type(checker, checker->builtin_string);
   type_checker_intern_type(checker, checker->builtin_cstring);
   type_checker_intern_type(checker, checker->builtin_rawptr);
@@ -1024,6 +1028,14 @@ static int type_checker_builtin_by_name(TypeChecker *checker,
   }
   if (strcmp(name, "float64") == 0) {
     *out = checker->builtin_float64;
+    return 1;
+  }
+  if (strcmp(name, "float16") == 0) {
+    *out = checker->builtin_float16;
+    return 1;
+  }
+  if (strcmp(name, "bfloat16") == 0) {
+    *out = checker->builtin_bfloat16;
     return 1;
   }
   if (strcmp(name, "string") == 0) {
@@ -1256,6 +1268,8 @@ int type_checker_is_floating_type(Type *type) {
   switch (type->kind) {
   case TYPE_FLOAT32:
   case TYPE_FLOAT64:
+  case TYPE_FLOAT16:
+  case TYPE_BFLOAT16:
     return 1;
   default:
     return 0;
@@ -1302,6 +1316,15 @@ Type *type_checker_promote_types(TypeChecker *checker, Type *left, Type *right,
     // If either operand is floating-point, result is floating-point
     if (type_checker_is_floating_type(left) ||
         type_checker_is_floating_type(right)) {
+      int left_is_small = left->kind == TYPE_FLOAT16 || left->kind == TYPE_BFLOAT16;
+      int right_is_small = right->kind == TYPE_FLOAT16 || right->kind == TYPE_BFLOAT16;
+      if ((left_is_small || right_is_small) &&
+          left->kind != TYPE_FLOAT64 && right->kind != TYPE_FLOAT64) {
+        return checker->builtin_float32;
+      }
+      if (left_is_small && right_is_small) {
+        return checker->builtin_float32;
+      }
       return type_checker_get_larger_type(checker, left, right);
     }
 
@@ -1349,6 +1372,8 @@ int type_checker_get_type_rank(Type *type) {
   case TYPE_INT32:
   case TYPE_UINT32:
     return 3;
+  case TYPE_FLOAT16:
+  case TYPE_BFLOAT16:
   case TYPE_FLOAT32:
     return 4;
   case TYPE_INT64:
@@ -1641,9 +1666,21 @@ int type_checker_is_assignable_from(TypeChecker *checker, Type *dest_type,
   if (type_checker_is_assignable(checker, dest_type, src_type)) {
     return 1;
   }
-  /* Only the integer range rule has a constant escape: the destination is a
-   * range, the source folds to one number, and containment is decided rather
-   * than assumed. Everything else stays a type mismatch. */
+  if (src_expr && checker && dest_type && src_type &&
+      (dest_type->kind == TYPE_FLOAT16 || dest_type->kind == TYPE_BFLOAT16) &&
+      (src_type->kind == TYPE_FLOAT32 || src_type->kind == TYPE_FLOAT64)) {
+    if (src_expr->type == AST_NUMBER_LITERAL && src_expr->data) {
+      NumberLiteral *lit = (NumberLiteral *)src_expr->data;
+      if (lit->is_float) {
+        double v = lit->float_value;
+        if (dest_type->kind == TYPE_FLOAT16) {
+          return mettle_f64_is_exact_f16(v);
+        }
+        return mettle_f64_is_exact_bf16(v);
+      }
+    }
+    return 0;
+  }
   if (!src_expr || !checker || !dest_type || !src_type ||
       !type_checker_is_integer_type(dest_type) ||
       !type_checker_is_integer_type(src_type) ||
@@ -1779,9 +1816,16 @@ int type_checker_is_implicitly_convertible(Type *from_type, Type *to_type) {
     return 1; // Generally safe
   }
 
-  // Floating point to floating point conversions, including narrowing.
   if (type_checker_is_floating_type(from_type) &&
       type_checker_is_floating_type(to_type)) {
+    int from_small = from_type->kind == TYPE_FLOAT16 || from_type->kind == TYPE_BFLOAT16;
+    int to_small = to_type->kind == TYPE_FLOAT16 || to_type->kind == TYPE_BFLOAT16;
+    if (to_small) {
+      return 0;
+    }
+    if (from_small) {
+      return 1;
+    }
     return 1;
   }
 

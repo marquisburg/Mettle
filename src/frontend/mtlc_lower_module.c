@@ -155,6 +155,9 @@ static int frontend_type_float_bits(const Type *t) {
   if (t->kind == TYPE_FLOAT64 && t->size == 8) {
     return 64;
   }
+  if ((t->kind == TYPE_FLOAT16 || t->kind == TYPE_BFLOAT16) && t->size == 2) {
+    return 16;
+  }
   return 0;
 }
 

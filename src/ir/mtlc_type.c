@@ -21,6 +21,8 @@ static const MtlcType k_scalar_uint64 = MTLC_SCALAR(MTLC_TYPE_UINT64, "uint64", 
 static const MtlcType k_scalar_bool = MTLC_SCALAR(MTLC_TYPE_BOOL, "bool", 1, 1);
 static const MtlcType k_scalar_float32 = MTLC_SCALAR(MTLC_TYPE_FLOAT32, "float32", 4, 4);
 static const MtlcType k_scalar_float64 = MTLC_SCALAR(MTLC_TYPE_FLOAT64, "float64", 8, 8);
+static const MtlcType k_scalar_float16 = MTLC_SCALAR(MTLC_TYPE_FLOAT16, "float16", 2, 2);
+static const MtlcType k_scalar_bfloat16 = MTLC_SCALAR(MTLC_TYPE_BFLOAT16, "bfloat16", 2, 2);
 static const MtlcType k_scalar_string = MTLC_SCALAR(MTLC_TYPE_STRING, "string", 8, 8);
 static const MtlcType k_scalar_void = MTLC_SCALAR(MTLC_TYPE_VOID, "void", 0, 1);
 #undef MTLC_SCALAR
@@ -49,6 +51,10 @@ const MtlcType *mtlc_type_scalar(MtlcTypeKind kind) {
     return &k_scalar_float32;
   case MTLC_TYPE_FLOAT64:
     return &k_scalar_float64;
+  case MTLC_TYPE_FLOAT16:
+    return &k_scalar_float16;
+  case MTLC_TYPE_BFLOAT16:
+    return &k_scalar_bfloat16;
   case MTLC_TYPE_STRING:
     return &k_scalar_string;
   case MTLC_TYPE_VOID:
@@ -471,7 +477,8 @@ int mtlc_type_is_unsigned(const MtlcType *t) {
 }
 
 int mtlc_type_is_float(const MtlcType *t) {
-  return t && (t->kind == MTLC_TYPE_FLOAT32 || t->kind == MTLC_TYPE_FLOAT64);
+  return t && (t->kind == MTLC_TYPE_FLOAT32 || t->kind == MTLC_TYPE_FLOAT64 ||
+               t->kind == MTLC_TYPE_FLOAT16 || t->kind == MTLC_TYPE_BFLOAT16);
 }
 
 int mtlc_type_is_aggregate(const MtlcType *t) {
@@ -507,6 +514,10 @@ const char *mtlc_type_kind_name(MtlcTypeKind kind) {
     return "float32";
   case MTLC_TYPE_FLOAT64:
     return "float64";
+  case MTLC_TYPE_FLOAT16:
+    return "float16";
+  case MTLC_TYPE_BFLOAT16:
+    return "bfloat16";
   case MTLC_TYPE_STRING:
     return "string";
   case MTLC_TYPE_FUNCTION_POINTER:

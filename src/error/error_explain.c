@@ -235,7 +235,7 @@ static const ErrorCodeDoc DOCS[] = {
      "The last one is not a workaround. A cast at the site is how a reader\n"
      "learns the truncation was intended, which is the whole reason this is\n"
      "reported instead of performed.\n"},
-    {"M0119", "Narrowing conversion needs a cast",
+     {"M0119", "Narrowing conversion needs a cast",
      "A value flows into a type that cannot hold every value the source type\n"
      "can. Mettle converts silently in one direction only:\n"
      "\n"
@@ -257,7 +257,9 @@ static const ErrorCodeDoc DOCS[] = {
      "\n"
      "Two destinations sit outside the rule because they are not range\n"
      "conversions: `bool` is a truth coercion, and an enum names a set.\n"
-     "Floating-point conversions are unchanged and still silent.\n"},
+     "float32 -> float64 widens silently and float64 -> float32 stays silent.\n"
+     "float32 -> float16 and float32 -> bfloat16 narrow loudly, like int64 ->\n"
+     "int8. A float literal that is exactly representable needs no cast.\n"},
     {"M0120", "Pointer cast to an integer and back to a pointer",
      "A pointer is cast to an integer and straight back to a pointer. The\n"
      "integer in the middle holds the same address the pointer already held,\n"

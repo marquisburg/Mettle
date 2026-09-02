@@ -114,6 +114,10 @@ static MtlcTypeKind translate_kind(TypeKind kind) {
     return MTLC_TYPE_FLOAT32;
   case TYPE_FLOAT64:
     return MTLC_TYPE_FLOAT64;
+  case TYPE_FLOAT16:
+    return MTLC_TYPE_FLOAT16;
+  case TYPE_BFLOAT16:
+    return MTLC_TYPE_BFLOAT16;
   case TYPE_STRING:
     return MTLC_TYPE_STRING;
   case TYPE_FUNCTION_POINTER:

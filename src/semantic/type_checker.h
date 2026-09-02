@@ -40,6 +40,8 @@ typedef struct {
   Type *builtin_char;
   Type *builtin_float32;
   Type *builtin_float64;
+  Type *builtin_float16;
+  Type *builtin_bfloat16;
   Type *builtin_string;
   Type *builtin_cstring;
   /* A pointer with no element type: what an allocator hands out and what a

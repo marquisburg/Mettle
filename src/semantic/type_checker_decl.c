@@ -50,6 +50,8 @@ static int gpu_kernel_scalar_type(const Type *type) {
   case TYPE_BOOL:
   case TYPE_FLOAT32:
   case TYPE_FLOAT64:
+  case TYPE_FLOAT16:
+  case TYPE_BFLOAT16:
     return 1;
   default:
     return 0;
