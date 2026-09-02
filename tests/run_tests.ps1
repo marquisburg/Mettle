@@ -983,6 +983,67 @@ $cases = @(
     Pattern       = 'inside reachable function `helper`, a `new` expression'
   },
   @{
+    # `rewrite` rules: checked in the interpreter before use, applied before
+    # and after inlining, every application validated, all of it in --explain.
+    Name          = "rewrite_rules_report"
+    Path          = "tests/rewrite_rules.mettle"
+    ShouldSucceed = $true
+    Args          = @("--release", "--explain")
+    Env           = @{ METTLE_EXPLAIN_REPORT_LINES = "0" }
+    OutputMustMatch = @(
+      'clamp_twice \(rewrite rule @ line \d+\): rule checked',
+      'agree on the \d+ generated input sets that satisfy `where`',
+      'twice_plus \(rewrite rule @ line \d+\): applied 1 time',
+      'rem_pow2 \(rewrite rule @ line \d+\): applied 1 time',
+      'double_by_add \(rewrite rule @ line \d+\): applied 1 time',
+      'rewritten by rule `clamp_twice`',
+      'rewritten by rule `rem_pow2`',
+      'none rewritten: `where` could not be decided',
+      '`where` reads `v`'
+    )
+    OutputMustNotMatch = @('__rewrite_from__', '__rewrite_to__')
+  },
+  @{
+    # A rule whose sides disagree is refused with the input that shows it.
+    Name          = "err_rewrite_unsound"
+    Path          = "tests/err_rewrite_unsound.mettle"
+    ShouldSucceed = $false
+    Args          = @("-O")
+    Pattern       = 'rewrite `bad_div` changes meaning'
+    OutputMustMatch = @('counterexample \(input set \d+\) bad_div\(-1\)',
+                        'return value was 0, is now -1')
+  },
+  @{
+    # Two-parameter rules are checked on every pair of probe values, which is
+    # what reaches a negative dividend with a power-of-two divisor.
+    Name          = "err_rewrite_negative_rem"
+    Path          = "tests/err_rewrite_negative_rem.mettle"
+    ShouldSucceed = $false
+    Args          = @("-O")
+    Pattern       = 'rewrite `rem_pow2` changes meaning'
+  },
+  @{
+    Name          = "err_rewrite_unbound"
+    Path          = "tests/err_rewrite_unbound.mettle"
+    ShouldSucceed = $false
+    Args          = @("-O")
+    Pattern       = '`to` reads parameter `k`, which `from` never binds'
+  },
+  @{
+    Name          = "err_rewrite_bare_pattern"
+    Path          = "tests/err_rewrite_bare_pattern.mettle"
+    ShouldSucceed = $false
+    Args          = @("-O")
+    Pattern       = 'its `from` side must apply an operator, a cast or a call'
+  },
+  @{
+    # Without -O the rules are parsed, type-checked and dropped.
+    Name          = "rewrite_rules_debug_build"
+    Path          = "tests/rewrite_rules.mettle"
+    ShouldSucceed = $true
+    Args          = @()
+  },
+  @{
     # `@noalloc` is a proof: an unknown extern cannot be proven clean.
     Name          = "err_noalloc_extern"
     Path          = "tests/err_noalloc_extern.mettle"
@@ -4064,6 +4125,52 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "decorators" -Passed $false -Reason $_.Exception.Message
+}
+
+# `rewrite` rules end to end: the optimized program computes the same answers
+# the rules were written against, the rewritten IR no longer carries the
+# matched shapes, and --verify re-validates every pass over the changed code.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exePath = Join-Path $tmpDir "rewrite_rules.exe"
+  $objPath = [System.IO.Path]::ChangeExtension($exePath, $script:ObjExt)
+  $irPath = "$objPath.ir"
+  foreach ($artifactPath in @($exePath, $objPath, $irPath)) {
+    if (Test-Path $artifactPath) {
+      Remove-Item -Path $artifactPath -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  $buildOut = & $CompilerPath --build --verify --dump-ir "tests/rewrite_rules.mettle" -o $exePath 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) {
+    throw "rewrite rules build failed: $buildOut"
+  }
+  if ($buildOut -notmatch "translation validation: OK") {
+    throw "rewrite rules build did not validate: $buildOut"
+  }
+  if (-not (Test-Path $irPath)) {
+    throw "rewrite rules IR output file not produced"
+  }
+  $irText = Get-Content -Path $irPath -Raw
+  if ($irText -match "__rewrite_") {
+    throw "rewrite rule bodies reached codegen"
+  }
+  if ($irText -match "clamp\(") {
+    throw "rewrite rules IR still calls clamp (clamp_twice did not fire, or the survivor was not inlined)"
+  }
+  $runOut = & $exePath 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) {
+    throw "rewrite rules executable exited with $LASTEXITCODE`: $runOut"
+  }
+  if ($runOut -notmatch "REWRITE OK") {
+    throw "rewrite rules output missing expected marker: $runOut"
+  }
+  Write-CaseResult -Name "rewrite_rules_run" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rewrite_rules_run" -Passed $false -Reason $_.Exception.Message
 }
 
 # --ml-opt translation-validation gate: every model disposition is executed

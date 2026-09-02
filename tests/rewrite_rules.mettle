@@ -1,0 +1,57 @@
+import "std/io";
+
+extern fn sqrtf(x: float32) -> float32 = "sqrtf";
+
+fn normalize(x: float32) -> float32 { return x / sqrtf(x * x); }
+fn length(x: float32) -> float32 { return sqrtf(x * x); }
+
+fn clamp(x: int64, lo: int64, hi: int64) -> int64 {
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+}
+
+rewrite length_of_normalize(v: float32) -> float32 {
+    from length(normalize(v));
+    to 1.0;
+    where v > 0.5 && v < 1000000.0;
+}
+
+rewrite rem_pow2(x: uint64, m: uint64) -> uint64 {
+    from x % m;
+    to x & (m - 1);
+    where m > 0 && (m & (m - 1)) == 0;
+}
+
+rewrite twice_plus(a: int64) -> int64 {
+    from a + a;
+    to a * 2;
+}
+
+rewrite double_by_add(v: float32) -> float32 {
+    from v * 2.0;
+    to v + v;
+}
+
+rewrite clamp_twice(x: int64, lo: int64, hi: int64) -> int64 {
+    from clamp(clamp(x, lo, hi), lo, hi);
+    to clamp(x, lo, hi);
+    where lo <= hi;
+}
+
+@noinline fn use(a: float32, b: uint64, k: uint64) -> int64 {
+    var q: uint64 = (b * k) % 8;
+    var r: int64 = (int64)q + (int64)q;
+    var c: int64 = clamp(clamp(r, 0, 20), 0, 20);
+    var d: float32 = a * 2.0;
+    return (int64)length(normalize(a)) + c + (int64)d;
+}
+
+fn main() -> int64 {
+    var got: int64 = use(2.0, 3, 5);
+    var big: int64 = use(2.0, 3, 7);
+    if (got != 19) { println("wrong: {got}"); return 1; }
+    if (big != 15) { println("wrong: {big}"); return 2; }
+    println("REWRITE OK");
+    return 0;
+}

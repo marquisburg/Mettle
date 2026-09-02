@@ -1011,6 +1011,7 @@ IRFunction *ir_function_create(const char *name) {
   function->is_interrupt = 0;
   function->has_volatile_access = 0;
   function->is_kernel = 0;
+  function->rewrite_role = 0;
   return function;
 }
 
@@ -1676,6 +1677,23 @@ IRProgram *ir_program_create(void) {
 static void ir_symbol_index_invalidate(const IRProgram *program);
 static void ir_type_index_invalidate(const IRProgram *program);
 
+static void ir_symbol_index_reset(void);
+
+static void ir_module_symbol_release(IRModuleSymbol *symbol) {
+  free(symbol->name);
+  free(symbol->link_name);
+  free(symbol->init_string);
+  free(symbol->init_symbol_ref);
+  for (size_t r = 0; r < symbol->init_reloc_count; r++) {
+    free(symbol->init_relocs[r].symbol);
+    free(symbol->init_relocs[r].string);
+  }
+  free(symbol->init_relocs);
+  free(symbol->init_bytes);
+  free(symbol->param_types);
+  free(symbol->codegen_view);
+}
+
 void ir_program_destroy(IRProgram *program) {
   if (!program) {
     return;
@@ -1728,22 +1746,43 @@ void ir_program_destroy(IRProgram *program) {
   }
   if (program->module_symbols) {
     for (size_t i = 0; i < program->module_symbol_count; i++) {
-      free(program->module_symbols[i].name);
-      free(program->module_symbols[i].link_name);
-      free(program->module_symbols[i].init_string);
-      free(program->module_symbols[i].init_symbol_ref);
-      for (size_t r = 0; r < program->module_symbols[i].init_reloc_count; r++) {
-        free(program->module_symbols[i].init_relocs[r].symbol);
-        free(program->module_symbols[i].init_relocs[r].string);
-      }
-      free(program->module_symbols[i].init_relocs);
-      free(program->module_symbols[i].init_bytes);
-      free(program->module_symbols[i].param_types);
-      free(program->module_symbols[i].codegen_view);
+      ir_module_symbol_release(&program->module_symbols[i]);
     }
     free(program->module_symbols);
   }
   free(program);
+}
+
+int ir_program_drop_rewrite_rules(IRProgram *program) {
+  size_t kept = 0;
+  if (!program) {
+    return 0;
+  }
+  for (size_t i = 0; i < program->function_count; i++) {
+    IRFunction *function = program->functions[i];
+    if (!function || !function->rewrite_role) {
+      program->functions[kept++] = function;
+      continue;
+    }
+    size_t symbols_kept = 0;
+    for (size_t s = 0; s < program->module_symbol_count; s++) {
+      IRModuleSymbol *symbol = &program->module_symbols[s];
+      if (symbol->kind == IR_MODSYM_FUNCTION && symbol->name &&
+          function->name && strcmp(symbol->name, function->name) == 0) {
+        ir_module_symbol_release(symbol);
+        continue;
+      }
+      if (symbols_kept != s) {
+        program->module_symbols[symbols_kept] = *symbol;
+      }
+      symbols_kept++;
+    }
+    program->module_symbol_count = symbols_kept;
+    ir_symbol_index_reset();
+    ir_function_destroy(function);
+  }
+  program->function_count = kept;
+  return 1;
 }
 
 /* Name -> type-registry index. Same shape and lifecycle as IRSymbolIndex
@@ -5908,6 +5947,7 @@ int ir_program_eliminate_dead_functions(IRProgram *program, int keep_exports) {
         worklist[worklist_count++] = i;
         found_main = 1;
       } else if (program->functions[i]->is_kernel ||
+                 program->functions[i]->rewrite_role ||
                  (keep_exports && program->functions[i]->is_exported)) {
         /* A GPU entry point is launched by the driver against the emitted
          * module, so no instruction in this program has to name it. `export fn`

@@ -1,5 +1,6 @@
 #include "parser.h"
 #include "error/error_reporter.h"
+#include "ir/ir.h"
 #include "string_intern.h"
 #include <errno.h>
 #include <limits.h>
@@ -102,6 +103,9 @@ Parser *parser_create_with_error_reporter(Lexer *lexer,
   parser->comptime_depth = 0;
   parser->pending_composed_name = NULL;
   parser->expression_depth = 0;
+  parser->extra_declarations[0] = NULL;
+  parser->extra_declarations[1] = NULL;
+  parser->extra_declaration_count = 0;
 
   if (parser->current_token.type == TOKEN_ERROR) {
     parser_report_lexer_token_error(parser, &parser->current_token);
@@ -117,6 +121,9 @@ void parser_destroy(Parser *parser) {
     token_destroy(&parser->current_token);
     token_destroy(&parser->peek_token);
     ast_destroy_node(parser->pending_composed_name);
+    for (size_t i = 0; i < parser->extra_declaration_count; i++) {
+      ast_destroy_node(parser->extra_declarations[i]);
+    }
     free(parser->error_message);
     free(parser);
   }
@@ -717,6 +724,19 @@ ASTNode *parser_parse_program(Parser *parser) {
         prog_data->declaration_count++;
         ast_add_child(program, declaration);
       }
+      for (size_t e = 0; e < parser->extra_declaration_count; e++) {
+        ASTNode *extra = parser->extra_declarations[e];
+        parser->extra_declarations[e] = NULL;
+        prog_data->declarations =
+            realloc(prog_data->declarations,
+                    (prog_data->declaration_count + 1) * sizeof(ASTNode *));
+        if (prog_data->declarations) {
+          prog_data->declarations[prog_data->declaration_count] = extra;
+          prog_data->declaration_count++;
+          ast_add_child(program, extra);
+        }
+      }
+      parser->extra_declaration_count = 0;
     } else if (!parser->has_error) {
       parser_set_error(parser, "Failed to parse declaration");
       parser_advance(parser);
@@ -1061,6 +1081,275 @@ static ASTNode *parser_parse_exported_declaration(Parser *parser) {
   return decl;
 }
 
+static int parser_parse_parameter_list(Parser *parser, char ***out_names,
+                                       char ***out_types, size_t *out_count);
+static char *parser_parse_type_annotation(Parser *parser);
+
+static void parser_free_rewrite_parts(char **param_names, char **param_types,
+                                      size_t param_count, char *return_type,
+                                      char *rule_name, ASTNode *from_expr,
+                                      ASTNode *to_expr, ASTNode *where_expr) {
+  for (size_t i = 0; i < param_count; i++) {
+    free(param_names[i]);
+    free(param_types[i]);
+  }
+  free(param_names);
+  free(param_types);
+  free(return_type);
+  free(rule_name);
+  ast_destroy_node(from_expr);
+  ast_destroy_node(to_expr);
+  ast_destroy_node(where_expr);
+}
+
+static ASTNode *parser_make_rewrite_side(const char *prefix,
+                                         const char *rule_name,
+                                         char **param_names,
+                                         char **param_types,
+                                         size_t param_count,
+                                         const char *return_type,
+                                         ASTNode *expr, SourceLocation location,
+                                         int role) {
+  ASTNode *return_stmt = ast_create_node(AST_RETURN_STATEMENT, expr->location);
+  if (!return_stmt) {
+    return NULL;
+  }
+  ReturnStatement *ret_data = malloc(sizeof(ReturnStatement));
+  ASTNode **values = malloc(sizeof(ASTNode *));
+  if (!ret_data || !values) {
+    free(ret_data);
+    free(values);
+    free(return_stmt);
+    return NULL;
+  }
+  values[0] = expr;
+  ret_data->value = expr;
+  ret_data->values = values;
+  ret_data->value_count = 1;
+  return_stmt->data = ret_data;
+  ast_add_child(return_stmt, expr);
+
+  ASTNode *body = ast_create_program();
+  if (!body) {
+    ast_destroy_node(return_stmt);
+    return NULL;
+  }
+  Program *body_data = (Program *)body->data;
+  body_data->declarations = malloc(sizeof(ASTNode *));
+  if (!body_data->declarations) {
+    ast_destroy_node(return_stmt);
+    ast_destroy_node(body);
+    return NULL;
+  }
+  body_data->declarations[0] = return_stmt;
+  body_data->declaration_count = 1;
+  ast_add_child(body, return_stmt);
+
+  size_t name_length = strlen(prefix) + strlen(rule_name) + 1;
+  char *name = malloc(name_length);
+  if (!name) {
+    ast_destroy_node(body);
+    return NULL;
+  }
+  snprintf(name, name_length, "%s%s", prefix, rule_name);
+  ASTNode *decl = ast_create_function_declaration(
+      name, param_names, param_types, param_count, return_type, body,
+      location);
+  free(name);
+  if (!decl) {
+    ast_destroy_node(body);
+    return NULL;
+  }
+  ((FunctionDeclaration *)decl->data)->rewrite_role = role;
+  return decl;
+}
+
+static ASTNode *parser_parse_rewrite_declaration(Parser *parser) {
+  SourceLocation location = parser_current_location(parser);
+  parser_advance(parser);
+
+  if (parser->comptime_depth > 0) {
+    parser_set_error(parser,
+                     "A 'rewrite' rule cannot be generated by 'comptime for'");
+    return NULL;
+  }
+  if (!parser_is_identifier_like(parser->current_token.type)) {
+    parser_set_error(parser, "Expected a rule name after 'rewrite'");
+    return NULL;
+  }
+  char *rule_name = strdup(parser->current_token.value);
+  parser_advance(parser);
+  if (!rule_name) {
+    return NULL;
+  }
+
+  char **param_names = NULL;
+  char **param_types = NULL;
+  size_t param_count = 0;
+  char *return_type = NULL;
+  ASTNode *from_expr = NULL;
+  ASTNode *to_expr = NULL;
+  ASTNode *where_expr = NULL;
+
+  if (!parser_expect(parser, TOKEN_LPAREN) ||
+      !parser_parse_parameter_list(parser, &param_names, &param_types,
+                                   &param_count) ||
+      !parser_expect(parser, TOKEN_RPAREN)) {
+    parser_free_rewrite_parts(param_names, param_types, param_count, NULL,
+                              rule_name, NULL, NULL, NULL);
+    return NULL;
+  }
+  if (param_count == 0) {
+    parser_set_error(parser,
+                     "A 'rewrite' rule needs at least one parameter: the "
+                     "values its 'from' side matches");
+    parser_free_rewrite_parts(param_names, param_types, param_count, NULL,
+                              rule_name, NULL, NULL, NULL);
+    return NULL;
+  }
+  if (parser->current_token.type != TOKEN_ARROW) {
+    parser_set_error(parser,
+                     "Expected '-> type' after the rule's parameters: the "
+                     "type both sides of the rule compute");
+    parser_free_rewrite_parts(param_names, param_types, param_count, NULL,
+                              rule_name, NULL, NULL, NULL);
+    return NULL;
+  }
+  parser_advance(parser);
+  return_type = parser_parse_type_annotation(parser);
+  if (!return_type) {
+    if (!parser->has_error) {
+      parser_set_error(parser, "Expected the rule's result type after '->'");
+    }
+    parser_free_rewrite_parts(param_names, param_types, param_count, NULL,
+                              rule_name, NULL, NULL, NULL);
+    return NULL;
+  }
+  if (!parser_expect(parser, TOKEN_LBRACE)) {
+    parser_free_rewrite_parts(param_names, param_types, param_count,
+                              return_type, rule_name, NULL, NULL, NULL);
+    return NULL;
+  }
+
+  while (parser->current_token.type != TOKEN_RBRACE &&
+         parser->current_token.type != TOKEN_EOF) {
+    if (parser->current_token.type == TOKEN_NEWLINE ||
+        parser->current_token.type == TOKEN_SEMICOLON) {
+      parser_advance(parser);
+      continue;
+    }
+    ASTNode **slot = NULL;
+    const char *clause = NULL;
+    if (parser->current_token.type == TOKEN_WHERE) {
+      slot = &where_expr;
+      clause = "where";
+    } else if (parser_is_identifier_like(parser->current_token.type) &&
+               parser->current_token.value &&
+               strcmp(parser->current_token.value, "from") == 0) {
+      slot = &from_expr;
+      clause = "from";
+    } else if (parser_is_identifier_like(parser->current_token.type) &&
+               parser->current_token.value &&
+               strcmp(parser->current_token.value, "to") == 0) {
+      slot = &to_expr;
+      clause = "to";
+    } else {
+      parser_set_error(parser,
+                       "Expected 'from', 'to' or 'where' inside a 'rewrite' "
+                       "rule");
+      parser_free_rewrite_parts(param_names, param_types, param_count,
+                                return_type, rule_name, from_expr, to_expr,
+                                where_expr);
+      return NULL;
+    }
+    if (*slot) {
+      char message[128];
+      snprintf(message, sizeof(message),
+               "A 'rewrite' rule has one '%s' clause", clause);
+      parser_set_error(parser, message);
+      parser_free_rewrite_parts(param_names, param_types, param_count,
+                                return_type, rule_name, from_expr, to_expr,
+                                where_expr);
+      return NULL;
+    }
+    parser_advance(parser);
+    *slot = parser_parse_expression(parser);
+    if (!*slot) {
+      if (!parser->has_error) {
+        char message[128];
+        snprintf(message, sizeof(message),
+                 "Expected an expression after '%s'", clause);
+        parser_set_error(parser, message);
+      }
+      parser_free_rewrite_parts(param_names, param_types, param_count,
+                                return_type, rule_name, from_expr, to_expr,
+                                where_expr);
+      return NULL;
+    }
+    if (parser->current_token.type != TOKEN_SEMICOLON &&
+        parser->current_token.type != TOKEN_NEWLINE &&
+        parser->current_token.type != TOKEN_RBRACE) {
+      parser_set_error(parser,
+                       "Expected ';' after the clause's expression");
+      parser_free_rewrite_parts(param_names, param_types, param_count,
+                                return_type, rule_name, from_expr, to_expr,
+                                where_expr);
+      return NULL;
+    }
+  }
+  if (!parser_expect(parser, TOKEN_RBRACE)) {
+    parser_free_rewrite_parts(param_names, param_types, param_count,
+                              return_type, rule_name, from_expr, to_expr,
+                              where_expr);
+    return NULL;
+  }
+  if (!from_expr || !to_expr) {
+    parser_set_error(parser,
+                     !from_expr ? "A 'rewrite' rule needs a 'from' clause: "
+                                  "the expression it matches"
+                                : "A 'rewrite' rule needs a 'to' clause: the "
+                                  "expression it replaces the match with");
+    parser_free_rewrite_parts(param_names, param_types, param_count,
+                              return_type, rule_name, from_expr, to_expr,
+                              where_expr);
+    return NULL;
+  }
+
+  ASTNode *from_decl = parser_make_rewrite_side(
+      IR_REWRITE_FROM_PREFIX, rule_name, param_names, param_types,
+      param_count, return_type, from_expr, location, IR_REWRITE_ROLE_FROM);
+  ASTNode *to_decl = from_decl ? parser_make_rewrite_side(
+      IR_REWRITE_TO_PREFIX, rule_name, param_names, param_types,
+      param_count, return_type, to_expr, location, IR_REWRITE_ROLE_TO)
+                               : NULL;
+  ASTNode *where_decl = NULL;
+  if (to_decl && where_expr) {
+    where_decl = parser_make_rewrite_side(
+        IR_REWRITE_WHERE_PREFIX, rule_name, param_names, param_types,
+        param_count, "bool", where_expr, location, IR_REWRITE_ROLE_WHERE);
+  }
+  int built = from_decl && to_decl && (where_decl || !where_expr);
+  parser_free_rewrite_parts(param_names, param_types, param_count,
+                            return_type, rule_name,
+                            from_decl ? NULL : from_expr,
+                            to_decl ? NULL : to_expr,
+                            (where_decl || !where_expr) ? NULL : where_expr);
+  if (!built) {
+    ast_destroy_node(from_decl);
+    ast_destroy_node(to_decl);
+    ast_destroy_node(where_decl);
+    parser_set_error(parser, "Out of memory while building a 'rewrite' rule");
+    return NULL;
+  }
+  parser->extra_declarations[0] = to_decl;
+  parser->extra_declaration_count = 1;
+  if (where_decl) {
+    parser->extra_declarations[1] = where_decl;
+    parser->extra_declaration_count = 2;
+  }
+  return from_decl;
+}
+
 ASTNode *parser_parse_declaration(Parser *parser) {
   if (!parser)
     return NULL;
@@ -1069,6 +1358,9 @@ ASTNode *parser_parse_declaration(Parser *parser) {
    * declarations, and its expansions are spliced into the enclosing module. */
   if (parser_at_contextual_keyword(parser, "comptime", TOKEN_FOR)) {
     return parser_parse_comptime_for(parser, 1);
+  }
+  if (parser_at_contextual_keyword(parser, "rewrite", TOKEN_IDENTIFIER)) {
+    return parser_parse_rewrite_declaration(parser);
   }
 
   if (parser->current_token.type == TOKEN_AT) {

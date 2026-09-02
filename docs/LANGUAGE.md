@@ -33,6 +33,7 @@ frontend, see [Writing a frontend](embedding.md).
 14. [Compile-time execution](testing.md)
 15. [C interoperability](c-interop.md)
 16. [Runtime model](runtime-model.md)
+17. [Rewrite rules](rewrite-rules.md)
 
 ## Beyond the CPU
 

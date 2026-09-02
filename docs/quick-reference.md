@@ -403,6 +403,20 @@ comptime for f in typeof(Point).fields {
 
 `Field` has `.name`, `.type`, `.offset`, and `.index`.
 
+## Rewrite rules
+
+```mettle
+rewrite rem_pow2(x: uint64, m: uint64) -> uint64 {
+  from x % m;
+  to x & (m - 1);
+  where m > 0 && (m & (m - 1)) == 0;
+}
+```
+
+The compiler runs both sides on generated inputs before using the rule, and
+refuses a rule whose sides disagree, naming the input. `--explain` reports
+where each rule fired.
+
 ## Common flags
 
 ```bash

@@ -4952,6 +4952,9 @@ static int compile_optimize_ir(IRProgram *ir_program, ASTNode *ast_program,
       options->emit_ptx || options->emit_spirv;
   int opt_ok = ir_optimize_program(ir_program, &ir_optimize_options);
   free(global_consts);
+  if (opt_ok) {
+    ir_program_drop_rewrite_rules(ir_program);
+  }
   /* --safe describes a stack local at function entry, which outlives the block
    * the declaration sits in. The optimizer is free to fold that block away, so
    * retire the notes it left addressing locals that are no longer declared. */
@@ -5073,6 +5076,7 @@ static int compile_run_comptime(IRProgram *ir_program, ASTNode *program,
   if (options->optimize && !compile_optimize_ir(ir_program, program, options)) {
     return 1;
   }
+  ir_program_drop_rewrite_rules(ir_program);
   if (options->test_mode) {
     return ir_comptime_run_tests(ir_program, error_reporter, input_filename,
                                  options->test_filter);
@@ -5232,6 +5236,7 @@ static int compile_emit_arm64(IRProgram *ir_program, ASTNode *program,
   if (options->optimize && !compile_optimize_ir(ir_program, program, options)) {
     return 1;
   }
+  ir_program_drop_rewrite_rules(ir_program);
   arm64_emit_init(&ae);
   ok = arm64_ir_encode_program(&ae, ir_program, "main", &arm64_data,
                                &arm64_data_len) &&
@@ -5824,6 +5829,7 @@ int compile_file(const char *input_filename, const char *output_filename,
      * the markers so they never reach codegen. */
     ir_note_simd_contracts_unverified(ir_program);
   }
+  ir_program_drop_rewrite_rules(ir_program);
 
   /* And again after the optimizer, so a helper the inliner absorbed into its
    * only caller is swept as well. */

@@ -73,6 +73,8 @@ static const IROptNamedPass g_ir_pre_inline_canonical[] = {
  * a walking pointer, after which the extremum diamond indexes off something
  * no longer recognizable as the loop counter. */
 static const IROptNamedPass g_ir_pre_inline_recognizers[] = {
+    {"user_rewrite", ir_user_rewrite_pass,
+     {IR_OPT_REQUIRE_NONE, IR_OPT_REQUIRE_NONE}},
     {"simd_minmax_i32", ir_simd_minmax_i32_pass, IR_GATE_LOOP_LOAD},
     {"prefix_sum_i32", ir_prefix_sum_i32_pass, IR_GATE_LOOP_LOAD},
     {"induction_pointer", ir_pointer_induction_pass, IR_GATE_LOOP},
@@ -207,6 +209,7 @@ static const IROptScheduledPass g_ir_fixpoint_passes[] = {
                          IR_OPT_LABEL_JUMP),
     IR_OPT_PASS_ALWAYS(COPY_AND_CONSTANT_PROPAGATION,
                        ir_copy_and_constant_propagation_pass),
+    IR_OPT_PASS_ALWAYS(USER_REWRITE, ir_user_rewrite_pass),
     IR_OPT_PASS_ALWAYS(FUSE_TENSOR_MMA_CHAINS,
                        ir_fuse_tensor_mma_chains_pass),
     IR_OPT_PASS_ALWAYS(FUSE_ROTATE_ADD, ir_fuse_rotate_add_pass),
@@ -703,6 +706,9 @@ static int ir_run_program_stage_for_each_function(
   for (size_t i = 0; i < program->function_count; i++) {
     IRFunction *function = program->functions[i];
     double began = report ? mettle_now_ms() : 0.0;
+    if (function && function->rewrite_role) {
+      continue;
+    }
     ir_set_current_function_context(function);
     if (!run(function)) {
       return 0;
@@ -868,6 +874,12 @@ int ir_optimize_program_pipeline(IRProgram *program,
   /* hoist_global_bases declares a pointer local, which the backend resolves by
    * name; a program whose source never spelled one would have no such type. */
   ir_program_register_scalar_pointer_types(program);
+
+  if (!ir_user_rewrite_begin(program)) {
+    ir_verify_end_program();
+    ir_function_index_reset();
+    return 0;
+  }
 
   /* Fold never-written global integer vars to their initializer constants
    * first, so every later pass (strength reduction, vectorizers, TRE) sees
@@ -1041,6 +1053,7 @@ int ir_optimize_program_pipeline(IRProgram *program,
     contracts_ok &= ir_inline_enforce_contracts(program);
   }
   contracts_ok &= ir_enforce_noalloc_contracts(program);
+  contracts_ok &= ir_user_rewrite_end(program);
 
   /* --explain: every inline that happened was recorded as it happened; record
    * each surviving call with the reason it was refused, then print the whole

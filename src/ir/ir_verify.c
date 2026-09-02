@@ -664,11 +664,18 @@ static const char *irv_find_function_named(const IRProgram *program,
   return NULL;
 }
 
+static const double IRV_FLOAT_PROBES[] = {0.0,  -0.0, -1.0, 1e-30,
+                                          3.0,  -2.5, 1e10, 0.5,
+                                          -7.0, 65536.0};
+#define IRV_FLOAT_PROBE_COUNT \
+  ((int)(sizeof(IRV_FLOAT_PROBES) / sizeof(IRV_FLOAT_PROBES[0])))
+
 static int irv_setup_machine(IRInterpMachine *machine, IRFunction *shape,
                              const IRProgram *program,
                              const IRVParamInfo *params, size_t param_count,
                              int run, IRInterpValue *args,
-                             const long long *harvested_value) {
+                             const long long *harvested_values,
+                             int probe_ordinal) {
   (void)shape;
   for (size_t p = 0; p < param_count; p++) {
     switch (params[p].kind) {
@@ -676,13 +683,16 @@ static int irv_setup_machine(IRInterpMachine *machine, IRFunction *shape,
       /* On a harvested run every integer parameter carries the boundary
        * value: which parameter the comparison reads is not recorded, so
        * setting all of them is what reaches it. */
-      args[p].i = harvested_value ? *harvested_value : irv_int_arg(run, p);
+      args[p].i = harvested_values ? harvested_values[p] : irv_int_arg(run, p);
       args[p].f = 0;
       args[p].is_float = 0;
       break;
     case IRV_PARAM_FLOAT:
       args[p].i = 0;
-      args[p].f = irv_float_arg(run, p);
+      args[p].f = probe_ordinal >= 0
+                      ? IRV_FLOAT_PROBES[(probe_ordinal + (int)p) %
+                                         IRV_FLOAT_PROBE_COUNT]
+                      : irv_float_arg(run, p);
       args[p].is_float = 1;
       break;
     case IRV_PARAM_CSTRING: {
@@ -1266,11 +1276,83 @@ typedef struct {
  * Bounded on purpose: this is differential testing, and its cost is paid on
  * every check that uses it. */
 #define IRV_MAX_HARVESTED 6
+#define IRV_MAX_HARVEST_VALUES 48
 
 typedef struct {
-  long long values[IRV_MAX_HARVESTED * 2];
+  long long values[IRV_MAX_HARVEST_VALUES];
   int count;
+  int probe_start;
+  int cross_base;
+  int cross_count;
 } IRVHarvest;
+
+#define IRV_CROSS_MAX_INT_PARAMS 3
+
+static int irv_harvest_extra_runs(const IRVHarvest *harvest) {
+  return harvest ? harvest->count + harvest->cross_count : 0;
+}
+
+static void irv_harvest_plan_cross(IRVHarvest *harvest,
+                                   const IRVParamInfo *params,
+                                   size_t param_count) {
+  int n = harvest->count - harvest->probe_start;
+  int int_params = 0;
+  harvest->cross_count = 0;
+  for (size_t p = 0; p < param_count; p++) {
+    if (params[p].kind == IRV_PARAM_INT) {
+      int_params++;
+    }
+  }
+  if (n <= 0 || harvest->cross_base <= 0 || int_params < 2 ||
+      int_params > IRV_CROSS_MAX_INT_PARAMS) {
+    return;
+  }
+  int base = harvest->cross_base < n ? harvest->cross_base : n;
+  int total = 1;
+  for (int i = 0; i < int_params; i++) {
+    total *= base;
+  }
+  harvest->cross_base = base;
+  harvest->cross_count = total;
+}
+
+static void irv_harvest_run_values(const IRVHarvest *harvest, int extra_run,
+                                   const IRVParamInfo *params,
+                                   size_t param_count, long long *out,
+                                   int *probe_ordinal) {
+  int n = harvest->count - harvest->probe_start;
+  *probe_ordinal = -1;
+  if (extra_run < harvest->probe_start || n <= 0) {
+    for (size_t p = 0; p < param_count; p++) {
+      out[p] = harvest->values[extra_run];
+    }
+    return;
+  }
+  int k = extra_run - harvest->probe_start;
+  if (k < n) {
+    *probe_ordinal = k;
+    for (size_t p = 0; p < param_count; p++) {
+      out[p] = harvest->values[harvest->probe_start + (k + (int)p) % n];
+    }
+    return;
+  }
+  k -= n;
+  *probe_ordinal = k;
+  int base = harvest->cross_base;
+  int digit = 0;
+  for (size_t p = 0; p < param_count; p++) {
+    if (params[p].kind != IRV_PARAM_INT) {
+      out[p] = 0;
+      continue;
+    }
+    int stride = 1;
+    for (int d = 0; d < digit; d++) {
+      stride *= base;
+    }
+    out[p] = harvest->values[harvest->probe_start + (k / stride) % base];
+    digit++;
+  }
+}
 
 static void irv_harvest_push(IRVHarvest *h, long long v) {
   if (h->count >= (int)(sizeof(h->values) / sizeof(h->values[0]))) {
@@ -1323,7 +1405,9 @@ static IRVCheckOutcome irv_check_function_ex(IRProgram *program,
                                              const IRVerifySnapshot *snapshot,
                                              IRVCheckResult *result,
                                              const IRVHarvest *harvest,
-                                             int elem_bytes);
+                                             int elem_bytes,
+                                             IRFunction *guard,
+                                             int *guard_hits);
 
 static IRVCheckOutcome irv_check_function(IRProgram *program,
                                           IRFunction *function,
@@ -1331,7 +1415,29 @@ static IRVCheckOutcome irv_check_function(IRProgram *program,
                                           IRVCheckResult *result,
                                           int elem_bytes) {
   return irv_check_function_ex(program, function, snapshot, result, NULL,
-                               elem_bytes);
+                               elem_bytes, NULL, NULL);
+}
+
+static int irv_guard_admits(IRProgram *program, IRFunction *guard,
+                            const IRVParamInfo *params, size_t param_count,
+                            int shape_run, const long long *boundary,
+                            int probe_ordinal) {
+  IRInterpMachine *machine = ir_interp_create(program);
+  IRInterpValue args[IRV_MAX_PARAMS] = {{0}};
+  IRInterpValue verdict = {0, 0, 0, 0};
+  int admits = 0;
+  if (!machine) {
+    return 0;
+  }
+  if (irv_setup_machine(machine, guard, program, params, param_count,
+                        shape_run, args, boundary, probe_ordinal) &&
+      ir_interp_run(machine, guard, args, param_count, &verdict,
+                    IRV_FUEL_PER_RUN) == IR_INTERP_OK &&
+      !verdict.undefined) {
+    admits = verdict.is_float ? (verdict.f != 0.0) : (verdict.i != 0);
+  }
+  ir_interp_destroy(machine);
+  return admits;
 }
 
 static IRVCheckOutcome irv_check_function_ex(IRProgram *program,
@@ -1339,11 +1445,16 @@ static IRVCheckOutcome irv_check_function_ex(IRProgram *program,
                                           const IRVerifySnapshot *snapshot,
                                           IRVCheckResult *result,
                                           const IRVHarvest *harvest,
-                                          int elem_bytes) {
+                                          int elem_bytes,
+                                          IRFunction *guard,
+                                          int *guard_hits) {
   result->why[0] = '\0';
   result->cex[0] = '\0';
   result->skip_reason[0] = '\0';
   result->run = -1;
+  if (guard_hits) {
+    *guard_hits = 0;
+  }
 
   /* Classify parameters; bail early on unverifiable signatures. */
   size_t param_count = function->parameter_count;
@@ -1380,7 +1491,7 @@ static IRVCheckOutcome irv_check_function_ex(IRProgram *program,
 
   int usable_inputs = 0;
   int stats = irv_stats_enabled();
-  const int harvested = harvest ? harvest->count : 0;
+  const int harvested = irv_harvest_extra_runs(harvest);
   char last_unusable[128] = "";
   for (int run = 0; run < IRV_INPUT_RUNS + harvested; run++) {
     double t0 = stats ? irv_now_ms() : 0.0;
@@ -1397,13 +1508,32 @@ static IRVCheckOutcome irv_check_function_ex(IRProgram *program,
     IRInterpValue args_after[IRV_MAX_PARAMS] = {{0}};
     /* Runs past the fixed table carry a harvested boundary value; the buffer
      * shape stays on the table's cycle so lengths remain in range. */
-    const long long *boundary =
-        (run >= IRV_INPUT_RUNS) ? &harvest->values[run - IRV_INPUT_RUNS] : NULL;
+    long long boundary_values[IRV_MAX_PARAMS];
+    const long long *boundary = NULL;
+    int probe_ordinal = -1;
+    if (run >= IRV_INPUT_RUNS) {
+      irv_harvest_run_values(harvest, run - IRV_INPUT_RUNS, params,
+                             param_count, boundary_values, &probe_ordinal);
+      boundary = boundary_values;
+    }
     const int shape_run = (run >= IRV_INPUT_RUNS) ? 0 : run;
+    if (guard) {
+      if (!irv_guard_admits(program, guard, params, param_count, shape_run,
+                            boundary, probe_ordinal)) {
+        ir_interp_destroy(machine_before);
+        ir_interp_destroy(machine_after);
+        continue;
+      }
+      if (guard_hits) {
+        (*guard_hits)++;
+      }
+    }
     if (!irv_setup_machine(machine_before, function, program, params,
-                           param_count, shape_run, args_before, boundary) ||
+                           param_count, shape_run, args_before, boundary,
+                           probe_ordinal) ||
         !irv_setup_machine(machine_after, function, program, params,
-                           param_count, shape_run, args_after, boundary)) {
+                           param_count, shape_run, args_after, boundary,
+                           probe_ordinal)) {
       ir_interp_destroy(machine_before);
       ir_interp_destroy(machine_after);
       continue;
@@ -1518,6 +1648,11 @@ static IRVCheckOutcome irv_check_function_ex(IRProgram *program,
   }
 
   if (usable_inputs == 0) {
+    if (guard && guard_hits && *guard_hits == 0) {
+      snprintf(result->skip_reason, sizeof(result->skip_reason),
+               "no generated input satisfied the guard");
+      return IRV_CHECK_NO_INPUT;
+    }
     if (last_unusable[0]) {
       snprintf(result->skip_reason, sizeof(result->skip_reason),
                "no executable inputs (%s)", last_unusable);
@@ -1590,6 +1725,29 @@ IRVerifyRewriteVerdict ir_verify_check_rewrite(
     IRProgram *program, IRFunction *function, const IRVerifySnapshot *snapshot,
     char *why, size_t why_capacity, char *counterexample, size_t cex_capacity,
     char *skip_reason, size_t skip_capacity) {
+  return ir_verify_check_rewrite_guarded(
+      program, function, snapshot, NULL, NULL, why, why_capacity,
+      counterexample, cex_capacity, skip_reason, skip_capacity);
+}
+
+IRVerifyRewriteVerdict ir_verify_check_rewrite_guarded(
+    IRProgram *program, IRFunction *function, const IRVerifySnapshot *snapshot,
+    IRFunction *guard, int *guard_hits, char *why, size_t why_capacity,
+    char *counterexample, size_t cex_capacity, char *skip_reason,
+    size_t skip_capacity) {
+  return ir_verify_check_rewrite_probed(
+      program, function, snapshot, guard, guard_hits, NULL, 0, why,
+      why_capacity, counterexample, cex_capacity, skip_reason, skip_capacity);
+}
+
+IRVerifyRewriteVerdict ir_verify_check_rewrite_probed(
+    IRProgram *program, IRFunction *function, const IRVerifySnapshot *snapshot,
+    IRFunction *guard, int *guard_hits, const long long *probes,
+    int probe_count, char *why, size_t why_capacity, char *counterexample,
+    size_t cex_capacity, char *skip_reason, size_t skip_capacity) {
+  if (guard_hits) {
+    *guard_hits = 0;
+  }
   if (why && why_capacity) {
     why[0] = '\0';
   }
@@ -1618,11 +1776,27 @@ IRVerifyRewriteVerdict ir_verify_check_rewrite(
                      &harvest, &distinct);
   irv_harvest_stream(snapshot->instructions, snapshot->instruction_count,
                      &harvest, &distinct);
-  g_last_input_runs = IRV_INPUT_RUNS + harvest.count;
+  harvest.probe_start = harvest.count;
+  for (int i = 0; i < probe_count && probes; i++) {
+    if (harvest.count < IRV_MAX_HARVEST_VALUES) {
+      harvest.values[harvest.count++] = probes[i];
+    }
+  }
+  if (probe_count > 0 && function->parameter_count <= IRV_MAX_PARAMS) {
+    IRVParamInfo params[IRV_MAX_PARAMS];
+    for (size_t i = 0; i < function->parameter_count; i++) {
+      params[i] = irv_classify_param(program, function->parameter_types
+                                                  ? function->parameter_types[i]
+                                                  : NULL);
+    }
+    harvest.cross_base = 12;
+    irv_harvest_plan_cross(&harvest, params, function->parameter_count);
+  }
+  g_last_input_runs = IRV_INPUT_RUNS + irv_harvest_extra_runs(&harvest);
 
   IRVCheckResult result;
   switch (irv_check_function_ex(program, function, snapshot, &result, &harvest,
-                                0)) {
+                                0, guard, guard_hits)) {
   case IRV_CHECK_DIVERGED:
     if (why && why_capacity) {
       snprintf(why, why_capacity, "%s", result.why);

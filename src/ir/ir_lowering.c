@@ -198,6 +198,7 @@ IRFunction *ir_lower_function(IRLoweringContext *context,
   function->is_pure = function_data->is_pure;
   function->is_noalloc = function_data->is_noalloc;
   function->is_test = function_data->is_test;
+  function->rewrite_role = function_data->rewrite_role;
   function->is_kernel = function_data->is_kernel;
   function->kernel_block[0] = function_data->kernel_block[0];
   function->kernel_block[1] = function_data->kernel_block[1];

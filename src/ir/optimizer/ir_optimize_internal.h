@@ -407,7 +407,8 @@ typedef struct {
   X(SIMD_SLP_MAC_I8, "simd_slp_mac_i8")                                      \
   X(SIMD_INSERTION_SORT_I32, "simd_insertion_sort_i32")                      \
   X(SROA, "sroa")                                                             \
-  X(EGRAPH_SIMPLIFY, "egraph_simplify")
+  X(EGRAPH_SIMPLIFY, "egraph_simplify")                                       \
+  X(USER_REWRITE, "user_rewrite")
 
 typedef enum {
 #define IR_OPT_PASS_ENUM(id, name) IR_OPT_PASS_##id,
@@ -768,6 +769,9 @@ int ir_inline_enforce_contracts(IRProgram *program);
 /* `@noalloc`: transitive allocation-freedom proof per contract function
  * (ir_optimize_contracts.c). Returns 1 when all contracts held. */
 int ir_enforce_noalloc_contracts(IRProgram *program);
+int ir_user_rewrite_begin(IRProgram *program);
+int ir_user_rewrite_pass(IRFunction *function, int *changed);
+int ir_user_rewrite_end(IRProgram *program);
 /* --simd-report: emit a note for every `@simd` loop (vectorized or not). */
 void ir_optimize_set_simd_report(int enabled);
 /* --explain: optimization-decision remarks (state and report rendering live in

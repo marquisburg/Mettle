@@ -1427,7 +1427,7 @@ void ir_inline_explain_report_remaining(IRProgram *program) {
 
   for (size_t f = 0; f < program->function_count; f++) {
     IRFunction *function = program->functions[f];
-    if (!function) {
+    if (!function || function->rewrite_role) {
       continue;
     }
     for (size_t i = 0; i < function->instruction_count; i++) {
@@ -1671,6 +1671,9 @@ int ir_inline_small_functions_pass(IRProgram *program, int *changed) {
     int round_changed = 0;
 
     for (size_t i = 0; i < program->function_count; i++) {
+      if (program->functions[i] && program->functions[i]->rewrite_role) {
+        continue;
+      }
       if (!ir_inline_calls_in_function(program, program->functions[i],
                                        &inline_counter, &round_changed)) {
         return 0;

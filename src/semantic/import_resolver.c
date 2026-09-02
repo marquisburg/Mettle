@@ -2529,7 +2529,8 @@ static int is_declaration_exported(ASTNode *decl) {
     return 0;
 
   if (decl->type == AST_FUNCTION_DECLARATION) {
-    return ((FunctionDeclaration *)decl->data)->is_exported;
+    FunctionDeclaration *fd = (FunctionDeclaration *)decl->data;
+    return fd->is_exported || fd->rewrite_role;
   }
   if (decl->type == AST_STRUCT_DECLARATION) {
     return ((StructDeclaration *)decl->data)->is_exported;

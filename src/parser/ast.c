@@ -167,6 +167,7 @@ static ASTNode *ast_clone_method_declaration(ASTNode *clone, const ASTNode *node
   dst->is_swappable = src->is_swappable;
   dst->is_naked = src->is_naked;
   dst->is_interrupt = src->is_interrupt;
+  dst->rewrite_role = src->rewrite_role;
   dst->is_variadic = src->is_variadic;
   dst->simd_mode = src->simd_mode;
   dst->captured_count = src->captured_count;
@@ -1760,6 +1761,7 @@ ASTNode *ast_create_function_declaration(const char *name, char **param_names,
   func_decl->is_swappable = 0;
   func_decl->is_naked = 0;
   func_decl->is_interrupt = 0;
+  func_decl->rewrite_role = 0;
   func_decl->is_variadic = 0;
   func_decl->simd_mode = SIMD_ATTR_NONE;
   func_decl->captured_names = NULL;

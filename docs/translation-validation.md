@@ -126,3 +126,5 @@ culprit.
 - [Compile-time execution](testing.md)
 - [Compilation](compilation.md)
 - [ML-driven IR optimization](ml-opt.md)
+- [Rewrite rules](rewrite-rules.md), which put the same check behind
+  identities you write yourself

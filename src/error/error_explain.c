@@ -792,6 +792,52 @@ static const DecisionDoc DECISIONS[] = {
      "\n"
      "Worth a glance in a benchmark. A loop that was meant to measure\n"
      "something and got eliminated measures nothing.\n"},
+    {"rewrite-applied", DECISION_APPLIED,
+     "An expression was rewritten by a `rewrite` rule",
+     "The expression had the shape of a rule's `from` side, the rule's\n"
+     "`where` guard (if any) held on the constants at this site, and the\n"
+     "expression became the rule's `to` side. The function was then executed\n"
+     "before and after the change on generated inputs, and only a match in\n"
+     "every observation lets the rewrite stand.\n"},
+    {"rewrite-rule-checked", DECISION_APPLIED,
+     "A `rewrite` rule's two sides were shown to agree",
+     "Before any rule is applied, its `from` and `to` sides are executed in\n"
+     "the compile-time interpreter on generated inputs: the fixed table the\n"
+     "translation validator uses, the constants the rule itself compares\n"
+     "against, a set of awkward integers (negative, one past each power of\n"
+     "two, the extremes of every width), and, for rules with two or three\n"
+     "integer parameters, every combination of those. A rule with a `where`\n"
+     "clause is checked on the inputs the clause admits, and the remark says\n"
+     "how many that was. Disagreement on any input is a compile error with\n"
+     "the input printed.\n"},
+    {"rewrite-rule-applied", DECISION_APPLIED,
+     "How many expressions a `rewrite` rule rewrote",
+     "The count over the whole program, so a rule written for a hot loop can\n"
+     "be seen to have reached it.\n"},
+    {"rewrite-rule-unused", DECISION_VECTOR_REFUSAL,
+     "A `rewrite` rule matched nothing",
+     "No expression had the shape of the rule's `from` side at any point the\n"
+     "compiler looked: before inlining, when calls are still calls, and after\n"
+     "it, when arithmetic has been folded and propagated. The rule costs\n"
+     "nothing, but it is doing nothing.\n"
+     "\n"
+     "The usual causes: the rule's parameter types differ from the code's (a\n"
+     "rule over int64 does not match int32 arithmetic), or the compiler's own\n"
+     "folding reached the expression first.\n"},
+    {"rewrite-rule-guard-undecided", DECISION_VECTOR_REFUSAL,
+     "A `rewrite` rule matched, but its guard needed a runtime value",
+     "A `where` clause is evaluated at compile time, on the constants bound at\n"
+     "the match site. Every match bound a parameter the guard reads to a\n"
+     "value only known at run time, so the guard could not be decided and the\n"
+     "rule did not apply.\n"
+     "\n"
+     "Fix: if the rule holds for every value, drop the guard. If it does not,\n"
+     "the guard is doing its job, and only sites with constant arguments\n"
+     "qualify.\n"},
+    {"rewrite-rule-guard-false", DECISION_VECTOR_REFUSAL,
+     "A `rewrite` rule matched, but its guard was false",
+     "Every match bound constants on which the `where` clause evaluated to\n"
+     "false. The rule declined correctly; nothing to change.\n"},
     {"inlined", DECISION_APPLIED,
      "The call was inlined",
      "The callee's body was copied into the caller and the call is gone. This\n"

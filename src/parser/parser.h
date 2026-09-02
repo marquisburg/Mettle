@@ -56,6 +56,8 @@ typedef struct {
    * a frame in the recursive descent, so without a ceiling deep enough input
    * exhausts the stack and the process dies with no diagnostic at all. */
   int expression_depth;
+  ASTNode *extra_declarations[2];
+  size_t extra_declaration_count;
 } Parser;
 
 /* Nesting levels one expression may carry. Overflow on a 1 MB stack was

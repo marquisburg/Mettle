@@ -296,6 +296,25 @@ only checked with -O/--release
 [Compilation](compilation.md) covers the flags, and
 [`--explain`](compilation.md) reports what each decision came to.
 
+## Rewrite rules
+
+A `rewrite` declaration gives the optimizer an identity: an expression to
+look for, the expression to put in its place, and an optional `where` that
+narrows it to the arguments on which it holds.
+
+```mettle
+rewrite twice_plus(a: int64) -> int64 {
+    from a + a;
+    to a * 2;
+}
+```
+
+The compiler runs both sides on generated inputs before it uses the rule, and
+a rule whose sides disagree is a compile error naming the input. Every
+function the rule changes is checked the same way. [Rewrite
+rules](rewrite-rules.md) covers what a rule can say and how the report
+accounts for it.
+
 ## Imports and visibility
 
 `import "std/io";` brings a module's exported names into the file.

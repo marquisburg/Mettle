@@ -1,0 +1,8 @@
+rewrite anything(x: int64) -> int64 {
+    from x;
+    to x + 0;
+}
+
+fn main() -> int64 {
+    return 0;
+}

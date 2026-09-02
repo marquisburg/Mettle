@@ -1,0 +1,9 @@
+rewrite scale(x: int64, k: int64) -> int64 {
+    from x + x;
+    to x * k;
+}
+
+fn main() -> int64 {
+    var a: int64 = 4;
+    return a + a;
+}

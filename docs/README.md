@@ -50,6 +50,8 @@ frontend can drive instead. The documentation is organized the same way.
 - [Profile-guided optimization](pgo.md): `--pgo`, with no training run.
 - [Translation validation](translation-validation.md): `--verify`, which
   catches the optimizer's own bugs.
+- [Rewrite rules](rewrite-rules.md): `rewrite`, identities from your own code
+  that the compiler proves, applies, and checks.
 - [ML-driven IR optimization](ml-opt.md): `--ml-opt` and its validation gate.
 - [The --explain-json schema](explain-json.md): the machine-readable
   optimization report.

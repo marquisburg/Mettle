@@ -1,0 +1,10 @@
+rewrite rem_pow2(x: int64, m: int64) -> int64 {
+    from x % m;
+    to x & (m - 1);
+    where m > 0 && (m & (m - 1)) == 0;
+}
+
+fn main() -> int64 {
+    var a: int64 = -15;
+    return a % 8;
+}

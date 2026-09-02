@@ -93,4 +93,26 @@ IRVerifyRewriteVerdict ir_verify_check_rewrite(
     char *why, size_t why_capacity, char *counterexample, size_t cex_capacity,
     char *skip_reason, size_t skip_capacity);
 
+/* The same check restricted to inputs on which `guard` (a function over the
+ * same parameters) returns nonzero. `guard_hits` receives how many of the
+ * generated input sets the guard admitted; zero admitted sets is reported as
+ * UNVERIFIABLE with a skip reason. */
+IRVerifyRewriteVerdict ir_verify_check_rewrite_guarded(
+    IRProgram *program, IRFunction *function, const IRVerifySnapshot *snapshot,
+    IRFunction *guard, int *guard_hits, char *why, size_t why_capacity,
+    char *counterexample, size_t cex_capacity, char *skip_reason,
+    size_t skip_capacity);
+
+/* As above, with extra integer probe values appended to the generated input
+ * sets: every integer parameter takes each probe in turn, then the probes are
+ * staggered across parameters, and float parameters cycle through a fixed
+ * table of awkward values on those runs. For small functions whose whole
+ * meaning is a few operations, where a boundary the fixed table never reaches
+ * is the whole question. */
+IRVerifyRewriteVerdict ir_verify_check_rewrite_probed(
+    IRProgram *program, IRFunction *function, const IRVerifySnapshot *snapshot,
+    IRFunction *guard, int *guard_hits, const long long *probes,
+    int probe_count, char *why, size_t why_capacity, char *counterexample,
+    size_t cex_capacity, char *skip_reason, size_t skip_capacity);
+
 #endif /* IR_VERIFY_H */

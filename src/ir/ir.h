@@ -35,6 +35,16 @@
 
 #define IR_SYSCALL_CALL_NAME "__mtl_syscall"
 
+enum {
+  IR_REWRITE_ROLE_NONE = 0,
+  IR_REWRITE_ROLE_FROM = 1,
+  IR_REWRITE_ROLE_TO = 2,
+  IR_REWRITE_ROLE_WHERE = 3
+};
+#define IR_REWRITE_FROM_PREFIX "__rewrite_from__"
+#define IR_REWRITE_TO_PREFIX "__rewrite_to__"
+#define IR_REWRITE_WHERE_PREFIX "__rewrite_where__"
+
 typedef enum {
   IR_OPERAND_NONE,
   IR_OPERAND_TEMP,
@@ -660,6 +670,7 @@ typedef struct {
    * auditing for dropped, duplicated or reordered volatile accesses. */
   int has_volatile_access;
   int is_kernel;          // GPU entry point; ordinary functions are not entries
+  int rewrite_role;
   /* `export fn`: visible outside this compilation. Two things follow. Its
    * object symbol stays global where an internal function's is local, and it
    * is reached under the platform's C ABI rather than Mettle's own internal
@@ -994,6 +1005,7 @@ const IRInstruction *ir_function_find_declaration(const IRFunction *function,
                                                  const char *symbol_name,
                                                  int symbols_only);
 int ir_program_eliminate_dead_functions(IRProgram *program, int keep_exports);
+int ir_program_drop_rewrite_rules(IRProgram *program);
 
 /* True when a module symbol's folded initializer image is nothing but zero
  * bytes and carries no relocations, so reserving the space costs the object

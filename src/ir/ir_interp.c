@@ -1732,6 +1732,46 @@ static int ii_cast(IRInterpMachine *machine, const IRInstruction *insn,
 
 /* ---------------- extern model ---------------- */
 
+static double ii_sqrt(double value) {
+  if (value <= 0.0) {
+    return value == 0.0 ? value : 0.0 / 0.0;
+  }
+  if (value != value || value > 1.7e308) {
+    return value;
+  }
+  double estimate = value >= 1.0 ? value : 1.0;
+  for (int i = 0; i < 64; i++) {
+    double next = 0.5 * (estimate + value / estimate);
+    if (next == estimate) {
+      break;
+    }
+    estimate = next;
+  }
+  return estimate;
+}
+
+static double ii_trunc(double value) {
+  if (value != value || value >= 9007199254740992.0 ||
+      value <= -9007199254740992.0) {
+    return value;
+  }
+  return (double)(long long)value;
+}
+
+static double ii_floor(double value) {
+  double t = ii_trunc(value);
+  return (t > value) ? t - 1.0 : t;
+}
+
+static double ii_ceil(double value) {
+  double t = ii_trunc(value);
+  return (t < value) ? t + 1.0 : t;
+}
+
+static double ii_round(double value) {
+  return value < 0.0 ? -ii_floor(-value + 0.5) : ii_floor(value + 0.5);
+}
+
 static int ii_extern_math(const char *name, const IRInterpValue *args,
                           size_t arg_count, IRInterpValue *out) {
   double x = 0.0;
@@ -1744,8 +1784,31 @@ static int ii_extern_math(const char *name, const IRInterpValue *args,
     y = args[1].is_float ? args[1].f : (double)args[1].i;
   }
   if (arg_count == 1) {
+    static const struct {
+      const char *name;
+      int single;
+      double (*fn)(double);
+    } unary[] = {
+        {"sqrt", 0, ii_sqrt},   {"floor", 0, ii_floor},  {"ceil", 0, ii_ceil},
+        {"trunc", 0, ii_trunc}, {"round", 0, ii_round},  {"floorf", 1, ii_floor},
+        {"ceilf", 1, ii_ceil},  {"truncf", 1, ii_trunc}, {"roundf", 1, ii_round},
+        {"log", 0, mt_log},     {"sin", 0, mt_sin},      {"cos", 0, mt_cos},
+    };
+    for (size_t i = 0; i < sizeof(unary) / sizeof(unary[0]); i++) {
+      if (strcmp(name, unary[i].name) == 0) {
+        double r = unary[i].single ? unary[i].fn((double)(float)x)
+                                   : unary[i].fn(x);
+        *out = ii_float_value(unary[i].single ? (double)(float)r : r);
+        return 1;
+      }
+    }
+    if (strcmp(name, "fabsf") == 0) {
+      float f = (float)x;
+      *out = ii_float_value((double)(f < 0.0f ? -f : f));
+      return 1;
+    }
     if (strcmp(name, "sqrtf") == 0) {
-      *out = ii_float_value((double)mt_sqrtf((float)x));
+      *out = ii_float_value((double)(float)ii_sqrt((double)(float)x));
       return 1;
     }
     if (strcmp(name, "expf") == 0) {
@@ -1784,6 +1847,29 @@ static int ii_extern_math(const char *name, const IRInterpValue *args,
   if (arg_count == 2 && strcmp(name, "powf") == 0) {
     *out = ii_float_value((double)(float)mt_pow((double)(float)x,
                                                 (double)(float)y));
+    return 1;
+  }
+  if (arg_count == 2 && strcmp(name, "pow") == 0) {
+    *out = ii_float_value(mt_pow(x, y));
+    return 1;
+  }
+  if (arg_count == 2 && (strcmp(name, "fmin") == 0 || strcmp(name, "fmax") == 0 ||
+                         strcmp(name, "fminf") == 0 ||
+                         strcmp(name, "fmaxf") == 0)) {
+    int single = name[strlen(name) - 1] == 'f';
+    double a = single ? (double)(float)x : x;
+    double b = single ? (double)(float)y : y;
+    double r = 0.0;
+    if (a != a) {
+      r = b;
+    } else if (b != b) {
+      r = a;
+    } else if (name[2] == 'i') {
+      r = a < b ? a : b;
+    } else {
+      r = a > b ? a : b;
+    }
+    *out = ii_float_value(r);
     return 1;
   }
   return 0;
