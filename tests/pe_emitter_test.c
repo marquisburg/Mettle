@@ -300,8 +300,7 @@ cleanup:
   return ok;
 }
 
-static int create_import_library(const char *path) {
-  FILE *file = NULL;
+static int create_import_library(const char *path) {  FILE *file = NULL;
   int ok = 0;
 
   if (!path) {
@@ -877,6 +876,136 @@ cleanup:
   return result;
 }
 
+static int create_dll_program_object(const char *path) {
+  BinaryEmitter *emitter = NULL;
+  size_t text = 0u;
+  size_t data = 0u;
+  static const unsigned char code[] = {0x31u, 0xC0u, 0xC3u};
+  static const unsigned char init_data[] = {0x29u, 0x00u, 0x00u, 0x00u};
+  int ok = 0;
+
+  emitter = binary_emitter_create(BINARY_TARGET_FORMAT_COFF_WIN64);
+  if (!emitter) {
+    return 0;
+  }
+
+  text = binary_emitter_get_or_create_section(emitter, ".text", BINARY_SECTION_TEXT,
+                                              0, 16u);
+  data = binary_emitter_get_or_create_section(emitter, ".data", BINARY_SECTION_DATA,
+                                              0, 4u);
+  if (text == (size_t)-1 || data == (size_t)-1 ||
+      !binary_emitter_append_bytes(emitter, text, code, sizeof(code), NULL) ||
+      !binary_emitter_append_bytes(emitter, data, init_data, sizeof(init_data),
+                                   NULL) ||
+      !binary_emitter_define_symbol(emitter, "dll_add", BINARY_SYMBOL_GLOBAL,
+                                    text, 0u, sizeof(code)) ||
+      !binary_emitter_define_symbol(emitter, "dll_value", BINARY_SYMBOL_GLOBAL,
+                                    data, 0u, sizeof(init_data))) {
+    goto cleanup;
+  }
+
+  ok = write_object(emitter, path);
+
+cleanup:
+  binary_emitter_destroy(emitter);
+  return ok;
+}
+
+static int verify_dll_pe_image(const char *dll_path) {
+  unsigned char *data = NULL;
+  size_t size = 0u;
+  uint32_t pe_offset = 0u;
+  uint16_t characteristics = 0u;
+  uint32_t entry_rva = 0u;
+  uint32_t export_rva = 0u;
+  uint32_t export_size = 0u;
+  int result = 1;
+
+  if (!read_file(dll_path, &data, &size)) {
+    return report_failure("Failed to read emitted DLL image", dll_path);
+  }
+  if (size < 0x200u || data[0] != 'M' || data[1] != 'Z') {
+    result = report_failure("Emitted DLL is not a valid DOS executable", dll_path);
+    goto cleanup;
+  }
+
+  pe_offset = test_read_u32(data + 0x3Cu);
+  if (pe_offset + 24u > size || memcmp(data + pe_offset, "PE\0\0", 4u) != 0) {
+    result = report_failure("Emitted DLL is missing the PE signature", dll_path);
+    goto cleanup;
+  }
+
+  characteristics = read_u16(data + pe_offset + 22u);
+  if ((characteristics & 0x2000u) == 0u) {
+    result = report_failure("PE headers did not mark the image as a DLL", dll_path);
+    goto cleanup;
+  }
+  if ((characteristics & 0x0002u) == 0u) {
+    result = report_failure("PE headers did not mark the DLL executable", dll_path);
+    goto cleanup;
+  }
+
+  entry_rva = test_read_u32(data + pe_offset + 40u);
+  if (entry_rva != 0u) {
+    result = report_failure("DLL image should have no entry point", dll_path);
+    goto cleanup;
+  }
+
+  export_rva = test_read_u32(data + pe_offset + 136u);
+  export_size = test_read_u32(data + pe_offset + 140u);
+  if (export_rva == 0u || export_size != 40u) {
+    result = report_failure("DLL export directory was not emitted", dll_path);
+    goto cleanup;
+  }
+  if (!contains_bytes(data, size, "dll_add") ||
+      !contains_bytes(data, size, "dll_value")) {
+    result = report_failure("DLL image is missing export names", dll_path);
+    goto cleanup;
+  }
+
+  result = 0;
+
+cleanup:
+  free(data);
+  return result;
+}
+
+static int expect_dll_pe_emission(const char *object_path, const char *dll_path) {
+  const char *object_paths[1] = {object_path};
+  LinkResolutionOptions resolution_options = {NULL, 16u, 1};
+  PeEmissionOptions emission_options;
+  LinkResolution *resolution = NULL;
+  char *error_message = NULL;
+  int result = 1;
+
+  memset(&emission_options, 0, sizeof(emission_options));
+  emission_options.produce_shared_library = 1;
+
+  if (!link_resolution_build(object_paths, 1u, &resolution_options, &resolution,
+                             &error_message)) {
+    result =
+        report_failure("DLL PE emission resolution failed", error_message);
+    goto cleanup;
+  }
+
+  if (!pe_emit_executable(resolution, dll_path, &emission_options,
+                          &error_message)) {
+    result = report_failure("DLL PE emission failed", error_message);
+    goto cleanup;
+  }
+
+  if (verify_dll_pe_image(dll_path) != 0) {
+    goto cleanup;
+  }
+
+  result = 0;
+
+cleanup:
+  free(error_message);
+  link_resolution_destroy(resolution);
+  return result;
+}
+
 int main(int argc, char **argv) {
   char *object_path = NULL;
   char *exe_path = NULL;
@@ -884,6 +1013,8 @@ int main(int argc, char **argv) {
   char *import_library_path = NULL;
   char *import_exe_path = NULL;
   char *dll_probe_exe_path = NULL;
+  char *dll_object_path = NULL;
+  char *dll_path = NULL;
   int result = 1;
 
   if (argc != 2) {
@@ -897,8 +1028,10 @@ int main(int argc, char **argv) {
   import_library_path = join_path(argv[1], "pe_import_kernel32.lib");
   import_exe_path = join_path(argv[1], "pe_import_output.exe");
   dll_probe_exe_path = join_path(argv[1], "pe_import_probe_output.exe");
+  dll_object_path = join_path(argv[1], "pe_dll_input.obj");
+  dll_path = join_path(argv[1], "pe_dll_output.dll");
   if (!object_path || !exe_path || !import_object_path || !import_library_path ||
-      !import_exe_path || !dll_probe_exe_path) {
+      !import_exe_path || !dll_probe_exe_path || !dll_object_path || !dll_path) {
     result = report_failure("Failed to allocate PE emitter test paths", NULL);
     goto cleanup;
   }
@@ -930,6 +1063,14 @@ int main(int argc, char **argv) {
                                    dll_probe_exe_path) != 0) {
     goto cleanup;
   }
+  if (!create_dll_program_object(dll_object_path)) {
+    result = report_failure("Failed to create DLL PE input object",
+                            dll_object_path);
+    goto cleanup;
+  }
+  if (expect_dll_pe_emission(dll_object_path, dll_path) != 0) {
+    goto cleanup;
+  }
 
   result = 0;
 
@@ -940,5 +1081,7 @@ cleanup:
   free(import_library_path);
   free(import_exe_path);
   free(dll_probe_exe_path);
+  free(dll_object_path);
+  free(dll_path);
   return result;
 }

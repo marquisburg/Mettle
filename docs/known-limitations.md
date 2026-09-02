@@ -161,9 +161,13 @@ is treated as an error.
 
 ## Platform
 
-Shared libraries are ELF-only. `-l`, `--shared` and `--export-dynamic` are
-rejected on Windows, where the DLL import probe covers the same ground. A
-shared object Mettle emits cannot reference imported data, and holds no
+Shared libraries are ELF `.so` and Windows DLL. On Windows `--build --shared`
+emits a DLL whose exports are the user globals (`export fn/var`; compiler-owned
+`mettle_*` tables stay private) with no entry point; `-l`, `--export-dynamic`,
+`--rpath` and `--dynamic-linker` stay ELF-only, and a DLL takes its libraries
+through `--link-arg`. A DLL must load at its preferred base (no `.reloc` is
+emitted yet) and ships no import library. A shared object Mettle emits cannot
+reference imported data, and holds no
 thread-local storage: its build of the runtime keeps `errno` per process. See
 [Shared libraries](shared-libraries.md).
 

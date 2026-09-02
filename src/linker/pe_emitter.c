@@ -35,6 +35,9 @@
 #ifndef IMAGE_FILE_LARGE_ADDRESS_AWARE
 #define IMAGE_FILE_LARGE_ADDRESS_AWARE 0x0020u
 #endif
+#ifndef IMAGE_FILE_DLL
+#define IMAGE_FILE_DLL 0x2000u
+#endif
 
 #ifndef IMAGE_SUBSYSTEM_WINDOWS_CUI
 #define IMAGE_SUBSYSTEM_WINDOWS_CUI 3u
@@ -69,9 +72,12 @@
 #define PE_DATA_DIRECTORY_COUNT 16u
 #define PE_OPTIONAL_HEADER64_SIZE 240u
 
+#define PE_DIRECTORY_EXPORT 0u
 #define PE_DIRECTORY_EXCEPTION 3u
 #define PE_DIRECTORY_IMPORT 1u
 #define PE_DIRECTORY_IAT 12u
+
+#define PE_EXPORT_DIRECTORY_SIZE 40u
 
 #define PE_IMPORT_DESCRIPTOR_SIZE 20u
 #define PE_IMPORT_THUNK_SIZE 8u
@@ -137,6 +143,22 @@ typedef struct {
   uint32_t iat_size;
   int has_imports;
 } PeImportPlan;
+
+typedef struct {
+  const LinkedSymbol **exports;
+  size_t *name_offsets;
+  size_t count;
+  size_t capacity;
+  char *dll_name;
+  size_t directory_offset;
+  size_t function_table_offset;
+  size_t name_table_offset;
+  size_t ordinal_table_offset;
+  size_t dll_name_offset;
+  uint32_t export_directory_rva;
+  uint32_t export_directory_size;
+  int has_exports;
+} PeExportPlan;
 
 static const ImportLibrarySymbol *
 pe_find_import_symbol(ImportLibrary **libraries, size_t library_count,
@@ -1369,6 +1391,301 @@ static int pe_finalize_imports(LinkResolution *resolution, PeImportPlan *plan,
   return 1;
 }
 
+static int pe_is_exportable_name(const char *name) {
+  if (!name || name[0] == '\0') {
+    return 0;
+  }
+  if (pe_is_imp_symbol_name(name)) {
+    return 0;
+  }
+  if (strcmp(name, "main") == 0 || strcmp(name, "mettle_start") == 0 ||
+      strcmp(name, "_start") == 0) {
+    return 0;
+  }
+  /* Compiler-owned tables (crash/debug/profile metadata) live in the user
+   * object so they resolve without a startup link, but they are not part of
+   * the DLL interface. Only `export fn/var` names cross it. */
+  if (strncmp(name, "mettle_", 7) == 0) {
+    return 0;
+  }
+  return 1;
+}
+
+static int pe_export_name_compare(const void *left, const void *right) {
+  const LinkedSymbol *const *left_symbol =
+      (const LinkedSymbol *const *)left;
+  const LinkedSymbol *const *right_symbol =
+      (const LinkedSymbol *const *)right;
+  const char *left_name =
+      *left_symbol && (*left_symbol)->name ? (*left_symbol)->name : "";
+  const char *right_name =
+      *right_symbol && (*right_symbol)->name ? (*right_symbol)->name : "";
+  return strcmp(left_name, right_name);
+}
+
+static void pe_export_plan_destroy(PeExportPlan *plan) {
+  if (!plan) {
+    return;
+  }
+  free(plan->exports);
+  free(plan->name_offsets);
+  free(plan->dll_name);
+  memset(plan, 0, sizeof(*plan));
+}
+
+static int pe_export_plan_reserve(PeExportPlan *plan, size_t minimum_count,
+                                  char **error_message_out) {
+  const LinkedSymbol **grown_exports = NULL;
+  size_t *grown_offsets = NULL;
+  size_t new_capacity = 0u;
+
+  if (!plan) {
+    return 0;
+  }
+  if (plan->capacity >= minimum_count) {
+    return 1;
+  }
+  new_capacity = plan->capacity ? plan->capacity : 16u;
+  while (new_capacity < minimum_count) {
+    new_capacity *= 2u;
+  }
+  grown_exports =
+      realloc(plan->exports, new_capacity * sizeof(*plan->exports));
+  if (!grown_exports) {
+    mettle_set_error(error_message_out,
+                 "Out of memory while growing PE export table");
+    return 0;
+  }
+  plan->exports = grown_exports;
+  grown_offsets =
+      realloc(plan->name_offsets, new_capacity * sizeof(*plan->name_offsets));
+  if (!grown_offsets) {
+    mettle_set_error(error_message_out,
+                 "Out of memory while growing PE export names");
+    return 0;
+  }
+  plan->name_offsets = grown_offsets;
+  memset(plan->exports + plan->capacity, 0,
+         (new_capacity - plan->capacity) * sizeof(*plan->exports));
+  memset(plan->name_offsets + plan->capacity, 0,
+         (new_capacity - plan->capacity) * sizeof(*plan->name_offsets));
+  plan->capacity = new_capacity;
+  return 1;
+}
+
+static const char *pe_output_basename(const char *path) {
+  const char *slash = NULL;
+  const char *back = NULL;
+  const char *base = NULL;
+
+  if (!path) {
+    return "output.dll";
+  }
+  slash = strrchr(path, '/');
+  back = strrchr(path, '\\');
+  base = slash;
+  if (!base || (back && back > base)) {
+    base = back;
+  }
+  if (base) {
+    base++;
+  } else {
+    base = path;
+  }
+  if (base[0] == '\0') {
+    return "output.dll";
+  }
+  return base;
+}
+
+static int pe_collect_exports(const LinkResolution *resolution,
+                              const char *output_path, const char *dll_name_opt,
+                              PeExportPlan *plan, char **error_message_out) {
+  size_t i = 0u;
+  const char *dll_name = NULL;
+
+  if (!resolution || !plan) {
+    return 0;
+  }
+  memset(plan, 0, sizeof(*plan));
+
+  for (i = 0u; i < resolution->symbol_count; i++) {
+    const LinkedSymbol *symbol = &resolution->symbols[i];
+
+    if (!symbol->is_defined || !symbol->is_external || !symbol->name ||
+        symbol->merged_section_index == LINKED_SECTION_INDEX_NONE) {
+      continue;
+    }
+    if (!pe_is_exportable_name(symbol->name)) {
+      continue;
+    }
+    if (symbol->defining_object_index < resolution->object_count &&
+        resolution->objects[symbol->defining_object_index]
+            .is_runtime_default) {
+      continue;
+    }
+    if (!pe_export_plan_reserve(plan, plan->count + 1u, error_message_out)) {
+      pe_export_plan_destroy(plan);
+      return 0;
+    }
+    plan->exports[plan->count++] = symbol;
+  }
+
+  if (plan->count == 0u) {
+    mettle_set_error(error_message_out,
+                 "DLL emission requires at least one exported symbol; mark "
+                 "functions with `export fn`");
+    return 0;
+  }
+
+  qsort(plan->exports, plan->count, sizeof(*plan->exports),
+        pe_export_name_compare);
+
+  if (dll_name_opt && dll_name_opt[0] != '\0') {
+    dll_name = dll_name_opt;
+  } else {
+    dll_name = pe_output_basename(output_path);
+  }
+  plan->dll_name = mettle_strdup(dll_name);
+  if (!plan->dll_name) {
+    mettle_set_error(error_message_out,
+                 "Out of memory while storing DLL export name");
+    pe_export_plan_destroy(plan);
+    return 0;
+  }
+  plan->has_exports = 1;
+  return 1;
+}
+
+static int pe_emit_export_storage(LinkResolution *resolution,
+                                  PeExportPlan *plan,
+                                  char **error_message_out) {
+  LinkedSection *rdata = NULL;
+  size_t i = 0u;
+
+  if (!resolution || !plan || !plan->has_exports) {
+    return 1;
+  }
+  if (plan->count == 0u || plan->count > UINT32_MAX) {
+    mettle_set_error(error_message_out, "Invalid PE export count");
+    return 0;
+  }
+
+  rdata = &resolution->sections[PE_SECTION_INDEX_RDATA];
+  if (!pe_section_align(rdata, 4u, error_message_out) ||
+      !pe_section_append_zeros(rdata, PE_EXPORT_DIRECTORY_SIZE,
+                               &plan->directory_offset, error_message_out) ||
+      !pe_section_append_zeros(rdata, plan->count * 4u,
+                               &plan->function_table_offset,
+                               error_message_out) ||
+      !pe_section_append_zeros(rdata, plan->count * 4u,
+                               &plan->name_table_offset, error_message_out)) {
+    return 0;
+  }
+  if (!pe_section_align(rdata, 2u, error_message_out) ||
+      !pe_section_append_zeros(rdata, plan->count * 2u,
+                               &plan->ordinal_table_offset,
+                               error_message_out)) {
+    return 0;
+  }
+  for (i = 0u; i < plan->count; i++) {
+    const char *name =
+        plan->exports[i] && plan->exports[i]->name ? plan->exports[i]->name
+                                                   : "";
+    if (!pe_section_append_bytes(rdata, name, strlen(name) + 1u,
+                                 &plan->name_offsets[i], error_message_out)) {
+      return 0;
+    }
+  }
+  if (!pe_section_append_bytes(rdata, plan->dll_name,
+                               strlen(plan->dll_name) + 1u,
+                               &plan->dll_name_offset, error_message_out)) {
+    return 0;
+  }
+  return 1;
+}
+
+static int pe_finalize_exports(LinkResolution *resolution, PeExportPlan *plan,
+                               const PeSectionLayout *layouts,
+                               size_t layout_count, uint64_t image_base,
+                               char **error_message_out) {
+  const PeSectionLayout *rdata_layout = NULL;
+  LinkedSection *rdata = NULL;
+  unsigned char *directory = NULL;
+  size_t i = 0u;
+
+  if (!plan || !plan->has_exports) {
+    return 1;
+  }
+  if (!resolution || !layouts) {
+    mettle_set_error(error_message_out,
+                 "Invalid layout while finalizing PE exports");
+    return 0;
+  }
+  rdata_layout = pe_find_layout(layouts, layout_count, PE_SECTION_INDEX_RDATA);
+  if (!rdata_layout) {
+    mettle_set_error(error_message_out,
+                 "DLL exports require an .rdata section");
+    return 0;
+  }
+  rdata = &resolution->sections[PE_SECTION_INDEX_RDATA];
+
+  for (i = 0u; i < plan->count; i++) {
+    const LinkedSymbol *symbol = plan->exports[i];
+    uint64_t function_va = 0u;
+    uint32_t function_rva = 0u;
+    uint32_t name_rva = 0u;
+
+    if (!symbol || !symbol->is_defined) {
+      mettle_set_error(error_message_out, "PE export went missing");
+      return 0;
+    }
+    if (symbol->virtual_address < image_base ||
+        symbol->virtual_address - image_base > UINT32_MAX) {
+      mettle_set_error(error_message_out,
+                   "Exported symbol '%s' is outside the PE image",
+                   symbol->name ? symbol->name : "<unnamed>");
+      return 0;
+    }
+    function_va = symbol->virtual_address;
+    function_rva = (uint32_t)(function_va - image_base);
+    name_rva = rdata_layout->virtual_address +
+               (uint32_t)plan->name_offsets[i];
+    linker_write_u32(rdata->data + plan->function_table_offset + (i * 4u),
+                     function_rva);
+    linker_write_u32(rdata->data + plan->name_table_offset + (i * 4u),
+                     name_rva);
+    rdata->data[plan->ordinal_table_offset + (i * 2u)] =
+        (unsigned char)(i & 0xFFu);
+    rdata->data[plan->ordinal_table_offset + (i * 2u) + 1u] =
+        (unsigned char)((i >> 8) & 0xFFu);
+  }
+
+  directory = rdata->data + plan->directory_offset;
+  linker_write_u32(directory, 0u);
+  linker_write_u32(directory + 4u, 0u);
+  directory[8] = 0u;
+  directory[9] = 0u;
+  directory[10] = 0u;
+  directory[11] = 0u;
+  linker_write_u32(directory + 12u, rdata_layout->virtual_address +
+                                        (uint32_t)plan->dll_name_offset);
+  linker_write_u32(directory + 16u, 1u);
+  linker_write_u32(directory + 20u, (uint32_t)plan->count);
+  linker_write_u32(directory + 24u, (uint32_t)plan->count);
+  linker_write_u32(directory + 28u, rdata_layout->virtual_address +
+                                        (uint32_t)plan->function_table_offset);
+  linker_write_u32(directory + 32u, rdata_layout->virtual_address +
+                                        (uint32_t)plan->name_table_offset);
+  linker_write_u32(directory + 36u, rdata_layout->virtual_address +
+                                        (uint32_t)plan->ordinal_table_offset);
+
+  plan->export_directory_rva =
+      rdata_layout->virtual_address + (uint32_t)plan->directory_offset;
+  plan->export_directory_size = PE_EXPORT_DIRECTORY_SIZE;
+  return 1;
+}
+
 static int pe_validate_unresolved_externals(const LinkResolution *resolution,
                                             char **error_message_out) {
   size_t i = 0u;
@@ -1421,6 +1738,8 @@ static int pe_write_headers(FILE *file, const PeSectionLayout *layouts,
                             uint32_t base_of_code, uint32_t entry_rva,
                             uint32_t section_alignment,
                             uint32_t file_alignment, uint16_t subsystem,
+                            int is_dll,
+                            uint32_t export_rva, uint32_t export_size,
                             uint32_t exception_rva, uint32_t exception_size,
                             uint32_t import_rva, uint32_t import_size,
                             uint32_t iat_rva, uint32_t iat_size,
@@ -1432,6 +1751,10 @@ static int pe_write_headers(FILE *file, const PeSectionLayout *layouts,
                              IMAGE_FILE_LARGE_ADDRESS_AWARE;
   size_t i = 0u;
   long header_end = 0;
+
+  if (is_dll) {
+    characteristics |= IMAGE_FILE_DLL;
+  }
 
   if (!file || !layouts) {
     mettle_set_error(error_message_out, "Invalid PE header state");
@@ -1471,7 +1794,10 @@ static int pe_write_headers(FILE *file, const PeSectionLayout *layouts,
     uint32_t directory_rva = 0u;
     uint32_t directory_size = 0u;
 
-    if (i == PE_DIRECTORY_EXCEPTION) {
+    if (i == PE_DIRECTORY_EXPORT) {
+      directory_rva = export_rva;
+      directory_size = export_size;
+    } else if (i == PE_DIRECTORY_EXCEPTION) {
       directory_rva = exception_rva;
       directory_size = exception_size;
     } else if (i == PE_DIRECTORY_IMPORT) {
@@ -1576,10 +1902,13 @@ int pe_emit_executable(LinkResolution *resolution, const char *output_path,
   ImportLibrary **libraries = NULL;
   size_t library_count = 0u;
   PeImportPlan import_plan;
+  PeExportPlan export_plan;
   uint64_t image_base = 0x140000000ull;
   uint32_t section_alignment = 0x1000u;
   uint32_t file_alignment = 0x200u;
   uint16_t subsystem = IMAGE_SUBSYSTEM_WINDOWS_CUI;
+  int is_dll = 0;
+  const char *dll_name_opt = NULL;
   uint32_t size_of_headers = 0u;
   uint32_t size_of_image = 0u;
   uint32_t size_of_code = 0u;
@@ -1593,6 +1922,7 @@ int pe_emit_executable(LinkResolution *resolution, const char *output_path,
   int ok = 0;
 
   memset(&import_plan, 0, sizeof(import_plan));
+  memset(&export_plan, 0, sizeof(export_plan));
 
   if (error_message_out) {
     free(*error_message_out);
@@ -1604,10 +1934,18 @@ int pe_emit_executable(LinkResolution *resolution, const char *output_path,
                  "A link resolution and output path are required");
     return 0;
   }
-  if (!resolution->entry_symbol || !resolution->entry_symbol->is_defined ||
-      resolution->entry_symbol->merged_section_index == LINKED_SECTION_INDEX_NONE) {
-    mettle_set_error(error_message_out, "PE emission requires a resolved entry point");
-    return 0;
+  if (options && options->produce_shared_library) {
+    is_dll = 1;
+    dll_name_opt = options->dll_name;
+  }
+  if (!is_dll) {
+    if (!resolution->entry_symbol || !resolution->entry_symbol->is_defined ||
+        resolution->entry_symbol->merged_section_index ==
+            LINKED_SECTION_INDEX_NONE) {
+      mettle_set_error(error_message_out,
+                   "PE emission requires a resolved entry point");
+      return 0;
+    }
   }
 
   if (options) {
@@ -1647,8 +1985,17 @@ int pe_emit_executable(LinkResolution *resolution, const char *output_path,
 
   if (!pe_build_import_plan(resolution, libraries, library_count, &import_plan,
                             error_message_out) ||
-      !pe_emit_import_storage(resolution, &import_plan, error_message_out) ||
-      !pe_validate_unresolved_externals(resolution, error_message_out) ||
+      !pe_emit_import_storage(resolution, &import_plan, error_message_out)) {
+    goto cleanup;
+  }
+  if (is_dll) {
+    if (!pe_collect_exports(resolution, output_path, dll_name_opt,
+                            &export_plan, error_message_out) ||
+        !pe_emit_export_storage(resolution, &export_plan, error_message_out)) {
+      goto cleanup;
+    }
+  }
+  if (!pe_validate_unresolved_externals(resolution, error_message_out) ||
       !pe_collect_sections(resolution, layouts, &layout_count,
                            error_message_out)) {
     goto cleanup;
@@ -1665,11 +2012,23 @@ int pe_emit_executable(LinkResolution *resolution, const char *output_path,
       !pe_apply_layout_to_resolution(resolution, layouts, layout_count, image_base,
                                      error_message_out) ||
       !pe_finalize_imports(resolution, &import_plan, layouts, layout_count,
+                           image_base, error_message_out) ||
+      !pe_finalize_exports(resolution, &export_plan, layouts, layout_count,
                            image_base, error_message_out)) {
     goto cleanup;
   }
 
-  entry_rva = (uint32_t)(resolution->entry_symbol->virtual_address - image_base);
+  if (!is_dll) {
+    entry_rva =
+        (uint32_t)(resolution->entry_symbol->virtual_address - image_base);
+  } else if (resolution->entry_symbol && resolution->entry_symbol->is_defined &&
+             resolution->entry_symbol->merged_section_index !=
+                 LINKED_SECTION_INDEX_NONE) {
+    entry_rva =
+        (uint32_t)(resolution->entry_symbol->virtual_address - image_base);
+  } else {
+    entry_rva = 0u;
+  }
   {
     const PeSectionLayout *exception_layout =
         pe_find_layout(layouts, layout_count, PE_SECTION_INDEX_PDATA);
@@ -1700,7 +2059,9 @@ int pe_emit_executable(LinkResolution *resolution, const char *output_path,
   if (!pe_write_headers(file, layouts, layout_count, image_base, size_of_headers,
                         size_of_image, size_of_code, size_of_init_data,
                         size_of_uninit_data, base_of_code, entry_rva,
-                        section_alignment, file_alignment, subsystem,
+                        section_alignment, file_alignment, subsystem, is_dll,
+                        export_plan.export_directory_rva,
+                        export_plan.export_directory_size,
                         exception_rva, exception_size,
                         import_plan.import_directory_rva,
                         import_plan.import_directory_size, import_plan.iat_rva,
@@ -1750,6 +2111,7 @@ cleanup:
     }
   }
   pe_import_plan_destroy(&import_plan);
+  pe_export_plan_destroy(&export_plan);
   pe_destroy_import_libraries(libraries, library_count);
   return ok;
 }

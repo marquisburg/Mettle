@@ -1,9 +1,11 @@
 # Shared libraries
 
-ELF only. The internal ELF linker binds a program to a `.so`, emits a `.so` of
-its own, and publishes a program's symbols so a library can call back into it.
-On Windows the equivalent surface is the DLL import probe in
-[C interop](c-interop.md); the options below are rejected there.
+ELF `.so` and Windows DLL. The internal ELF linker binds a program to a `.so`,
+emits a `.so` of its own, and publishes a program's symbols so a library can
+call back into it. On Windows `--build --shared` emits a DLL; the import side
+(DLL import probe) is in [C interop](c-interop.md). `-l`, `-L`, `--rpath`,
+`--export-dynamic` and `--dynamic-linker` stay ELF-only; a PE build takes its
+libraries through `--link-arg`.
 
 ## Linking against one
 
@@ -110,6 +112,25 @@ its definitions available for that.
 mettle --build --shared plugin.mettle -o libplugin.so --soname libplugin.so
 mettle --build host.mettle -o host -L. -lplugin --rpath "$PWD" --export-dynamic
 ```
+
+## Emitting a Windows DLL
+
+```powershell
+mettle --build --shared lib.mettle -o acme.dll --soname acme.dll
+```
+
+The result sets `IMAGE_FILE_DLL`, has no entry point (`AddressOfEntryPoint` is
+zero, so no `main` or `DllMain` is needed), and publishes the user globals
+through the export directory (`.edata` in `.rdata`): `export fn` functions and
+`export var` variables, sorted by name. Compiler-owned `mettle_*` tables and
+the bundled runtime stay private, so loading the DLL does not interpose
+someone else's `malloc`. `--soname` sets the export name; without it the output
+file name is used. No import library (`.lib`) is emitted; load the DLL with
+`LoadLibrary`/`GetProcAddress`.
+
+A DLL may import functions (a Win32 API declared `extern fn` binds through the
+usual import table). Like the ELF `.so`, the image is not position independent:
+no `.reloc` is emitted yet, so the loader must place it at its preferred base.
 
 ## What does not work
 

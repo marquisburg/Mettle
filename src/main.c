@@ -1973,8 +1973,11 @@ static int mettle_link_internal(const char **object_paths,
                                   const char *executable_filename,
                                   int include_shell32,
                                   const CompilerOptions *options) {
-  LinkResolutionOptions resolution_options = {"mettle_start", 16u, 1,
-                                              object_is_runtime_default};
+  int want_shared =
+      options && options->shared_output ? 1 : 0;
+  LinkResolutionOptions resolution_options = {
+      want_shared ? NULL : "mettle_start", 16u, 1,
+      object_is_runtime_default};
   LinkResolution *resolution = NULL;
   PeEmissionOptions emission_options = {0};
   StringList import_library_paths = {0};
@@ -2025,6 +2028,11 @@ static int mettle_link_internal(const char **object_paths,
   emission_options.import_library_count = import_library_paths.count;
   emission_options.import_dll_names = (const char **)import_dll_names.items;
   emission_options.import_dll_count = import_dll_names.count;
+  if (want_shared) {
+    emission_options.produce_shared_library = 1;
+    emission_options.dll_name =
+        options && options->soname ? options->soname : NULL;
+  }
   if (!pe_emit_executable(resolution, executable_filename, &emission_options,
                           &error_message)) {
     fprintf(stderr, "Warning: Internal linker PE emission failed: %s\n",
@@ -2259,9 +2267,17 @@ static int mettle_link_object_file(const char *object_filename,
   int has_gcc = 0;
   int has_link = 0;
   char *external_startup_object = NULL;
+  int want_shared = options && options->shared_output ? 1 : 0;
 
   if (!object_filename || !executable_filename || !runtime_directory) {
     fprintf(stderr, "Error: Missing build inputs for executable generation\n");
+    return 1;
+  }
+  if (want_shared && linker_mode != LINKER_MODE_INTERNAL &&
+      linker_mode != LINKER_MODE_AUTO) {
+    fprintf(stderr,
+            "Error: DLL emission requires --linker internal; external linkers "
+            "cannot emit a Mettle DLL\n");
     return 1;
   }
 
@@ -2551,9 +2567,12 @@ static int mettle_link_object_file(const char *object_filename,
     const char *safety_object = NULL;
     const char *swap_object_internal = NULL;
     const char *string_object_internal = NULL;
-    char *startup_object = replace_extension(executable_filename, ".startup.obj");
+    char *startup_object = want_shared
+                                     ? NULL
+                                     : replace_extension(executable_filename,
+                                                         ".startup.obj");
     size_t object_count = 0u;
-    int startup_ready = 0;
+    int startup_ready = want_shared ? 1 : 0;
 
     if (!object_paths || !object_is_default) {
       fprintf(stderr, "Error: Failed to allocate internal-linker object list\n");
@@ -2562,7 +2581,9 @@ static int mettle_link_object_file(const char *object_filename,
       goto cleanup;
     }
 
-    if (!startup_object) {
+    if (want_shared) {
+      /* A DLL has no mettle_start entry; the export table is the interface. */
+    } else if (!startup_object) {
       if (linker_mode == LINKER_MODE_INTERNAL || (!has_gcc && !has_link)) {
         fprintf(stderr,
                 "Error: Failed to allocate internal-linker startup object path\n");
@@ -2669,8 +2690,12 @@ static int mettle_link_object_file(const char *object_filename,
         }
       }
 
-      object_paths[object_count++] = startup_object;
-      object_is_default[object_count] = 1u;
+      if (!want_shared) {
+        object_paths[object_count++] = startup_object;
+        object_is_default[object_count] = 1u;
+      } else {
+        object_is_default[object_count] = 1u;
+      }
       object_paths[object_count++] = freestanding_object;
       object_paths[object_count++] = object_filename;
       if (crash_object) {
@@ -2732,7 +2757,10 @@ static int mettle_link_object_file(const char *object_filename,
          * scanner charges for. */
         g_link_output_ownership_verified = 1;
       } else if (linker_mode == LINKER_MODE_INTERNAL) {
-        fprintf(stderr, "Error: Internal linker failed to produce an executable\n");
+        fprintf(stderr,
+                want_shared
+                    ? "Error: Internal linker failed to produce a DLL\n"
+                    : "Error: Internal linker failed to produce an executable\n");
       } else if (!has_gcc && !has_link) {
         fprintf(stderr,
                 "Error: Internal linker failed and no external fallback linker is "
@@ -2753,8 +2781,8 @@ static int mettle_link_object_file(const char *object_filename,
     free(object_paths);
     free(object_is_default);
 
-    if (build_result == 0 || linker_mode == LINKER_MODE_INTERNAL ||
-        (!has_gcc && !has_link)) {
+    if (want_shared || build_result == 0 ||
+        linker_mode == LINKER_MODE_INTERNAL || (!has_gcc && !has_link)) {
       goto cleanup;
     }
   }
@@ -4367,11 +4395,10 @@ int main(int argc, char *argv[]) {
 
   if (flags.build_executable) {
     if (!elf_build && (options.shared_library_count > 0u ||
-                       options.shared_output || options.export_dynamic ||
-                       options.runpath_count > 0u || options.soname ||
+                       options.export_dynamic || options.runpath_count > 0u ||
                        options.dynamic_linker)) {
       fprintf(stderr,
-              "Error: -l, -L, --shared, --soname, --rpath, --export-dynamic "
+              "Error: -l, -L, --rpath, --export-dynamic "
               "and --dynamic-linker are ELF options; a PE build takes its "
               "libraries through --link-arg\n");
       free((void *)options.import_directories);
@@ -4445,6 +4472,9 @@ int main(int argc, char *argv[]) {
 #endif
     if (flags.output_filename_explicit) {
       build_output_filename = strdup(options.output_filename);
+    } else if (!elf_build && options.shared_output) {
+      build_output_filename =
+          replace_extension(options.input_filename, ".dll");
     } else {
       build_output_filename = default_executable_filename(options.input_filename);
     }
@@ -4516,7 +4546,11 @@ int main(int argc, char *argv[]) {
       }
     }
     if (result == 0) {
-      printf("Built executable '%s'\n", build_output_filename);
+      if (options.shared_output) {
+        printf("Built shared library '%s'\n", build_output_filename);
+      } else {
+        printf("Built executable '%s'\n", build_output_filename);
+      }
     }
     if (options.profile) {
       fprintf(stderr, "Executable build profile%s:\n",
@@ -6192,8 +6226,9 @@ void print_usage(const char *program_name) {
   printf("  --rpath <dir>       Record <dir> in DT_RUNPATH (ELF; "
          "repeatable)\n");
   printf("  --shared            Emit a shared object instead of a program "
-         "(ELF)\n");
-  printf("  --soname <name>     DT_SONAME for --shared output\n");
+         "(ELF .so, Windows .dll)\n");
+  printf("  --soname <name>     DT_SONAME for --shared output (ELF); DLL export "
+         "name on Windows\n");
   printf("  --export-dynamic    Publish the program's own symbols so a loaded "
          "library can bind them\n");
   printf("  --dynamic-linker <path>\n");
