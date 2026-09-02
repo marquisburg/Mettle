@@ -250,7 +250,8 @@ int register_allocator_is_floating_point_type(Type *type) {
     return 0;
   }
 
-  return type->kind == TYPE_FLOAT32 || type->kind == TYPE_FLOAT64;
+  return type->kind == TYPE_FLOAT32 || type->kind == TYPE_FLOAT64 ||
+         type->kind == TYPE_FLOAT16 || type->kind == TYPE_BFLOAT16;
 }
 
 const char *register_allocator_register_name(x86Register reg) {

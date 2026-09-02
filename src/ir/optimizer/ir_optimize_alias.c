@@ -824,6 +824,10 @@ static IRAliasClass alias_class_of_type(const MtlcType *type) {
     return IR_ALIAS_CLASS_F32;
   case MTLC_TYPE_FLOAT64:
     return IR_ALIAS_CLASS_F64;
+  case MTLC_TYPE_FLOAT16:
+    return IR_ALIAS_CLASS_F16;
+  case MTLC_TYPE_BFLOAT16:
+    return IR_ALIAS_CLASS_BF16;
   default:
     /* Aggregates and enums carry their members' storage; a whole-aggregate
      * move is not a typed scalar access and never disambiguates. */

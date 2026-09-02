@@ -18,7 +18,14 @@
 
 static const char *ir_builtin_scalar_type_for_slot(int size, int is_float,
                                                     int float_bits,
-                                                    int is_unsigned) {
+                                                    int is_unsigned,
+                                                    int alias_class) {
+  if (is_float && size == 2) {
+    if (alias_class == IR_ALIAS_CLASS_BF16) {
+      return "bfloat16";
+    }
+    return "float16";
+  }
   if (is_float) {
     return float_bits == 32 ? "float32" : "float64";
   }
@@ -65,7 +72,7 @@ static int ir_sroa_scalar_access_width(int size) {
 
 static int ir_sroa_note_slot(IRSroaSlot *slots, size_t *slot_count,
                              long long offset, int size, int is_float,
-                             int float_bits, int is_unsigned) {
+                             int float_bits, int is_unsigned, int alias_class) {
   IRSroaSlot *slot = ir_sroa_find_slot(slots, *slot_count, offset);
   if (!slot) {
     if (*slot_count >= IR_SROA_MAX_SLOTS) {
@@ -77,6 +84,7 @@ static int ir_sroa_note_slot(IRSroaSlot *slots, size_t *slot_count,
     slot->is_float = is_float;
     slot->float_bits = float_bits;
     slot->is_unsigned = is_unsigned;
+    slot->alias_class = alias_class;
     slot->name = NULL;
     return 1;
   }
@@ -85,7 +93,7 @@ static int ir_sroa_note_slot(IRSroaSlot *slots, size_t *slot_count,
     slot->is_unsigned = 1;
   }
   return slot->size == size && slot->is_float == is_float &&
-         slot->float_bits == float_bits;
+         slot->float_bits == float_bits && slot->alias_class == alias_class;
 }
 
 /* Slots are appended as they are first encountered, so two aggregates with the
@@ -117,7 +125,9 @@ static int ir_sroa_slots_match(const IRSroaSlot *a, size_t an,
   }
   for (size_t i = 0; i < an; i++) {
     if (a[i].offset != b[i].offset || a[i].size != b[i].size ||
-        a[i].is_float != b[i].is_float) {
+        a[i].is_float != b[i].is_float ||
+        a[i].float_bits != b[i].float_bits ||
+        a[i].alias_class != b[i].alias_class) {
       return 0;
     }
   }
@@ -304,7 +314,7 @@ static int ir_sroa_transform_all(IRFunction *function,
                   aggregate->field_types[f] &&
                   aggregate->field_types[f]->kind == MTLC_TYPE_POINTER &&
                   aggregate->field_types[f]->base_type &&
-                  aggregate->field_types[f]->base_type->kind <= MTLC_TYPE_FLOAT64 &&
+                  aggregate->field_types[f]->base_type->kind <= MTLC_TYPE_BFLOAT16 &&
                   aggregate->field_types[f]->name &&
                   (long long)aggregate->field_types[f]->size == slots[s].size) {
                 field = aggregate->field_types[f];
@@ -317,7 +327,7 @@ static int ir_sroa_transform_all(IRFunction *function,
             } else {
               decl.text = mettle_strdup(ir_builtin_scalar_type_for_slot(
                   slots[s].size, slots[s].is_float, slots[s].float_bits,
-                  slots[s].is_unsigned));
+                  slots[s].is_unsigned, slots[s].alias_class));
             }
           }
           free(nm);
@@ -749,7 +759,7 @@ int ir_sroa_pass(IRFunction *function, int *changed) {
           }
           if (!ir_sroa_note_slot(rec->slots, &rec->slot_count, ae->offset,
                                  size, insn->is_float, insn->float_bits,
-                                 insn->is_unsigned)) {
+                                 insn->is_unsigned, insn->alias_class)) {
             /* Mixed-width / mixed-class access of one offset: decline. */
             rec->eligible = 0;
           }
@@ -793,7 +803,7 @@ int ir_sroa_pass(IRFunction *function, int *changed) {
           }
           if (!ir_sroa_note_slot(rec->slots, &rec->slot_count, ae->offset,
                                  size, insn->is_float, insn->float_bits,
-                                 insn->is_unsigned)) {
+                                 insn->is_unsigned, insn->alias_class)) {
             rec->eligible = 0;
           }
           continue;

@@ -123,7 +123,7 @@ uint32_t mettle_f16bits_to_f32bits(uint16_t h) {
     if (mant == (uint32_t)0) {
       return sign | (uint32_t)0x7F800000u;
     }
-    return sign | (uint32_t)0x7FC00000u;
+    return sign | (uint32_t)0x7FC00000u | (mant << (uint32_t)13);
   }
   out = sign | ((uint32_t)(exp + (uint32_t)112) << (uint32_t)23) | (mant << (uint32_t)13);
   return out;
@@ -137,7 +137,7 @@ uint16_t mettle_f32bits_to_f16bits(uint32_t u) {
     if (mant == (uint32_t)0) {
       return (uint16_t)(sign | (uint32_t)0x7C00u);
     }
-    return (uint16_t)(sign | (uint32_t)0x7E00u);
+    return (uint16_t)(sign | (uint32_t)0x7E00u | ((mant >> (uint32_t)13) & (uint32_t)0x01FFu));
   }
   if (exp == (uint32_t)0) {
     return (uint16_t)sign;

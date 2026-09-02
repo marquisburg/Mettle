@@ -317,6 +317,7 @@ typedef struct {
    * slot first says nothing about signedness. Without it a uint8 field's
    * replacement scalar was declared int8 and its value sign-extended. */
   int is_unsigned;
+  int alias_class;
   char *name; /* synthesized scalar local name, owned */
 } IRSroaSlot;
 

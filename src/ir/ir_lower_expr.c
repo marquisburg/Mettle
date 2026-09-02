@@ -827,7 +827,9 @@ int ir_lower_call_expression(IRLoweringContext *context,
         continue;
       }
       if (ptype && (ptype->kind == TYPE_FLOAT32 ||
-                    ptype->kind == TYPE_FLOAT64)) {
+                    ptype->kind == TYPE_FLOAT64 ||
+                    ptype->kind == TYPE_FLOAT16 ||
+                    ptype->kind == TYPE_BFLOAT16)) {
         ir_operand_apply_float_bits(&arguments[i], ir_type_float_bits(ptype));
       }
     }
@@ -1105,6 +1107,13 @@ static int ir_lower_interpolation(IRLoweringContext *context,
     break;
   case TYPE_FLOAT64:
     helper = "mettle_string_from_f64";
+    break;
+  case TYPE_FLOAT16:
+  case TYPE_BFLOAT16:
+    helper = "mettle_string_from_f64";
+    widen_to = "float64";
+    source_is_float = 1;
+    source_float_bits = 32;
     break;
   default:
     ir_operand_destroy(&operand);

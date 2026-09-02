@@ -170,7 +170,9 @@ static int ir_emit_aggregate_runtime_stores(IRLoweringContext *context,
     store.rhs = ir_operand_int(ir_type_storage_size(element_type));
     ir_access_apply_alias_class(&store, element_type);
     if (element_type->kind == TYPE_FLOAT32 ||
-        element_type->kind == TYPE_FLOAT64) {
+        element_type->kind == TYPE_FLOAT64 ||
+        element_type->kind == TYPE_FLOAT16 ||
+        element_type->kind == TYPE_BFLOAT16) {
       ir_assign_apply_float_bits(&store, &store.lhs,
                                  ir_type_float_bits(element_type));
     }

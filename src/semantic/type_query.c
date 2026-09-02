@@ -461,7 +461,9 @@ int type_checker_eval_row_member(TypeChecker *checker, ComptimeValue row,
         strcmp(row_type->field_names[i], member) == 0) {
       Type *column = row_type->field_types[i];
       if (column && (column->kind == TYPE_FLOAT32 ||
-                     column->kind == TYPE_FLOAT64)) {
+                     column->kind == TYPE_FLOAT64 ||
+                     column->kind == TYPE_FLOAT16 ||
+                     column->kind == TYPE_BFLOAT16)) {
         *out_value = comptime_float(0.0);
       } else if (column && column->kind == TYPE_STRING) {
         *out_value = comptime_string(string_intern(""));

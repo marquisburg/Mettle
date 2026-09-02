@@ -146,6 +146,9 @@ int code_generator_binary_resolved_type_float_bits(MtlcType *type) {
   if (type->kind == MTLC_TYPE_FLOAT64 && type->size == 8) {
     return 64;
   }
+  if ((type->kind == MTLC_TYPE_FLOAT16 || type->kind == MTLC_TYPE_BFLOAT16) && type->size == 2) {
+    return 32;
+  }
   return 0;
 }
 
@@ -1430,6 +1433,8 @@ int code_generator_binary_resolved_type_is_supported(MtlcType *type,
   case MTLC_TYPE_BOOL:
   case MTLC_TYPE_FLOAT32:
   case MTLC_TYPE_FLOAT64:
+  case MTLC_TYPE_FLOAT16:
+  case MTLC_TYPE_BFLOAT16:
   case MTLC_TYPE_POINTER:
   case MTLC_TYPE_ENUM:
     return type->size <= 8;

@@ -829,7 +829,9 @@ static Type *type_checker_async_copy_builtin(TypeChecker *checker,
        destination_element->kind == TYPE_UINT64 ||
        destination_element->kind == TYPE_BOOL ||
        destination_element->kind == TYPE_FLOAT32 ||
-       destination_element->kind == TYPE_FLOAT64);
+       destination_element->kind == TYPE_FLOAT64 ||
+       destination_element->kind == TYPE_FLOAT16 ||
+       destination_element->kind == TYPE_BFLOAT16);
   if (!destination_element || !source_element ||
       !scalar_element ||
       destination_element->kind != source_element->kind ||
@@ -2548,6 +2550,8 @@ static Type *type_checker_infer_named_builtin(TypeChecker *checker,
     case TYPE_CHAR:
     case TYPE_FLOAT32:
     case TYPE_FLOAT64:
+    case TYPE_FLOAT16:
+    case TYPE_BFLOAT16:
     case TYPE_STRING:
       return checker->builtin_string;
     default:

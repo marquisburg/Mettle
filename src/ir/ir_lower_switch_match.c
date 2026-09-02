@@ -1120,7 +1120,9 @@ int ir_emit_tagged_enum_construct(IRLoweringContext *context,
       ir_access_apply_alias_class(&store_payload, payload_type);
       if (payload_size <= 8 &&
           (payload_type->kind == TYPE_FLOAT32 ||
-           payload_type->kind == TYPE_FLOAT64)) {
+           payload_type->kind == TYPE_FLOAT64 ||
+           payload_type->kind == TYPE_FLOAT16 ||
+           payload_type->kind == TYPE_BFLOAT16)) {
         ir_assign_apply_float_bits(&store_payload, &store_payload.lhs,
                                    ir_type_float_bits(payload_type));
       }

@@ -3192,6 +3192,8 @@ static const char *ir_gpu_launch_type_name(const MtlcType *type) {
   case MTLC_TYPE_BOOL: return "bool";
   case MTLC_TYPE_FLOAT32: return "float32";
   case MTLC_TYPE_FLOAT64: return "float64";
+  case MTLC_TYPE_FLOAT16: return "float16";
+  case MTLC_TYPE_BFLOAT16: return "bfloat16";
   case MTLC_TYPE_STRING: return "string";
   case MTLC_TYPE_POINTER:
   case MTLC_TYPE_ARRAY:
@@ -3260,7 +3262,7 @@ static MtlcType *ir_gpu_launch_params_type(IRProgram *program, size_t count) {
 int ir_program_register_scalar_pointer_types(IRProgram *program) {
   static const char *kElements[] = {"int8",    "uint8",   "int16",  "uint16",
                                     "int32",   "uint32",  "int64",  "uint64",
-                                    "float32", "float64"};
+                                    "float32", "float64", "float16", "bfloat16"};
   if (!program) {
     return 0;
   }
@@ -3338,9 +3340,11 @@ static int ir_gpu_launch_append_local(IRFunction *out, const char *name,
   assign.dest = ir_operand_symbol(name);
   assign.lhs = *value;
   if (type && (type->kind == MTLC_TYPE_FLOAT32 ||
-               type->kind == MTLC_TYPE_FLOAT64)) {
+               type->kind == MTLC_TYPE_FLOAT64 ||
+               type->kind == MTLC_TYPE_FLOAT16 ||
+               type->kind == MTLC_TYPE_BFLOAT16)) {
     assign.is_float = 1;
-    assign.float_bits = (int)(type->size * 8u);
+    assign.float_bits = 32;
   }
   if (!assign.dest.name) {
     return 0;
@@ -3824,7 +3828,8 @@ static int ir_gpu_async_copy_signature_matches(
       element_kind == MTLC_TYPE_UINT8 || element_kind == MTLC_TYPE_UINT16 ||
       element_kind == MTLC_TYPE_UINT32 || element_kind == MTLC_TYPE_UINT64 ||
       element_kind == MTLC_TYPE_BOOL || element_kind == MTLC_TYPE_FLOAT32 ||
-      element_kind == MTLC_TYPE_FLOAT64;
+      element_kind == MTLC_TYPE_FLOAT64 || element_kind == MTLC_TYPE_FLOAT16 ||
+      element_kind == MTLC_TYPE_BFLOAT16;
   if (!destination || !source || destination->kind != MTLC_TYPE_POINTER ||
       source->kind != MTLC_TYPE_POINTER || !destination->base_type ||
       !source->base_type || !scalar_element ||

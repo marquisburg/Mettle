@@ -1022,6 +1022,8 @@ static int type_checker_check_address_space(TypeChecker *checker,
     case TYPE_BOOL:
     case TYPE_FLOAT32:
     case TYPE_FLOAT64:
+    case TYPE_FLOAT16:
+    case TYPE_BFLOAT16:
       break;
     default:
       type_checker_set_error_at_location(

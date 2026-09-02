@@ -66,6 +66,7 @@ typedef struct {
   int slot_size;
   int slot_is_float;
   int slot_is_unsigned;
+  int slot_alias;
   /* Aggregate local or global: value.i is the base address of its storage and
    * assignment through the name is a block copy of this many bytes. */
   long long agg_size;
@@ -814,6 +815,7 @@ static int ii_parse_local_type(const char *text, int *elem_size, long long *coun
       {"int64", 8, 0, 0},   {"uint8", 1, 0, 1},   {"uint16", 2, 0, 1},
       {"uint32", 4, 0, 1},  {"uint64", 8, 0, 1},  {"bool", 1, 0, 1},
       {"float32", 4, 1, 0}, {"float64", 8, 1, 0},
+      {"float16", 2, 1, 0}, {"bfloat16", 2, 1, 0},
   };
   if (!text) {
     return 0;
@@ -975,6 +977,12 @@ static int ii_var_read(IRInterpMachine *machine, IIVar *var,
       unsigned int bits = (unsigned int)raw;
       memcpy(&f, &bits, 4);
       *out = ii_float_value((double)f);
+    } else if (var->slot_size == 2 && var->slot_alias == IR_ALIAS_CLASS_BF16) {
+      uint16_t h = (uint16_t)raw;
+      *out = ii_float_value((double)mettle_bf16bits_to_f32(h));
+    } else if (var->slot_size == 2) {
+      uint16_t h = (uint16_t)raw;
+      *out = ii_float_value((double)mettle_f16bits_to_f32(h));
     } else {
       double d;
       memcpy(&d, &raw, 8);
@@ -1111,6 +1119,16 @@ static int ii_var_write(IRInterpMachine *machine, IIVar *var,
       unsigned int bits;
       memcpy(&bits, &f, 4);
       raw = bits;
+    } else if (var->slot_size == 2 && var->slot_alias == IR_ALIAS_CLASS_BF16) {
+      float f = (float)ii_as_float(value);
+      uint32_t b;
+      memcpy(&b, &f, (size_t)4);
+      raw = (unsigned long long)mettle_f32bits_to_bf16bits(b);
+    } else if (var->slot_size == 2) {
+      float f = (float)ii_as_float(value);
+      uint32_t b;
+      memcpy(&b, &f, (size_t)4);
+      raw = (unsigned long long)mettle_f32bits_to_f16bits(b);
     } else {
       double d = ii_as_float(value);
       memcpy(&raw, &d, 8);
@@ -1143,6 +1161,8 @@ static int ii_scalar_from_mtlc(const MtlcType *type, int *size, int *is_float,
   case MTLC_TYPE_BOOL: *size = 1; *is_unsigned = 1; return 1;
   case MTLC_TYPE_FLOAT32: *size = 4; *is_float = 1; return 1;
   case MTLC_TYPE_FLOAT64: *size = 8; *is_float = 1; return 1;
+  case MTLC_TYPE_FLOAT16: *size = 2; *is_float = 1; return 1;
+  case MTLC_TYPE_BFLOAT16: *size = 2; *is_float = 1; return 1;
   case MTLC_TYPE_ENUM:
     *size = (type->size == 1 || type->size == 2 || type->size == 8)
                 ? (int)type->size
@@ -1236,6 +1256,18 @@ static IIVar *ii_global_touch(IRInterpMachine *machine, const char *name) {
       if (sym->type && sym->type->kind == MTLC_TYPE_FLOAT32) {
         d = (double)(float)d;
       }
+      if (sym->type && sym->type->kind == MTLC_TYPE_FLOAT16) {
+        float f = (float)d;
+        uint32_t b;
+        memcpy(&b, &f, (size_t)4);
+        d = (double)mettle_f16bits_to_f32(mettle_f32bits_to_f16bits(b));
+      }
+      if (sym->type && sym->type->kind == MTLC_TYPE_BFLOAT16) {
+        float f = (float)d;
+        uint32_t b;
+        memcpy(&b, &f, (size_t)4);
+        d = (double)mettle_bf16bits_to_f32(mettle_f32bits_to_bf16bits(b));
+      }
       var->value = ii_float_value(d);
     } else if (sym->init_string) {
       unsigned long long chars = 0, record = 0;
@@ -1316,6 +1348,12 @@ static unsigned long long ii_global_storage(IRInterpMachine *machine,
     var->slot_size = scalar_size;
     var->slot_is_float = scalar_float;
     var->slot_is_unsigned = scalar_unsigned;
+    var->slot_alias = 0;
+    if (sym->type && sym->type->kind == MTLC_TYPE_BFLOAT16) {
+      var->slot_alias = IR_ALIAS_CLASS_BF16;
+    } else if (sym->type && sym->type->kind == MTLC_TYPE_FLOAT16) {
+      var->slot_alias = IR_ALIAS_CLASS_F16;
+    }
     var->has_local_storage = 1;
     var->value = ii_int_value((long long)addr);
     if (!sym->init_bytes) {
@@ -1669,6 +1707,27 @@ static int ii_cast(IRInterpMachine *machine, const IRInstruction *insn,
       d = ii_as_float(in);
     }
     *out = ii_float_value(strcmp(type, "float32") == 0 ? (double)(float)d : d);
+    return 1;
+  }
+  if (strcmp(type, "float16") == 0 || strcmp(type, "bfloat16") == 0) {
+    double d;
+    float f;
+    uint32_t b;
+    uint16_t h;
+    if (!in->is_float && insn->is_unsigned) {
+      d = (double)(unsigned long long)in->i;
+    } else {
+      d = ii_as_float(in);
+    }
+    f = (float)d;
+    memcpy(&b, &f, (size_t)4);
+    if (strcmp(type, "float16") == 0) {
+      h = mettle_f32bits_to_f16bits(b);
+      *out = ii_float_value((double)mettle_f16bits_to_f32(h));
+    } else {
+      h = mettle_f32bits_to_bf16bits(b);
+      *out = ii_float_value((double)mettle_bf16bits_to_f32(h));
+    }
     return 1;
   }
   int size = 0, target_unsigned = 0;
@@ -4720,6 +4779,21 @@ static int ii_op_store(IRInterpMachine *machine, IIFrame *frame,
     } else if (size == 8) {
       double d = ii_as_float(&value);
       memcpy(&raw, &d, 8);
+    } else if (size == 2 && insn->alias_class == IR_ALIAS_CLASS_F16) {
+      float f = (float)ii_as_float(&value);
+      uint32_t b;
+      memcpy(&b, &f, (size_t)4);
+      raw = (unsigned long long)mettle_f32bits_to_f16bits(b);
+    } else if (size == 2 && insn->alias_class == IR_ALIAS_CLASS_BF16) {
+      float f = (float)ii_as_float(&value);
+      uint32_t b;
+      memcpy(&b, &f, (size_t)4);
+      raw = (unsigned long long)mettle_f32bits_to_bf16bits(b);
+    } else if (size == 2) {
+      float f = (float)ii_as_float(&value);
+      uint32_t b;
+      memcpy(&b, &f, (size_t)4);
+      raw = (unsigned long long)mettle_f32bits_to_f16bits(b);
     } else {
       raw = (unsigned long long)ii_as_int(&value);
     }
@@ -4823,6 +4897,12 @@ static int ii_op_load(IRInterpMachine *machine, IIFrame *frame,
       unsigned int bits = (unsigned int)raw;
       memcpy(&f, &bits, 4);
       value = ii_float_value((double)f);
+    } else if (size == 2 && insn->alias_class == IR_ALIAS_CLASS_BF16) {
+      uint16_t h = (uint16_t)raw;
+      value = ii_float_value((double)mettle_bf16bits_to_f32(h));
+    } else if (size == 2) {
+      uint16_t h = (uint16_t)raw;
+      value = ii_float_value((double)mettle_f16bits_to_f32(h));
     } else {
       double d;
       memcpy(&d, &raw, 8);
@@ -5044,6 +5124,16 @@ static int ii_op_declare_local(IRInterpMachine *machine, IIFrame *frame,
                                is_unsigned)) {
       return 0;
     }
+    var->slot_alias = 0;
+    if (insn->text && strncmp(insn->text, "bfloat16", 8) == 0) {
+      var->slot_alias = IR_ALIAS_CLASS_BF16;
+    } else if (insn->text && strncmp(insn->text, "float16", 7) == 0) {
+      var->slot_alias = IR_ALIAS_CLASS_F16;
+    } else if (vt && vt->kind == MTLC_TYPE_BFLOAT16) {
+      var->slot_alias = IR_ALIAS_CLASS_BF16;
+    } else if (vt && vt->kind == MTLC_TYPE_FLOAT16) {
+      var->slot_alias = IR_ALIAS_CLASS_F16;
+    }
   } else {
     var->value = ii_poison_value();
     var->slotted = 0;
@@ -5139,6 +5229,12 @@ static int ii_home_addressed_parameters(IRInterpMachine *machine, IIFrame *frame
     var->slot_size = psize;
     var->slot_is_float = pfloat;
     var->slot_is_unsigned = punsigned;
+    var->slot_alias = 0;
+    if (ptype && strncmp(ptype, "bfloat16", 8) == 0) {
+      var->slot_alias = IR_ALIAS_CLASS_BF16;
+    } else if (ptype && strncmp(ptype, "float16", 7) == 0) {
+      var->slot_alias = IR_ALIAS_CLASS_F16;
+    }
     var->has_local_storage = 1;
     var->value = ii_int_value((long long)addr);
     if (!ii_var_write(machine, var, &incoming)) {

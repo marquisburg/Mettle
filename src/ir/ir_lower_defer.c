@@ -337,7 +337,9 @@ static int ir_emit_errdefer_condition(IRLoweringContext *context,
     int aggregate = shape && (shape->kind == TYPE_STRUCT ||
                               shape->kind == TYPE_ARRAY ||
                               shape->kind == TYPE_FLOAT32 ||
-                              shape->kind == TYPE_FLOAT64);
+                              shape->kind == TYPE_FLOAT64 ||
+                              shape->kind == TYPE_FLOAT16 ||
+                              shape->kind == TYPE_BFLOAT16);
     /* A pointer fails by being NULL, so the test is inverted from the integer
      * status-code one. Reading a pointer the same way as an int had the
      * documented idiom exactly backwards:

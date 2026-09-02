@@ -453,6 +453,20 @@ static int aggregate_fold_scalar(TypeChecker *checker, ASTNode *element,
     aggregate_store_bits(at, bits, 8);
     return 1;
   }
+  if (type->kind == TYPE_FLOAT16) {
+    float narrowed = (float)aggregate_number_as_double(&value);
+    uint32_t b = 0;
+    memcpy(&b, &narrowed, sizeof(b));
+    aggregate_store_bits(at, (uint64_t)mettle_f32bits_to_f16bits(b), 2);
+    return 1;
+  }
+  if (type->kind == TYPE_BFLOAT16) {
+    float narrowed = (float)aggregate_number_as_double(&value);
+    uint32_t b = 0;
+    memcpy(&b, &narrowed, sizeof(b));
+    aggregate_store_bits(at, (uint64_t)mettle_f32bits_to_bf16bits(b), 2);
+    return 1;
+  }
   if (type_checker_is_integer_type(type) || type->kind == TYPE_BOOL ||
       type->kind == TYPE_ENUM) {
     if (value.is_float) {

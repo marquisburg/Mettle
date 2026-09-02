@@ -256,7 +256,8 @@ int ir_expression_is_floating(IRLoweringContext *context,
     return 0;
   }
 
-  return type->kind == TYPE_FLOAT32 || type->kind == TYPE_FLOAT64;
+  return type->kind == TYPE_FLOAT32 || type->kind == TYPE_FLOAT64 ||
+         type->kind == TYPE_FLOAT16 || type->kind == TYPE_BFLOAT16;
 }
 
 /* True only for a true 8-byte float64. The backend's "known float64" path
@@ -270,7 +271,11 @@ int ir_type_is_float64(Type *type) {
  * must already know the type is floating (use ir_type_is_float* / the type
  * checker). Returns 64 for NULL so non-float contexts get the safe default. */
 int ir_type_float_bits(Type *type) {
-  return (type && type->kind == TYPE_FLOAT32) ? 32 : 64;
+  if (type && (type->kind == TYPE_FLOAT32 || type->kind == TYPE_FLOAT16 ||
+               type->kind == TYPE_BFLOAT16)) {
+    return 32;
+  }
+  return 64;
 }
 
 /* Float width for a named type (e.g. a declared variable / parameter type).
@@ -282,7 +287,8 @@ int ir_named_type_float_bits(IRLoweringContext *context,
     return 0;
   }
   type = type_checker_get_type_by_name(context->type_checker, type_name);
-  if (!type || (type->kind != TYPE_FLOAT32 && type->kind != TYPE_FLOAT64)) {
+  if (!type || (type->kind != TYPE_FLOAT32 && type->kind != TYPE_FLOAT64 &&
+                type->kind != TYPE_FLOAT16 && type->kind != TYPE_BFLOAT16)) {
     return 0;
   }
   return ir_type_float_bits(type);
@@ -312,7 +318,9 @@ int ir_symbol_float_bits(IRLoweringContext *context, const char *name) {
   symbol = symbol_table_lookup(context->symbol_table, name);
   if (!symbol || !symbol->type ||
       (symbol->type->kind != TYPE_FLOAT32 &&
-       symbol->type->kind != TYPE_FLOAT64)) {
+       symbol->type->kind != TYPE_FLOAT64 &&
+       symbol->type->kind != TYPE_FLOAT16 &&
+       symbol->type->kind != TYPE_BFLOAT16)) {
     return 0;
   }
   return ir_type_float_bits(symbol->type);
@@ -410,6 +418,12 @@ void ir_access_apply_alias_class(IRInstruction *access, Type *accessed_type) {
   case TYPE_FLOAT64:
     access->alias_class = IR_ALIAS_CLASS_F64;
     break;
+  case TYPE_FLOAT16:
+    access->alias_class = IR_ALIAS_CLASS_F16;
+    break;
+  case TYPE_BFLOAT16:
+    access->alias_class = IR_ALIAS_CLASS_BF16;
+    break;
   default:
     /* Aggregates carry their members' storage; a whole-aggregate move is not
      * a typed scalar access and never disambiguates. */
@@ -422,7 +436,8 @@ void ir_load_apply_float_type(IRInstruction *load, Type *loaded_type) {
   if (!load || !loaded_type) {
     return;
   }
-  if (loaded_type->kind != TYPE_FLOAT32 && loaded_type->kind != TYPE_FLOAT64) {
+  if (loaded_type->kind != TYPE_FLOAT32 && loaded_type->kind != TYPE_FLOAT64 &&
+      loaded_type->kind != TYPE_FLOAT16 && loaded_type->kind != TYPE_BFLOAT16) {
     return;
   }
   load->is_float = 1;
@@ -460,7 +475,8 @@ int ir_expression_float_bits(IRLoweringContext *context,
     return 0;
   }
   type = type_checker_infer_type(context->type_checker, expression);
-  if (!type || (type->kind != TYPE_FLOAT32 && type->kind != TYPE_FLOAT64)) {
+  if (!type || (type->kind != TYPE_FLOAT32 && type->kind != TYPE_FLOAT64 &&
+                type->kind != TYPE_FLOAT16 && type->kind != TYPE_BFLOAT16)) {
     return 0;
   }
   return ir_type_float_bits(type);
