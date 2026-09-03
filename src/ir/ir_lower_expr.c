@@ -932,6 +932,7 @@ int ir_lower_call_expression(IRLoweringContext *context,
     cinstr.location = expression->location;
     cinstr.dest = destination;
     cinstr.lhs = code;
+    cinstr.effect_signature = call->effect_signature;
     cinstr.value_type = expression->resolved_type
                             ? mtlc_type_from_frontend(expression->resolved_type)
                             : NULL;
@@ -986,6 +987,7 @@ int ir_lower_call_expression(IRLoweringContext *context,
 
   if (is_func_ptr_var) {
     instruction.op = IR_OP_CALL_INDIRECT;
+    instruction.effect_signature = call->effect_signature;
     instruction.argument_types = ir_indirect_slot_types(
         call->arguments, call->argument_count,
         emitted_argument_count - call->argument_count);
@@ -2139,6 +2141,7 @@ static int ir_lower_closure_call(IRLoweringContext *context,
   cinstr.location = expression->location;
   cinstr.dest = destination;
   cinstr.lhs = code;
+  cinstr.effect_signature = fp_call->effect_signature;
   cinstr.value_type =
       expression->resolved_type
           ? mtlc_type_from_frontend(expression->resolved_type)
@@ -2312,6 +2315,7 @@ static int ir_lower_func_ptr_call(IRLoweringContext *context,
   instruction.op = IR_OP_CALL_INDIRECT;
   instruction.location = expression->location;
   instruction.dest = destination;
+  instruction.effect_signature = fp_call->effect_signature;
   // For indirect calls, we use lhs to hold the function pointer operand
   instruction.lhs = func_ptr;
   instruction.value_type =

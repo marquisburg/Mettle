@@ -108,6 +108,7 @@ divergence. See [ML-driven IR optimization](ml-opt.md).
 | `--rule-budget=N` | Fail the build when the rules spend more than N interpreter steps together. |
 | `--report-target` | The target in effect, printed as a `TargetDesc` in Mettle; `mettle target <triple>` prints a built-in one and `--target desc.mettle` builds for a described one. See [Bare metal](bare-metal.md). |
 | `--check-proofs` | Trap at run time when a value the compiler proved to be a [declared type](types.md) is not one. Survives `--release`, and costs nothing in a program with no declared types. |
+| `--check-effects` | Trap at run time when an [effect](effects.md) the compiler proved absent is performed, or one it proved provided is not. Survives `--release`, and costs nothing in a program that declares no effect. |
 
 `--explain` needs `-O` or `--release`, because there are no decisions to
 report without the optimizer. A repeat run leads with what changed since the

@@ -152,6 +152,7 @@ int type_checker_desugar_struct_method_call(TypeChecker *checker,
       fp->function = member;
       fp->arguments = args;
       fp->argument_count = argc;
+      fp->effect_signature = NULL;
       /* The argument array is reused; `obj` now belongs to `member`. The old
        * CallExpression payload is intentionally left unfreed - a small bounded
        * compile-time allocation - to avoid any ownership mismatch. */
@@ -2583,6 +2584,7 @@ if ((func_symbol->kind == SYMBOL_VARIABLE ||
   call->is_indirect_call = 1;
   Type *fp_type = func_symbol->type;
   call->callee_closure_env = fp_type->closure_env;
+  call->effect_signature = fp_type->fn_effect_signature;
   if (call->argument_count != fp_type->fn_param_count) {
     char error_msg[512];
     snprintf(error_msg, sizeof(error_msg),
@@ -3190,6 +3192,7 @@ static Type *type_checker_infer_indirect_call(TypeChecker *checker,
           "Cannot call non-function-pointer expression");
       return NULL;
     }
+    fp_call->effect_signature = func_type->fn_effect_signature;
 
     // Check argument count
     if (fp_call->argument_count != func_type->fn_param_count) {

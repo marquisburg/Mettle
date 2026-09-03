@@ -29,9 +29,11 @@ window, the blit, and the wave device. See [`video_player/README.md`](video_play
 the program names. It is the shape [Runtime model](../docs/runtime-model.md)
 describes: the compiler ships no scheduler, and the program states what its
 own scheduler must satisfy. A job may not allocate (`@noalloc`), a queue slot
-is a declared type the compiler proves in range, and three `@rule`s hold on
-every build: jobs are `@noalloc`, jobs are reached from the worker and never
-from `main`, and the phase machine's `step` decides every `Phase`. The build
+is a declared type the compiler proves in range, running a job `requires
+Worker` and only `worker_main` `provides` it, so a job reached from `main` is
+`error[F0002]` before any rule runs, and three `@rule`s hold on every build:
+jobs are `@noalloc`, jobs are reached from the worker and never from `main`,
+and the phase machine's `step` decides every `Phase`. The build
 fails when any of that stops being true.
 
 ## Benchmark examples

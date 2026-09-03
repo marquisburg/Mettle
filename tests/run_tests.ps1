@@ -4207,6 +4207,10 @@ try {
   Set-Content -Path $broken2 -Value ($source.Replace("    case Phase.Done: return Phase.Done;", "    default: return Phase.Done;")) -Encoding ascii
   $out = & $CompilerPath --build $broken2 -o (Join-Path $tmpDir "job_system_broken2.exe") 2>&1 | Out-String
   if ($LASTEXITCODE -eq 0 -or $out -notmatch "rule 'transitions_are_total' failed: step does not decide every Phase") { throw "an undecided transition went unnoticed: $out" }
+  $broken3 = Join-Path $tmpDir "job_system_broken3.mettle"
+  Set-Content -Path $broken3 -Value ($source.Replace("fn worker_main(arg: cstring) -> uint32 provides Worker {", "fn worker_main(arg: cstring) -> uint32 {")) -Encoding ascii
+  $out = & $CompilerPath --build $broken3 -o (Join-Path $tmpDir "job_system_broken3.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $out -notmatch "error\[F0003\]: 'worker_main' requires 'Worker', and it is handed to a function type with no ``requires`` clause") { throw "a job run off the worker went unnoticed: $out" }
   Write-CaseResult -Name "execution_model_is_the_programs" -Passed $true
 }
 catch {
@@ -4315,6 +4319,195 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "refine_check_proofs_flag" -Passed $false -Reason $_.Exception.Message
+}
+
+# Effects: declared at the edges, inferred through the call graph, held in
+# the interpreter, printed back by expand, and carried across an import.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "effect_ok.exe"
+  $out = & $CompilerPath --build "tests/test_effect_ok.mettle" -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a program whose effects all hold failed to build: $out" }
+  $run = & $exe 2>&1 | Out-String
+  $lines = ($run -split "`r?`n" | Where-Object { $_ -ne "" }) -join "|"
+  if ($LASTEXITCODE -ne 0 -or $lines -ne "window|beep|mix|draw|window") { throw "wrong output: $run" }
+  $out = & $CompilerPath test "tests/test_effect_ok.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or $out -notmatch "1 passed") { throw "the interpreter rejected effects that hold: $out" }
+  $out = & $CompilerPath expand "tests/test_effect_ok.mettle" 2>&1 | Out-String
+  foreach ($line in @("effect Render;", "fn mix() forbids Render {", "fn touch_window() requires MainThread {", "fn main_loop() provides MainThread {", "fn gl_draw() with Render {", "export effect Audio;")) {
+    if ($out -notmatch [regex]::Escape($line)) { throw "expand dropped '$line': $out" }
+  }
+  Write-CaseResult -Name "effects_hold" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "effects_hold" -Passed $false -Reason $_.Exception.Message
+}
+
+# A forbidden effect reached three calls away is refused at the forbidding
+# function, with every call on the way as a note and the source last.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_effect_forbids.mettle" -o (Join-Path $tmpDir "effect_forbids.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a forbidden effect went unnoticed" }
+  if ($out -notmatch "error\[F0001\]: 'mix' forbids 'Render' but reaches it: mix -> frame -> draw_scene -> gl_draw") { throw "the chain is not reported: $out" }
+  if ($out -notmatch "``frame`` calls ``draw_scene`` here" -or $out -notmatch "``gl_draw`` is declared ``with Render``") { throw "the notes do not walk the chain: $out" }
+  Write-CaseResult -Name "effects_forbids_chain" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "effects_forbids_chain" -Passed $false -Reason $_.Exception.Message
+}
+
+# A requirement travels up to main, where nothing is provided, and the provided
+# path beside it is accepted.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_effect_requires.mettle" -o (Join-Path $tmpDir "effect_requires.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "an unprovided requirement went unnoticed" }
+  if ($out -notmatch "error\[F0002\]: 'main' reaches a function that requires 'MainThread', and nothing on the way provides it" -or $out -notmatch "ui_tick -> touch_window") { throw "the requirement chain is not reported: $out" }
+  if ($out -notmatch "the program starts here with nothing provided") { throw "the entry point is not named as the reason: $out" }
+  if (([regex]::Matches($out, "error\[F0002\]")).Count -ne 1) { throw "the provided path was refused too: $out" }
+  Write-CaseResult -Name "effects_requires_root" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "effects_requires_root" -Passed $false -Reason $_.Exception.Message
+}
+
+# A function handed to a typed function pointer has to fit the type's `with`
+# and `requires`, checked against what it actually reaches; one that fits is
+# accepted silently.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_effect_fn_type.mettle" -o (Join-Path $tmpDir "effect_fn_type.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a function value with the wrong effects was accepted" }
+  if ($out -notmatch "error\[F0003\]: 'paint' is handed to a type declaring ``with Sim``, but it may perform 'Render'") { throw "the performed effect is not checked against the type: $out" }
+  if ($out -notmatch "error\[F0003\]: 'touch_window' requires 'MainThread', and it is handed to a function type with no ``requires`` clause") { throw "a lost requirement is not refused: $out" }
+  if ($out -match "'step' is handed") { throw "a function that fits was refused: $out" }
+  $out = & $CompilerPath --build "tests/test_effect_fn_flow.mettle" -o (Join-Path $tmpDir "effect_fn_flow.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $out -notmatch "error\[F0003\]: a function value of a type with no effect clause cannot flow into a type declaring ``with Sim``") { throw "an open value flowed into a closed type: $out" }
+  Write-CaseResult -Name "effects_fn_type_fit" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "effects_fn_type_fit" -Passed $false -Reason $_.Exception.Message
+}
+
+# A call through an untyped function pointer is a call the compiler cannot
+# follow, and a forbidding function that makes one is refused; the same call
+# through `fn() -> void with none` is fine.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_effect_unknown_call.mettle" -o (Join-Path $tmpDir "effect_unknown.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a call the compiler cannot follow was accepted under forbids" }
+  if ($out -notmatch "error\[F0001\]: 'probe' forbids an effect but reaches a call the compiler cannot follow") { throw "the unknown call is not named: $out" }
+  if ($out -notmatch "write ``fn\(\.\.\.\) with \.\.\.`` on the type") { throw "the fix is not suggested: $out" }
+  if ($out -match "'bounded'") { throw "a call through a closed type was refused: $out" }
+  Write-CaseResult -Name "effects_unknown_call" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "effects_unknown_call" -Passed $false -Reason $_.Exception.Message
+}
+
+# Declarations are checked: an unknown name in a clause, a name declared
+# twice, and a built-in redeclared are each refused by name.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_effect_declarations.mettle" -o (Join-Path $tmpDir "effect_decl.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $out -notmatch "unknown effect 'Rendr' in the 'with' clause of 'draw'; declare it with ``effect Rendr;``") { throw "an unknown effect was accepted: $out" }
+  $out = & $CompilerPath --build "tests/test_effect_declarations_twice.mettle" -o (Join-Path $tmpDir "effect_decl2.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $out -notmatch "effect 'Render' is declared twice" -or $out -notmatch "first declared here") { throw "a duplicate effect was accepted: $out" }
+  $out = & $CompilerPath --build "tests/test_effect_declarations_builtin.mettle" -o (Join-Path $tmpDir "effect_decl3.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $out -notmatch "'alloc' is a built-in effect") { throw "a built-in effect was redeclared: $out" }
+  Write-CaseResult -Name "effects_declarations" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "effects_declarations" -Passed $false -Reason $_.Exception.Message
+}
+
+# An exported effect crosses an import with the functions that perform it, and
+# the note points into the module.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_effect_house_rules.mettle" -o (Join-Path $tmpDir "effect_house.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "an imported effect was not carried across the import" }
+  if ($out -notmatch "error\[F0001\]: 'silence' forbids 'Audio' but reaches it: silence -> beep") { throw "the imported source is not reported: $out" }
+  if ($out -notmatch "house_effects\.mettle") { throw "the note does not point into the module: $out" }
+  Write-CaseResult -Name "effects_cross_import" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "effects_cross_import" -Passed $false -Reason $_.Exception.Message
+}
+
+# A rule reads the inferred effects and requirements, the declared forbids and
+# provides, and the program's effect table.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_effect_rule.mettle" -o (Join-Path $tmpDir "effect_rule.exe") --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the build failed: $out" }
+  if ($out -notmatch "rule effects_are_visible: pass") { throw "a rule cannot read effects: $out" }
+  Write-CaseResult -Name "effects_rule_reflection" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "effects_rule_reflection" -Passed $false -Reason $_.Exception.Message
+}
+
+# The analysis is not trusted: with it told to believe anything, the
+# interpreter and --check-effects both catch the violation at run time, in
+# debug and release, and a plain build runs the lie through.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_effect_lie.mettle" -o (Join-Path $tmpDir "effect_lie.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $out -notmatch "error\[F0001\]: 'quiet' forbids 'alloc' but reaches it: quiet -> grow") { throw "the honest analysis accepted the allocation: $out" }
+  $env:METTLE_TRUST_EFFECTS = "1"
+  try {
+    $violation = "effect violation: ``grow`` performs ``alloc``, which ``quiet`` forbids"
+    $out = & $CompilerPath test "tests/test_effect_lie.mettle" 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0 -or $out -notmatch [regex]::Escape($violation)) { throw "the interpreter believed the analysis: $out" }
+    foreach ($mode in @("debug", "release")) {
+      $exe = Join-Path $tmpDir ("effect_lie_{0}.exe" -f $mode)
+      $buildArgs = @("--build", "tests/test_effect_lie.mettle", "-o", $exe, "--check-effects")
+      if ($mode -eq "release") { $buildArgs = @("--release") + $buildArgs }
+      $out = & $CompilerPath @buildArgs 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) { throw "the $mode build failed: $out" }
+      $run = & $exe 2>&1 | Out-String
+      if ($LASTEXITCODE -eq 0 -or $run -notmatch [regex]::Escape($violation)) { throw "the $mode program believed the analysis: $run" }
+    }
+    $plain = Join-Path $tmpDir "effect_lie_plain.exe"
+    $out = & $CompilerPath --build "tests/test_effect_lie.mettle" -o $plain 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "the plain build failed: $out" }
+    $run = & $plain 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $run -notmatch "grew 7") { throw "a plain build carries a check it did not ask for: $run" }
+  }
+  finally {
+    Remove-Item Env:\METTLE_TRUST_EFFECTS -ErrorAction SilentlyContinue
+  }
+  $clean = Join-Path $tmpDir "effect_flag_plain.exe"
+  $cleanChecked = Join-Path $tmpDir "effect_flag_checked.exe"
+  $out = & $CompilerPath --build "tests/test_noalloc.mettle" -o $clean 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the plain build failed: $out" }
+  $out = & $CompilerPath --build "tests/test_noalloc.mettle" -o $cleanChecked --check-effects 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the plain build with the flag failed: $out" }
+  if ((Get-Sha256FileHash $clean) -ne (Get-Sha256FileHash $cleanChecked)) { throw "--check-effects cost a program that declares no effect" }
+  Write-CaseResult -Name "effects_checked_at_run_time" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "effects_checked_at_run_time" -Passed $false -Reason $_.Exception.Message
 }
 
 # Runtime excision: each optional component has to be absent from a binary that

@@ -1012,7 +1012,62 @@ IRFunction *ir_function_create(const char *name) {
   function->has_volatile_access = 0;
   function->is_kernel = 0;
   function->rewrite_role = 0;
+  function->effects_with = NULL;
+  function->effects_with_count = 0;
+  function->effects_forbids = NULL;
+  function->effects_forbids_count = 0;
+  function->effects_requires = NULL;
+  function->effects_requires_count = 0;
+  function->effects_provides = NULL;
+  function->effects_provides_count = 0;
   return function;
+}
+
+int ir_function_set_effects(IRFunction *function, int clause,
+                            const char *const *names, size_t count) {
+  const char ***slot;
+  size_t *count_slot;
+  if (!function) {
+    return 0;
+  }
+  switch (clause) {
+  case IR_EFFECT_CLAUSE_WITH:
+    slot = &function->effects_with;
+    count_slot = &function->effects_with_count;
+    break;
+  case IR_EFFECT_CLAUSE_FORBIDS:
+    slot = &function->effects_forbids;
+    count_slot = &function->effects_forbids_count;
+    break;
+  case IR_EFFECT_CLAUSE_REQUIRES:
+    slot = &function->effects_requires;
+    count_slot = &function->effects_requires_count;
+    break;
+  case IR_EFFECT_CLAUSE_PROVIDES:
+    slot = &function->effects_provides;
+    count_slot = &function->effects_provides_count;
+    break;
+  default:
+    return 0;
+  }
+  for (size_t i = 0; i < *count_slot; i++) {
+    free((char *)(*slot)[i]);
+  }
+  free(*slot);
+  *slot = NULL;
+  *count_slot = 0;
+  if (count == 0) {
+    return 1;
+  }
+  *slot = calloc(count, sizeof(const char *));
+  if (!*slot) {
+    return 0;
+  }
+  for (size_t i = 0; i < count; i++) {
+    (*slot)[i] = mettle_strdup(names[i] ? names[i] : "");
+  }
+  *count_slot = count;
+  return 1;
 }
 
 const char *ir_backend_type_name(const char *source_name) {
@@ -1083,6 +1138,10 @@ void ir_function_destroy(IRFunction *function) {
 
   free(function->name);
   free(function->return_type_name);
+  ir_function_set_effects(function, IR_EFFECT_CLAUSE_WITH, NULL, 0);
+  ir_function_set_effects(function, IR_EFFECT_CLAUSE_FORBIDS, NULL, 0);
+  ir_function_set_effects(function, IR_EFFECT_CLAUSE_REQUIRES, NULL, 0);
+  ir_function_set_effects(function, IR_EFFECT_CLAUSE_PROVIDES, NULL, 0);
   ir_function_clear_parameters(function);
   ir_function_clear_cfg(function);
   for (size_t i = 0; i < function->instruction_count; i++) {
@@ -1222,6 +1281,7 @@ int ir_function_insert_instruction(IRFunction *function, size_t index,
   slot->allocates = instruction->allocates;
   slot->alias_class = instruction->alias_class;
   slot->expansion_note = instruction->expansion_note;
+  slot->effect_signature = instruction->effect_signature;
   slot->ast_ref = instruction->ast_ref;
   slot->value_type = instruction->value_type;
   slot->dest = ir_operand_clone(&instruction->dest);
@@ -1682,6 +1742,7 @@ static void ir_symbol_index_reset(void);
 static void ir_module_symbol_release(IRModuleSymbol *symbol) {
   free(symbol->name);
   free(symbol->link_name);
+  free(symbol->effect_clause);
   free(symbol->init_string);
   free(symbol->init_symbol_ref);
   for (size_t r = 0; r < symbol->init_reloc_count; r++) {
@@ -1967,6 +2028,8 @@ IRModuleSymbol *ir_program_add_symbol(IRProgram *program,
   *dst = *proto; /* shallow copy scalars + borrowed MtlcType* */
   dst->name = mettle_strdup(proto->name);
   dst->link_name = proto->link_name ? mettle_strdup(proto->link_name) : NULL;
+  dst->effect_clause =
+      proto->effect_clause ? mettle_strdup(proto->effect_clause) : NULL;
   dst->init_string =
       proto->init_string
           ? ir_copy_literal_bytes(proto->init_string, proto->init_string_length)

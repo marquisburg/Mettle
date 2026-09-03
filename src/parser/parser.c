@@ -1035,6 +1035,143 @@ static ASTNode *parser_parse_extern_declaration(Parser *parser) {
   return NULL;
 }
 
+static void parser_free_string_array(char **values, size_t count);
+
+static ASTNode *parser_parse_effect_declaration(Parser *parser) {
+  SourceLocation location = parser_current_location(parser);
+  parser_advance(parser);
+  if (!parser_is_identifier_like(parser->current_token.type)) {
+    parser_set_error(parser, "Expected an effect name after 'effect'");
+    return NULL;
+  }
+  char *name = strdup(parser->current_token.value);
+  parser_advance(parser);
+  if (parser->current_token.type != TOKEN_SEMICOLON) {
+    parser_set_error(parser, "Expected ';' after the effect name: an effect "
+                             "is declared as 'effect Name;'");
+    free(name);
+    return NULL;
+  }
+  parser_advance(parser);
+  ASTNode *decl = ast_create_effect_declaration(name, location);
+  free(name);
+  return decl;
+}
+
+typedef struct {
+  char **names[4];
+  size_t counts[4];
+} ParsedEffectClauses;
+
+static void parser_free_effect_clauses(ParsedEffectClauses *clauses) {
+  for (int c = 0; c < 4; c++) {
+    parser_free_string_array(clauses->names[c], clauses->counts[c]);
+    clauses->names[c] = NULL;
+    clauses->counts[c] = 0;
+  }
+}
+
+static int parser_effect_clause_index(const Parser *parser) {
+  static const char *const words[4] = {"with", "forbids", "requires",
+                                       "provides"};
+  if (!parser_is_identifier_like(parser->current_token.type) ||
+      !parser->current_token.value) {
+    return -1;
+  }
+  for (int c = 0; c < 4; c++) {
+    if (strcmp(parser->current_token.value, words[c]) == 0) {
+      return c;
+    }
+  }
+  return -1;
+}
+
+static int parser_at_effect_name(const Parser *parser) {
+  return parser_is_identifier_like(parser->current_token.type) ||
+         parser->current_token.type == TOKEN_ASM;
+}
+
+static int parser_parse_effect_name_list(Parser *parser, char ***out_names,
+                                         size_t *out_count) {
+  char **names = NULL;
+  size_t count = 0;
+  size_t capacity = 0;
+  for (;;) {
+    if (!parser_at_effect_name(parser)) {
+      parser_set_error(parser, "Expected an effect name");
+      parser_free_string_array(names, count);
+      return 0;
+    }
+    if (count == capacity) {
+      size_t next = capacity ? capacity * 2 : 4;
+      char **grown = realloc(names, next * sizeof(char *));
+      if (!grown) {
+        parser_free_string_array(names, count);
+        return 0;
+      }
+      names = grown;
+      capacity = next;
+    }
+    names[count] = strdup(parser->current_token.type == TOKEN_ASM
+                              ? "asm"
+                              : parser->current_token.value);
+    if (!names[count]) {
+      parser_free_string_array(names, count);
+      return 0;
+    }
+    count++;
+    parser_advance(parser);
+    if (parser->current_token.type != TOKEN_COMMA) {
+      break;
+    }
+    parser_advance(parser);
+  }
+  *out_names = names;
+  *out_count = count;
+  return 1;
+}
+
+static int parser_parse_effect_clauses(Parser *parser,
+                                       ParsedEffectClauses *clauses) {
+  static const char *const words[4] = {"with", "forbids", "requires",
+                                       "provides"};
+  memset(clauses, 0, sizeof(*clauses));
+  for (;;) {
+    int clause = parser_effect_clause_index(parser);
+    if (clause < 0) {
+      return 1;
+    }
+    if (clauses->counts[clause] > 0) {
+      char message[128];
+      snprintf(message, sizeof(message),
+               "'%s' appears twice on this function; list every effect in "
+               "the one clause",
+               words[clause]);
+      parser_set_error(parser, message);
+      parser_free_effect_clauses(clauses);
+      return 0;
+    }
+    parser_advance(parser);
+    if (!parser_parse_effect_name_list(parser, &clauses->names[clause],
+                                       &clauses->counts[clause])) {
+      parser_free_effect_clauses(clauses);
+      return 0;
+    }
+  }
+}
+
+static int parser_apply_effect_clauses(FunctionDeclaration *decl,
+                                       ParsedEffectClauses *clauses) {
+  for (int c = 0; c < 4; c++) {
+    if (!ast_function_set_effects(decl, c, clauses->names[c],
+                                  clauses->counts[c])) {
+      return 0;
+    }
+  }
+  parser_free_effect_clauses(clauses);
+  return 1;
+}
+
 static ASTNode *parser_parse_type_declaration(Parser *parser) {
   SourceLocation location = parser_current_location(parser);
   parser_advance(parser);
@@ -1104,6 +1241,11 @@ static ASTNode *parser_parse_exported_declaration(Parser *parser) {
     decl = parser_parse_type_declaration(parser);
     if (decl && decl->data) {
       ((TypeDeclaration *)decl->data)->is_exported = 1;
+    }
+  } else if (parser_at_contextual_keyword(parser, "effect", TOKEN_IDENTIFIER)) {
+    decl = parser_parse_effect_declaration(parser);
+    if (decl && decl->data) {
+      ((EffectDeclaration *)decl->data)->is_exported = 1;
     }
   } else if (parser->current_token.type == TOKEN_FUNCTION ||
       parser->current_token.type == TOKEN_FN) {
@@ -1453,6 +1595,9 @@ ASTNode *parser_parse_declaration(Parser *parser) {
   }
   if (parser_at_contextual_keyword(parser, "type", TOKEN_IDENTIFIER)) {
     return parser_parse_type_declaration(parser);
+  }
+  if (parser_at_contextual_keyword(parser, "effect", TOKEN_IDENTIFIER)) {
+    return parser_parse_effect_declaration(parser);
   }
 
   if (parser->current_token.type == TOKEN_AT) {
@@ -2740,6 +2885,72 @@ static int parser_at_closure_type(Parser *parser) {
          parser->peek_token.type == TOKEN_LPAREN;
 }
 
+static char *parser_parse_type_effect_clauses(Parser *parser, char *type_name) {
+  static const char *const words[2] = {"with", "requires"};
+  int seen[2] = {0, 0};
+  for (;;) {
+    int clause = -1;
+    char **names = NULL;
+    size_t count = 0;
+    size_t length;
+    if (parser_is_identifier_like(parser->current_token.type) &&
+        parser->current_token.value) {
+      for (int c = 0; c < 2; c++) {
+        if (strcmp(parser->current_token.value, words[c]) == 0) {
+          clause = c;
+        }
+      }
+      if (clause < 0 && (strcmp(parser->current_token.value, "forbids") == 0 ||
+                         strcmp(parser->current_token.value, "provides") == 0)) {
+        parser_set_error(parser,
+                         "a function type carries 'with' and 'requires'; "
+                         "'forbids' and 'provides' describe a body, and a "
+                         "type has none");
+        free(type_name);
+        return NULL;
+      }
+    }
+    if (clause < 0) {
+      return type_name;
+    }
+    if (seen[clause]) {
+      parser_set_error(parser, "this clause appears twice on the function "
+                               "type; list every effect in the one clause");
+      free(type_name);
+      return NULL;
+    }
+    seen[clause] = 1;
+    parser_advance(parser);
+    if (!parser_parse_effect_name_list(parser, &names, &count)) {
+      free(type_name);
+      return NULL;
+    }
+    length = strlen(type_name) + 1 + strlen(words[clause]) + 1;
+    for (size_t i = 0; i < count; i++) {
+      length += strlen(names[i]) + 1;
+    }
+    {
+      char *grown = realloc(type_name, length + 1);
+      if (!grown) {
+        parser_free_string_array(names, count);
+        free(type_name);
+        return NULL;
+      }
+      type_name = grown;
+    }
+    strcat(type_name, " ");
+    strcat(type_name, words[clause]);
+    strcat(type_name, " ");
+    for (size_t i = 0; i < count; i++) {
+      if (i) {
+        strcat(type_name, ",");
+      }
+      strcat(type_name, names[i]);
+    }
+    parser_free_string_array(names, count);
+  }
+}
+
 static char *parser_parse_function_pointer_type(Parser *parser,
                                                 int is_closure_fn) {
   char *params_buf;
@@ -2832,7 +3043,7 @@ static char *parser_parse_function_pointer_type(Parser *parser,
            params_buf, ret);
   free(params_buf);
   free(ret);
-  return type_name;
+  return parser_parse_type_effect_clauses(parser, type_name);
 }
 
 static char *parser_parse_qualified_type(Parser *parser, char *type_name) {
@@ -5688,6 +5899,23 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     return NULL;
   }
 
+  ParsedEffectClauses effect_clauses;
+  if (!parser_parse_effect_clauses(parser, &effect_clauses)) {
+    for (size_t i = 0; i < param_count; i++) {
+      free(param_names[i]);
+      free(param_types[i]);
+    }
+    free(param_names);
+    free(param_types);
+    parser_free_type_param_list(func_type_params, func_type_param_traits,
+                                func_type_param_count);
+    free(func_name);
+    free(return_type);
+    free(link_name);
+    parser_free_string_array(return_types, return_type_count);
+    return NULL;
+  }
+
   if (parser->current_token.type == TOKEN_EQUALS) {
     parser_advance(parser); // consume '='
     if (parser->current_token.type != TOKEN_STRING) {
@@ -5703,6 +5931,7 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
       free(func_name);
       free(return_type);
       parser_free_string_array(return_types, return_type_count);
+      parser_free_effect_clauses(&effect_clauses);
       return NULL;
     }
     link_name = strdup(parser->current_token.value);
@@ -5718,6 +5947,7 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
       free(func_name);
       free(return_type);
       parser_free_string_array(return_types, return_type_count);
+      parser_free_effect_clauses(&effect_clauses);
       return NULL;
     }
   }
@@ -5740,6 +5970,7 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
       free(return_type);
       free(link_name);
       parser_free_string_array(return_types, return_type_count);
+      parser_free_effect_clauses(&effect_clauses);
       return NULL;
     }
   } else if (parser->current_token.type == TOKEN_SEMICOLON ||
@@ -5761,12 +5992,19 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     free(return_type);
     free(link_name);
     parser_free_string_array(return_types, return_type_count);
+    parser_free_effect_clauses(&effect_clauses);
     return NULL;
   }
 
   ASTNode *func_decl =
       ast_create_function_declaration(func_name, param_names, param_types,
                                       param_count, return_type, body, location);
+  if (func_decl && func_decl->data &&
+      !parser_apply_effect_clauses((FunctionDeclaration *)func_decl->data,
+                                   &effect_clauses)) {
+    parser_set_error(parser, "Memory allocation failed for effect clauses");
+  }
+  parser_free_effect_clauses(&effect_clauses);
   if (func_decl && func_decl->data) {
     FunctionDeclaration *func_data = (FunctionDeclaration *)func_decl->data;
     func_data->composed_name = composed_name;
@@ -8090,6 +8328,19 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
     }
   }
 
+  ParsedEffectClauses effect_clauses;
+  if (!parser_parse_effect_clauses(parser, &effect_clauses)) {
+    for (size_t i = 0; i < param_count; i++) {
+      free(param_names[i]);
+      free(param_types[i]);
+    }
+    free(param_names);
+    free(param_types);
+    free(method_name);
+    free(return_type);
+    return NULL;
+  }
+
   // Parse method body (block)
   ASTNode *body = NULL;
   if (parser->current_token.type == TOKEN_LBRACE) {
@@ -8104,6 +8355,7 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
       free(param_types);
       free(method_name);
       free(return_type);
+      parser_free_effect_clauses(&effect_clauses);
       return NULL;
     }
   } else {
@@ -8117,6 +8369,7 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
     free(param_types);
     free(method_name);
     free(return_type);
+    parser_free_effect_clauses(&effect_clauses);
     return NULL;
   }
 
@@ -8132,6 +8385,7 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
     free(param_types);
     free(method_name);
     free(return_type);
+    parser_free_effect_clauses(&effect_clauses);
     if (body)
       ast_destroy_node(body);
     return NULL;
@@ -8149,12 +8403,17 @@ ASTNode *parser_parse_method_declaration(Parser *parser) {
     free(param_types);
     free(method_name);
     free(return_type);
+    parser_free_effect_clauses(&effect_clauses);
     if (body)
       ast_destroy_node(body);
     ast_destroy_node(method_decl);
     return NULL;
   }
   memset(method_data, 0, sizeof(FunctionDeclaration));
+  if (!parser_apply_effect_clauses(method_data, &effect_clauses)) {
+    parser_set_error(parser, "Memory allocation failed for effect clauses");
+  }
+  parser_free_effect_clauses(&effect_clauses);
 
   method_data->name = (char *)string_intern(method_name);
   method_data->return_type =

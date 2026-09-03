@@ -2289,6 +2289,9 @@ static int type_checker_process_member(TypeChecker *checker,
     // Top-level inline assembly is permitted.
     return 1;
 
+  case AST_EFFECT_DECLARATION:
+    return 1;
+
   default:
     *handled = 0;
     break;

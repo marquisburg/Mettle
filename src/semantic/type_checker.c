@@ -38,7 +38,7 @@ TypeChecker *type_checker_create(SymbolTable *symbol_table) {
 TypeChecker *
 type_checker_create_with_error_reporter(SymbolTable *symbol_table,
                                         ErrorReporter *error_reporter) {
-  TypeChecker *checker = malloc(sizeof(TypeChecker));
+  TypeChecker *checker = calloc(1, sizeof(TypeChecker));
   if (!checker)
     return NULL;
 
@@ -100,9 +100,21 @@ type_checker_create_with_error_reporter(SymbolTable *symbol_table,
   checker->sequences = NULL;
   checker->generic_enum_templates = NULL;
   checker->generic_enum_template_count = 0;
+  checker->guards = NULL;
+  checker->guard_count = 0;
+  checker->guard_capacity = 0;
+  checker->refine_failure = NULL;
+  checker->effect_failure = NULL;
+  checker->effects = NULL;
+  checker->effect_count = 0;
+  checker->effect_capacity = 0;
+  checker->effect_obligations = NULL;
+  checker->effect_obligation_count = 0;
+  checker->effect_obligation_capacity = 0;
 
   // Initialize built-in types
   type_checker_init_builtin_types(checker);
+  type_checker_declare_builtin_effects(checker);
 
   // Test builtins: assert(cond) / assert_eq(left, right). Registered always
   // so @test bodies type-check in every build; calling them outside a @test
@@ -156,6 +168,9 @@ void type_checker_destroy(TypeChecker *checker) {
   if (checker) {
     free(checker->guards);
     free(checker->refine_failure);
+    free(checker->effect_failure);
+    free(checker->effects);
+    free(checker->effect_obligations);
     // Clean up built-in types
     type_destroy(checker->builtin_int8);
     type_destroy(checker->builtin_int16);
@@ -279,6 +294,9 @@ int type_checker_register_function_signature(TypeChecker *checker,
   /* A last parameter written `T[..]` gathers, and this is the signature a call
      earlier in the file resolves against, so it has to know that here. */
   type_checker_note_gathered_parameter(func_decl);
+  if (!type_checker_validate_effect_clauses(checker, declaration, func_decl)) {
+    return 0;
+  }
 
   Type **param_types = NULL;
   if (func_decl->parameter_count > 0) {
@@ -694,6 +712,9 @@ int type_checker_check_program(TypeChecker *checker, ASTNode *program) {
   // Pass 1: Register struct and enum types. On failure keep going so every
   // bad declaration is reported in one compile, not one per rebuild.
   int ok = 1;
+  if (!type_checker_register_effects(checker, program)) {
+    ok = 0;
+  }
   if (!type_checker_register_types(checker, prog, 0)) {
     ok = 0;
   }

@@ -30,6 +30,14 @@ typedef struct {
   int is_swappable;
   int is_kernel;
   const char *declared_name;
+  const char **effects;
+  size_t effect_count;
+  const char **requires;
+  size_t require_count;
+  const char **forbids;
+  size_t forbid_count;
+  const char **provides;
+  size_t provide_count;
   int scc_index;
   int scc_lowlink;
   int scc_on_stack;
@@ -314,6 +322,14 @@ static int collect_function(Reflect *reflect, ASTNode *decl) {
   function->is_inline = fd->is_inline;
   function->is_swappable = fd->is_swappable;
   function->is_kernel = fd->is_kernel;
+  function->forbids = (const char **)fd->effects_forbids;
+  function->forbid_count = fd->effects_forbids_count;
+  function->provides = (const char **)fd->effects_provides;
+  function->provide_count = fd->effects_provides_count;
+  function->effects = (const char **)fd->effects_with;
+  function->effect_count = fd->effects_with_count;
+  function->requires = (const char **)fd->effects_requires;
+  function->require_count = fd->effects_requires_count;
   return 1;
 }
 
@@ -635,10 +651,13 @@ static int build_image(Reflect *reflect, const char *root_file,
   const Type *field_info_type =
       lookup_qualified(checker, "std/rule.FieldInfo");
   const Type *site_type = lookup_qualified(checker, "std/rule.Site");
+  const Type *effect_info_type =
+      lookup_qualified(checker, "std/rule.EffectInfo");
   if (!program_type || !function_type || !type_info_type ||
-      !field_info_type || !site_type) {
+      !field_info_type || !site_type || !effect_info_type) {
     *error_message = strdup("a @rule needs the Program, Function, TypeInfo, "
-                            "FieldInfo and Site records from std/rule");
+                            "FieldInfo, EffectInfo and Site records from "
+                            "std/rule");
     return 0;
   }
   Image image;
@@ -716,10 +735,58 @@ static int build_image(Reflect *reflect, const char *root_file,
     image_put_bool(&image,
                    base + field_offset(function_type, "is_kernel", &image),
                    fn->is_kernel);
+    {
+      size_t effects = put_string_array(&image, fn->effects, fn->effect_count);
+      put_slice(&image, base + field_offset(function_type, "effects", &image),
+                effects, fn->effect_count);
+      size_t requires =
+          put_string_array(&image, fn->requires, fn->require_count);
+      put_slice(&image, base + field_offset(function_type, "requires", &image),
+                requires, fn->require_count);
+      size_t forbids = put_string_array(&image, fn->forbids, fn->forbid_count);
+      put_slice(&image, base + field_offset(function_type, "forbids", &image),
+                forbids, fn->forbid_count);
+      size_t provides =
+          put_string_array(&image, fn->provides, fn->provide_count);
+      put_slice(&image, base + field_offset(function_type, "provides", &image),
+                provides, fn->provide_count);
+    }
     if (!add_site(out, &site_capacity, fn->site)) {
       image.failed = 1;
     }
   }
+
+  size_t effects_offset = 0;
+  if (checker->effect_count > 0) {
+    effects_offset =
+        image_reserve(&image, effect_info_type->size * checker->effect_count,
+                      effect_info_type->alignment);
+    for (size_t i = 0; i < checker->effect_count && !image.failed; i++) {
+      const TypeCheckerEffect *effect = &checker->effects[i];
+      size_t base = effects_offset + i * effect_info_type->size;
+      IRRuleSite site;
+      site.file = effect->site.filename;
+      site.line = effect->site.line;
+      site.column = effect->site.column;
+      image_put_string(&image,
+                       base + field_offset(effect_info_type, "name", &image),
+                       effect->name);
+      image_put_string(&image,
+                       base + field_offset(effect_info_type, "module", &image),
+                       effect->is_builtin ? "" : module_of(effect->site.filename));
+      put_site(&image, site_type,
+               base + field_offset(effect_info_type, "site", &image), &site);
+      image_put_bool(&image,
+                     base + field_offset(effect_info_type, "is_builtin", &image),
+                     effect->is_builtin);
+      if (!effect->is_builtin && !add_site(out, &site_capacity, site)) {
+        image.failed = 1;
+      }
+    }
+  }
+  put_slice(&image,
+            program_offset + field_offset(program_type, "effects", &image),
+            effects_offset, checker->effect_count);
 
   for (size_t i = 0; i < reflect->type_count && !image.failed; i++) {
     RType *entry = &reflect->types[i];
@@ -897,9 +964,30 @@ static void reflect_free(Reflect *reflect) {
   free(reflect->modules);
 }
 
+static void attach_effects(Reflect *reflect, const IREffectResults *effects) {
+  if (!effects) {
+    return;
+  }
+  for (size_t i = 0; i < reflect->function_count; i++) {
+    RFunction *fn = &reflect->functions[i];
+    const char **performs = NULL;
+    size_t perform_count = 0;
+    const char **needs = NULL;
+    size_t need_count = 0;
+    if (ir_effect_results_lookup(effects, fn->declared_name, &performs,
+                                 &perform_count, &needs, &need_count)) {
+      fn->effects = performs;
+      fn->effect_count = perform_count;
+      fn->requires = needs;
+      fn->require_count = need_count;
+    }
+  }
+}
+
 int rule_reflect_build(TypeChecker *checker, ASTNode *program,
                        const char *root_file, const char *target,
-                       IRRuleImage *out, char **error_message) {
+                       const IREffectResults *effects, IRRuleImage *out,
+                       char **error_message) {
   if (!checker || !program || program->type != AST_PROGRAM || !out ||
       !error_message) {
     return 0;
@@ -947,6 +1035,9 @@ int rule_reflect_build(TypeChecker *checker, ASTNode *program,
   }
   if (ok) {
     ok = mark_recursion(&reflect);
+  }
+  if (ok) {
+    attach_effects(&reflect, effects);
   }
   if (ok && getenv("METTLE_DUMP_RULE_PROGRAM")) {
     dump_program(&reflect);

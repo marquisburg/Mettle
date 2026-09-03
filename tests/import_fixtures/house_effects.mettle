@@ -1,0 +1,15 @@
+import "std/io";
+
+export effect Audio;
+
+effect Private;
+
+export fn beep() with Audio {
+  println("beep");
+}
+
+fn hidden() with Private {
+}
+
+export fn quiet_helper() forbids Audio, Private {
+}

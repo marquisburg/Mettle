@@ -23,6 +23,19 @@ struct TypeCheckerGuard;
 
 #include "symbol_table.h"
 
+typedef struct TypeCheckerEffect {
+  const char *name;
+  SourceLocation site;
+  int is_exported;
+  int is_builtin;
+} TypeCheckerEffect;
+
+typedef struct TypeCheckerEffectObligation {
+  const char *function;
+  const char *signature;
+  SourceLocation location;
+} TypeCheckerEffectObligation;
+
 typedef struct {
   SymbolTable *symbol_table;
   int has_error;
@@ -32,6 +45,13 @@ typedef struct {
   size_t guard_count;
   size_t guard_capacity;
   char *refine_failure;
+  char *effect_failure;
+  TypeCheckerEffect *effects;
+  size_t effect_count;
+  size_t effect_capacity;
+  TypeCheckerEffectObligation *effect_obligations;
+  size_t effect_obligation_count;
+  size_t effect_obligation_capacity;
   // Built-in type instances
   Type *builtin_int8;
   Type *builtin_int16;
@@ -346,6 +366,36 @@ int type_checker_check_expansion_budget(TypeChecker *checker, size_t budget);
 /* Fold `offsetof(Field)` to a byte offset from the type table. */
 int type_checker_eval_offsetof(TypeChecker *checker, CallExpression *call,
                                SourceLocation location, long long *out_offset);
+
+int type_checker_find_effect(const TypeChecker *checker, const char *name);
+int type_checker_declare_effect(TypeChecker *checker, const char *name,
+                                SourceLocation site, int is_exported,
+                                int is_builtin);
+void type_checker_declare_builtin_effects(TypeChecker *checker);
+int type_checker_register_effects(TypeChecker *checker, ASTNode *program);
+int type_checker_validate_effect_clauses(TypeChecker *checker,
+                                         ASTNode *declaration,
+                                         FunctionDeclaration *func_decl);
+const char *type_checker_effect_signature(const char *const *with,
+                                          size_t with_count, int closed,
+                                          const char *const *requires,
+                                          size_t require_count);
+int type_checker_add_effect_obligation(TypeChecker *checker,
+                                       const char *function,
+                                       const char *signature,
+                                       SourceLocation location);
+const char *type_checker_function_value_name(TypeChecker *checker,
+                                             const ASTNode *expression);
+int type_checker_fn_effects_flow(TypeChecker *checker, const Type *dest,
+                                 const Type *src);
+int type_checker_fn_effect_sets_equal(const Type *lhs, const Type *rhs);
+int type_checker_fn_signatures_equal(const Type *lhs, const Type *rhs);
+int type_checker_fn_type_apply_effect_clauses(TypeChecker *checker, Type *fp,
+                                              const char *clauses);
+const char *type_checker_fn_type_effect_clause_start(const char *text);
+void type_checker_report_effect_failure(TypeChecker *checker,
+                                        const ASTNode *src_expr,
+                                        SourceLocation location);
 
 long long type_checker_layout_digest(const Type *type);
 

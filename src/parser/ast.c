@@ -170,6 +170,18 @@ static ASTNode *ast_clone_method_declaration(ASTNode *clone, const ASTNode *node
   dst->is_interrupt = src->is_interrupt;
   dst->is_rule = src->is_rule;
   dst->rewrite_role = src->rewrite_role;
+  dst->effects_with_count = src->effects_with_count;
+  dst->effects_with =
+      ast_copy_string_array(src->effects_with, src->effects_with_count);
+  dst->effects_forbids_count = src->effects_forbids_count;
+  dst->effects_forbids =
+      ast_copy_string_array(src->effects_forbids, src->effects_forbids_count);
+  dst->effects_requires_count = src->effects_requires_count;
+  dst->effects_requires = ast_copy_string_array(src->effects_requires,
+                                                src->effects_requires_count);
+  dst->effects_provides_count = src->effects_provides_count;
+  dst->effects_provides = ast_copy_string_array(src->effects_provides,
+                                                src->effects_provides_count);
   dst->is_variadic = src->is_variadic;
   dst->simd_mode = src->simd_mode;
   dst->captured_count = src->captured_count;
@@ -325,6 +337,7 @@ static ASTNode *ast_clone_function_call(ASTNode *clone, const ASTNode *node) {
   dst->written_name = ast_intern_string(src->written_name);
   dst->is_indirect_call = src->is_indirect_call;
   dst->callee_closure_env = src->callee_closure_env;
+  dst->effect_signature = src->effect_signature;
   dst->object = src->object ? ast_clone_node(src->object) : NULL;
   if (dst->object)
     ast_add_child(clone, dst->object);
@@ -352,6 +365,20 @@ static ASTNode *ast_clone_function_call(ASTNode *clone, const ASTNode *node) {
   } else {
     dst->type_args = NULL;
   }
+  clone->data = dst;
+  return clone;
+}
+
+static ASTNode *ast_clone_effect_declaration(ASTNode *clone,
+                                             const ASTNode *node) {
+  EffectDeclaration *src = (EffectDeclaration *)node->data;
+  EffectDeclaration *dst = malloc(sizeof(EffectDeclaration));
+  if (!dst) {
+    free(clone);
+    return NULL;
+  }
+  dst->name = ast_intern_string(src->name);
+  dst->is_exported = src->is_exported;
   clone->data = dst;
   return clone;
 }
@@ -424,6 +451,7 @@ static ASTNode *ast_clone_func_ptr_call(ASTNode *clone, const ASTNode *node) {
   dst->function = src->function ? ast_clone_node(src->function) : NULL;
   if (dst->function)
     ast_add_child(clone, dst->function);
+  dst->effect_signature = src->effect_signature;
   dst->argument_count = src->argument_count;
   if (src->argument_count > 0) {
     dst->arguments = malloc(src->argument_count * sizeof(ASTNode *));
@@ -1116,6 +1144,7 @@ static const AstCloneHandler AST_CLONE_HANDLERS[AST_NODE_TYPE_COUNT] = {
     [AST_TYPE_DECLARATION] = ast_clone_type_declaration,
     [AST_FUNCTION_CALL] = ast_clone_function_call,
     [AST_TRAIT_DECLARATION] = ast_clone_trait_declaration,
+    [AST_EFFECT_DECLARATION] = ast_clone_effect_declaration,
     [AST_IMPL_DECLARATION] = ast_clone_impl_declaration,
     [AST_FUNC_PTR_CALL] = ast_clone_func_ptr_call,
     [AST_GPU_LAUNCH] = ast_clone_gpu_launch,
@@ -1276,6 +1305,10 @@ void ast_destroy_node(ASTNode *node) {
       free(func_decl->captured_types);
       ast_free_string(func_decl->env_struct_name);
       ast_destroy_node(func_decl->composed_name);
+      ast_function_set_effects(func_decl, AST_EFFECT_CLAUSE_WITH, NULL, 0);
+      ast_function_set_effects(func_decl, AST_EFFECT_CLAUSE_FORBIDS, NULL, 0);
+      ast_function_set_effects(func_decl, AST_EFFECT_CLAUSE_REQUIRES, NULL, 0);
+      ast_function_set_effects(func_decl, AST_EFFECT_CLAUSE_PROVIDES, NULL, 0);
       free(func_decl);
     }
     break;
@@ -1354,6 +1387,14 @@ void ast_destroy_node(ASTNode *node) {
       ast_free_string(trait_decl->name);
       free(trait_decl->methods);
       free(trait_decl);
+    }
+    break;
+  }
+  case AST_EFFECT_DECLARATION: {
+    EffectDeclaration *effect_decl = (EffectDeclaration *)node->data;
+    if (effect_decl) {
+      ast_free_string(effect_decl->name);
+      free(effect_decl);
     }
     break;
   }
@@ -1805,6 +1846,14 @@ ASTNode *ast_create_function_declaration(const char *name, char **param_names,
   func_decl->is_interrupt = 0;
   func_decl->is_rule = 0;
   func_decl->rewrite_role = 0;
+  func_decl->effects_with = NULL;
+  func_decl->effects_with_count = 0;
+  func_decl->effects_forbids = NULL;
+  func_decl->effects_forbids_count = 0;
+  func_decl->effects_requires = NULL;
+  func_decl->effects_requires_count = 0;
+  func_decl->effects_provides = NULL;
+  func_decl->effects_provides_count = 0;
   func_decl->is_variadic = 0;
   func_decl->simd_mode = SIMD_ATTR_NONE;
   func_decl->captured_names = NULL;
@@ -2019,6 +2068,70 @@ ASTNode *ast_create_match_expression(ASTNode *expression, MatchArm *arms,
   return ast_create_match_node(expression, arms, arm_count, 1, location);
 }
 
+ASTNode *ast_create_effect_declaration(const char *name,
+                                       SourceLocation location) {
+  ASTNode *node = ast_create_node(AST_EFFECT_DECLARATION, location);
+  if (!node) {
+    return NULL;
+  }
+  EffectDeclaration *decl = malloc(sizeof(EffectDeclaration));
+  if (!decl) {
+    free(node);
+    return NULL;
+  }
+  decl->name = ast_intern_string(name);
+  decl->is_exported = 0;
+  node->data = decl;
+  return node;
+}
+
+int ast_function_set_effects(FunctionDeclaration *decl, int clause,
+                             char **names, size_t count) {
+  char ***slot;
+  size_t *count_slot;
+  if (!decl) {
+    return 0;
+  }
+  switch (clause) {
+  case AST_EFFECT_CLAUSE_WITH:
+    slot = &decl->effects_with;
+    count_slot = &decl->effects_with_count;
+    break;
+  case AST_EFFECT_CLAUSE_FORBIDS:
+    slot = &decl->effects_forbids;
+    count_slot = &decl->effects_forbids_count;
+    break;
+  case AST_EFFECT_CLAUSE_REQUIRES:
+    slot = &decl->effects_requires;
+    count_slot = &decl->effects_requires_count;
+    break;
+  case AST_EFFECT_CLAUSE_PROVIDES:
+    slot = &decl->effects_provides;
+    count_slot = &decl->effects_provides_count;
+    break;
+  default:
+    return 0;
+  }
+  for (size_t i = 0; i < *count_slot; i++) {
+    ast_free_string((*slot)[i]);
+  }
+  free(*slot);
+  *slot = NULL;
+  *count_slot = 0;
+  if (count == 0) {
+    return 1;
+  }
+  *slot = malloc(count * sizeof(char *));
+  if (!*slot) {
+    return 0;
+  }
+  for (size_t i = 0; i < count; i++) {
+    (*slot)[i] = ast_intern_string(names[i]);
+  }
+  *count_slot = count;
+  return 1;
+}
+
 ASTNode *ast_create_trait_declaration(const char *name,
                                       SourceLocation location) {
   ASTNode *node = ast_create_node(AST_TRAIT_DECLARATION, location);
@@ -2084,6 +2197,7 @@ ASTNode *ast_create_call_expression(const char *function_name,
   call_expr->written_name = NULL;
   call_expr->is_indirect_call = 0;
   call_expr->callee_closure_env = NULL;
+  call_expr->effect_signature = NULL;
   call_expr->is_gpu_index = 0;
   call_expr->is_gpu_atomic = 0;
   call_expr->atomic_address_space = MTLC_ADDRESS_SPACE_DEFAULT;
@@ -2152,6 +2266,7 @@ ASTNode *ast_create_func_ptr_call(ASTNode *function, ASTNode **arguments,
 
   fp_call->function = function;
   fp_call->argument_count = argument_count;
+  fp_call->effect_signature = NULL;
 
   if (function) {
     ast_add_child(node, function);
@@ -2553,6 +2668,7 @@ ASTNode *ast_create_method_call(ASTNode *object, const char *method_name,
   call_expr->written_name = NULL;
   call_expr->is_indirect_call = 0;
   call_expr->callee_closure_env = NULL;
+  call_expr->effect_signature = NULL;
   call_expr->is_gpu_index = 0;
   call_expr->is_gpu_atomic = 0;
   call_expr->atomic_address_space = MTLC_ADDRESS_SPACE_DEFAULT;

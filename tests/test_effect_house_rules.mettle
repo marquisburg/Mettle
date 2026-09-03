@@ -1,0 +1,10 @@
+import "import_fixtures/house_effects";
+
+fn silence() forbids Audio {
+  beep();
+}
+
+fn main() -> int32 {
+  silence();
+  return 0;
+}

@@ -135,6 +135,16 @@ Proof diagnostics:
 
 [Types](types.md) covers declared types and what the compiler proves.
 
+Effect diagnostics:
+
+| Code | Meaning |
+|------|---------|
+| F0001 | A function reaches an effect it forbids |
+| F0002 | A function requires an effect nothing provides |
+| F0003 | A function value does not fit the effects its type declares |
+
+[Effects](effects.md) covers the F codes in context.
+
 ## JSON output
 
 `--error-format=json` writes one JSON object per diagnostic to stderr, for

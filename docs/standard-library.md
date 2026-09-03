@@ -294,8 +294,11 @@ Wait results come back as `WAIT_OBJECT_0()`, `WAIT_TIMEOUT()`, or
 ## std/rule
 
 The records a `@rule fn` reads and returns: `Program`, `Function`, `TypeInfo`,
-`FieldInfo`, `Site` and `Verdict`, with `verdict_pass()`,
-`verdict_fail(site, message)` and `verdict_gap(site, message)`.
+`FieldInfo`, `EffectInfo`, `Site` and `Verdict`, with `verdict_pass()`,
+`verdict_fail(site, message)` and `verdict_gap(site, message)`. A `Function`
+carries its inferred `effects` and `requires` and its declared `forbids` and
+`provides`; `function_performs`, `function_requires`, `function_forbids`,
+`function_provides` and `program_effect_index` read them.
 
 Verdicts about the program as a whole, for a complaint no line owns:
 `verdict_fail_program(message)` and `verdict_gap_program(message)`.

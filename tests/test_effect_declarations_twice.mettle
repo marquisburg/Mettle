@@ -1,0 +1,6 @@
+effect Render;
+effect Render;
+
+fn main() -> int32 {
+  return 0;
+}

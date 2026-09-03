@@ -198,6 +198,18 @@ IRFunction *ir_lower_function(IRLoweringContext *context,
                           function_data->is_interrupt;
   function->is_pure = function_data->is_pure;
   function->is_noalloc = function_data->is_noalloc;
+  ir_function_set_effects(function, IR_EFFECT_CLAUSE_WITH,
+                          (const char *const *)function_data->effects_with,
+                          function_data->effects_with_count);
+  ir_function_set_effects(function, IR_EFFECT_CLAUSE_FORBIDS,
+                          (const char *const *)function_data->effects_forbids,
+                          function_data->effects_forbids_count);
+  ir_function_set_effects(function, IR_EFFECT_CLAUSE_REQUIRES,
+                          (const char *const *)function_data->effects_requires,
+                          function_data->effects_requires_count);
+  ir_function_set_effects(function, IR_EFFECT_CLAUSE_PROVIDES,
+                          (const char *const *)function_data->effects_provides,
+                          function_data->effects_provides_count);
   function->is_test = function_data->is_test;
   function->is_rule = function_data->is_rule;
   function->rewrite_role = function_data->rewrite_role;

@@ -1,4 +1,5 @@
 #include "ir_optimize_internal.h"
+#include "../ir_effects.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -21,41 +22,15 @@
  * actually execute. */
 
 static int noalloc_name_is_allocator(const char *name) {
-  static const char *const allocators[] = {
-      "malloc",         "calloc",       "realloc",
-      "aligned_alloc",  "_aligned_malloc", "strdup",
-      "_strdup",        "wcsdup",       "HeapAlloc",
-      "VirtualAlloc",   "mmap",         NULL,
-  };
-  for (size_t i = 0; allocators[i]; i++) {
-    if (strcmp(name, allocators[i]) == 0) {
-      return 1;
-    }
-  }
-  return 0;
+  return ir_effects_name_is_allocator(name);
 }
 
 /* Externs known not to allocate: owned math, raw memory and string inspection,
  * and the compiler's own trap helpers (they terminate the process). Anything
- * else outside the program is unprovable and therefore a violation. */
+ * else outside the program is unprovable and therefore a violation. The lists
+ * live with the effect pass, which reads them as the sources of `alloc`. */
 static int noalloc_name_is_known_clean(const char *name) {
-  static const char *const clean[] = {
-      "sqrt",   "sqrtf", "sin",    "sinf",   "cos",    "cosf",  "tan",
-      "tanf",   "exp",   "expf",   "log",    "logf",   "log2",  "log2f",
-      "pow",    "powf",  "fabs",   "fabsf",  "floor",  "floorf", "ceil",
-      "ceilf",  "round", "roundf", "fmod",   "fmodf",  "atan",  "atanf",
-      "atan2",  "atan2f", "memcpy", "memset", "memmove", "memcmp",
-      "strlen", "strcmp", "strncmp", "abs",   "labs",   "llabs", NULL,
-  };
-  if (strstr(name, "crash_trap") != NULL) {
-    return 1;
-  }
-  for (size_t i = 0; clean[i]; i++) {
-    if (strcmp(name, clean[i]) == 0) {
-      return 1;
-    }
-  }
-  return 0;
+  return ir_effects_name_is_known_clean(name);
 }
 
 /* Memoized allocation verdict per function, indexed in program order.

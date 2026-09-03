@@ -160,6 +160,14 @@ struct IRInterpMachine {
   unsigned long long swap_replacements[256];
   long long swap_pending_count;
 
+  struct {
+    char *name;
+    char *forbids;
+    char *provides;
+  } *effect_frames;
+  size_t effect_frame_count;
+  size_t effect_frame_capacity;
+
   /* Execution counting (zero-run PGO). */
   int count_enabled;
   struct {
@@ -277,6 +285,12 @@ void ir_interp_destroy(IRInterpMachine *machine) {
     free(machine->count_tables[i].counts);
   }
   free(machine->count_tables);
+  for (size_t i = 0; i < machine->effect_frame_count; i++) {
+    free(machine->effect_frames[i].name);
+    free(machine->effect_frames[i].forbids);
+    free(machine->effect_frames[i].provides);
+  }
+  free(machine->effect_frames);
   ii_env_free(&machine->globals);
   free(machine);
 }
@@ -2160,6 +2174,177 @@ static long long ii_buffer_size_at(IRInterpMachine *machine,
 
 /* Modeled externs return 1 and set *result; unknown externs are traced and
  * return 0 (meaning: use the pure default). Returns -1 on trap. */
+static char *ii_string_arg_copy(IRInterpMachine *machine, const char *callee,
+                                size_t index, const IRInterpValue *arg) {
+  const unsigned char *bytes = NULL;
+  size_t length = 0;
+  char *copy;
+  if (ii_callee_param_is_cstring(machine, callee, index)) {
+    long long offset = 0;
+    long long end;
+    IIBuffer *buf = ii_addr_to_buffer(
+        machine, (unsigned long long)ii_as_int(arg), 1, &offset);
+    if (!buf) {
+      return NULL;
+    }
+    end = offset;
+    while (end < buf->size && buf->data[end]) {
+      end++;
+    }
+    bytes = buf->data + offset;
+    length = (size_t)(end - offset);
+  } else if (!ii_read_string(machine, (unsigned long long)ii_as_int(arg),
+                             &bytes, &length)) {
+    return NULL;
+  }
+  copy = malloc(length + 1);
+  if (!copy) {
+    return NULL;
+  }
+  memcpy(copy, bytes, length);
+  copy[length] = '\0';
+  return copy;
+}
+
+static int ii_effect_list_has(const char *list, const char *effect) {
+  size_t length = strlen(effect);
+  const char *p = list ? list : "";
+  while (*p) {
+    const char *end = p;
+    while (*end && *end != ',') {
+      end++;
+    }
+    if ((size_t)(end - p) == length && strncmp(p, effect, length) == 0) {
+      return 1;
+    }
+    p = *end ? end + 1 : end;
+  }
+  return 0;
+}
+
+static const char *ii_effect_forbidder(IRInterpMachine *machine,
+                                       const char *effect) {
+  for (size_t i = machine->effect_frame_count; i > 0; i--) {
+    if (ii_effect_list_has(machine->effect_frames[i - 1].forbids, effect)) {
+      return machine->effect_frames[i - 1].name;
+    }
+  }
+  return NULL;
+}
+
+static int ii_effect_provided(IRInterpMachine *machine, const char *effect) {
+  for (size_t i = machine->effect_frame_count; i > 0; i--) {
+    if (ii_effect_list_has(machine->effect_frames[i - 1].provides, effect)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int ii_effect_each(IRInterpMachine *machine, const char *list,
+                          const char *function, int is_requirement) {
+  const char *p = list ? list : "";
+  while (*p) {
+    const char *end = p;
+    char effect[128];
+    size_t take;
+    while (*end && *end != ',') {
+      end++;
+    }
+    take = (size_t)(end - p);
+    if (take >= sizeof(effect)) {
+      take = sizeof(effect) - 1;
+    }
+    memcpy(effect, p, take);
+    effect[take] = '\0';
+    if (is_requirement) {
+      if (!ii_effect_provided(machine, effect)) {
+        char detail[160];
+        snprintf(detail, sizeof(detail),
+                 "Fatal error: effect violation: `%s` requires `%s` and no "
+                 "caller provides it",
+                 function, effect);
+        ii_fail(machine, IR_INTERP_GUARD_TRAP, detail);
+        return 0;
+      }
+    } else {
+      const char *forbidder = ii_effect_forbidder(machine, effect);
+      if (forbidder) {
+        char detail[160];
+        snprintf(detail, sizeof(detail),
+                 "Fatal error: effect violation: `%s` performs `%s`, which "
+                 "`%s` forbids",
+                 function, effect, forbidder);
+        ii_fail(machine, IR_INTERP_GUARD_TRAP, detail);
+        return 0;
+      }
+    }
+    p = *end ? end + 1 : end;
+  }
+  return 1;
+}
+
+static int ii_effects_call(IRInterpMachine *machine, const char *name,
+                           const IRInterpValue *args, size_t arg_count) {
+  if (strcmp(name, "mettle_effects_leave") == 0) {
+    if (machine->effect_frame_count > 0) {
+      size_t last = --machine->effect_frame_count;
+      free(machine->effect_frames[last].name);
+      free(machine->effect_frames[last].forbids);
+      free(machine->effect_frames[last].provides);
+    }
+    return 1;
+  }
+  if (strcmp(name, "mettle_effects_perform") == 0 && arg_count == 2) {
+    char *effect = ii_string_arg_copy(machine, name, 0, &args[0]);
+    char *function = ii_string_arg_copy(machine, name, 1, &args[1]);
+    int ok = effect && function && ii_effect_each(machine, effect, function, 0);
+    free(effect);
+    free(function);
+    return ok ? 1 : -1;
+  }
+  if (strcmp(name, "mettle_effects_enter") == 0 && arg_count == 5) {
+    char *function = ii_string_arg_copy(machine, name, 0, &args[0]);
+    char *with = ii_string_arg_copy(machine, name, 1, &args[1]);
+    char *forbids = ii_string_arg_copy(machine, name, 2, &args[2]);
+    char *requires = ii_string_arg_copy(machine, name, 3, &args[3]);
+    char *provides = ii_string_arg_copy(machine, name, 4, &args[4]);
+    if (!function || !with || !forbids || !requires || !provides ||
+        !ii_effect_each(machine, with, function, 0) ||
+        !ii_effect_each(machine, requires, function, 1)) {
+      free(function);
+      free(with);
+      free(forbids);
+      free(requires);
+      free(provides);
+      return -1;
+    }
+    free(with);
+    free(requires);
+    if (machine->effect_frame_count == machine->effect_frame_capacity) {
+      size_t next = machine->effect_frame_capacity
+                        ? machine->effect_frame_capacity * 2
+                        : 16;
+      void *grown = realloc(machine->effect_frames,
+                            next * sizeof(*machine->effect_frames));
+      if (!grown) {
+        free(function);
+        free(forbids);
+        free(provides);
+        return -1;
+      }
+      machine->effect_frames = grown;
+      machine->effect_frame_capacity = next;
+    }
+    machine->effect_frames[machine->effect_frame_count].name = function;
+    machine->effect_frames[machine->effect_frame_count].forbids = forbids;
+    machine->effect_frames[machine->effect_frame_count].provides = provides;
+    machine->effect_frame_count++;
+    return 1;
+  }
+  return 1;
+}
+
 static int ii_extern_call(IRInterpMachine *machine, const char *name,
                           const IRInterpValue *args, size_t arg_count,
                           IRInterpValue *result) {
@@ -2818,6 +3003,10 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     }
     *result = ii_int_value((long long)addr);
     return 1;
+  }
+
+  if (strncmp(name, "mettle_effects_", 15) == 0) {
+    return ii_effects_call(machine, name, args, arg_count);
   }
 
   /* assert()/assert_eq() builtins: interpreted natively by `mettle test`. */

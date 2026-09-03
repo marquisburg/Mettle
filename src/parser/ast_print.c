@@ -447,6 +447,17 @@ static void print_statement(AstPrinter *printer, const ASTNode *node) {
   }
 }
 
+static void print_effect_clause(AstPrinter *printer, const char *word,
+                                char **names, size_t count) {
+  if (count == 0) {
+    return;
+  }
+  fprintf(printer->out, " %s ", word);
+  for (size_t i = 0; i < count; i++) {
+    fprintf(printer->out, "%s%s", i ? ", " : "", names[i] ? names[i] : "?");
+  }
+}
+
 static void print_declaration(AstPrinter *printer, const ASTNode *node) {
   if (!node) {
     return;
@@ -470,6 +481,18 @@ static void print_declaration(AstPrinter *printer, const ASTNode *node) {
               decl->field_types ? decl->field_types[i] : "<type>");
     }
     fputs("}\n\n", printer->out);
+    break;
+  }
+
+  case AST_EFFECT_DECLARATION: {
+    const EffectDeclaration *decl = (const EffectDeclaration *)node->data;
+    if (!decl) {
+      break;
+    }
+    if (decl->is_exported) {
+      fputs("export ", printer->out);
+    }
+    fprintf(printer->out, "effect %s;\n\n", decl->name ? decl->name : "<name>");
     break;
   }
 
@@ -556,6 +579,14 @@ static void print_declaration(AstPrinter *printer, const ASTNode *node) {
     if (decl->return_type) {
       fprintf(printer->out, " -> %s", decl->return_type);
     }
+    print_effect_clause(printer, "with", decl->effects_with,
+                        decl->effects_with_count);
+    print_effect_clause(printer, "forbids", decl->effects_forbids,
+                        decl->effects_forbids_count);
+    print_effect_clause(printer, "requires", decl->effects_requires,
+                        decl->effects_requires_count);
+    print_effect_clause(printer, "provides", decl->effects_provides,
+                        decl->effects_provides_count);
     if (!decl->body) {
       fputs(";\n\n", printer->out);
       break;

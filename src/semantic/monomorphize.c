@@ -3385,6 +3385,7 @@ static void cc_rewrite_captures(ASTNode *node, const CCEnv *caps) {
         fp->function = member;
         fp->arguments = c->arguments;
         fp->argument_count = c->argument_count;
+        fp->effect_signature = NULL;
         node->child_count = 0;
         node->type = AST_FUNC_PTR_CALL;
         node->data = fp;

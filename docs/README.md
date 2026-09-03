@@ -53,6 +53,7 @@ frontend can drive instead. The documentation is organized the same way.
 - [Rewrite rules](rewrite-rules.md): `rewrite`, identities from your own code
 - [Rules](rules.md): `@rule`, a property the program requires of itself, checked on every build
   that the compiler proves, applies, and checks.
+- [Effects](effects.md): `effect`, `with`, `forbids`, `requires`, `provides`; what a function does and needs, inferred through the call graph and proven on every build.
 - [ML-driven IR optimization](ml-opt.md): `--ml-opt` and its validation gate.
 - [The --explain-json schema](explain-json.md): the machine-readable
   optimization report.

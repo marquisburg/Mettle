@@ -1,0 +1,22 @@
+effect Render;
+
+fn gl_draw() with Render {
+}
+
+fn probe(job: fn() -> void) forbids Render {
+  job();
+}
+
+fn bounded(job: fn() -> void with none) forbids Render {
+  job();
+}
+
+fn nothing() {
+}
+
+fn main() -> int32 {
+  probe(nothing);
+  bounded(nothing);
+  gl_draw();
+  return 0;
+}

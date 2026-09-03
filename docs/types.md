@@ -421,6 +421,17 @@ Which one you write says which you mean. A plain function converts to a
 closure type on assignment and at a call.
 [Declarations](declarations.md) covers capture rules and lifetimes.
 
+Either kind may say what a call through it performs and needs:
+
+```mettle
+fn run_sim(job: fn() -> void with Sim) { job(); }
+fn on_ui(job: Fn() -> void requires MainThread) provides MainThread { job(); }
+```
+
+A type with a `with` clause is closed, so a function handed to it has to
+perform nothing outside the clause, and the compiler checks that against what
+the function actually reaches. [Effects](effects.md) covers the clauses.
+
 ## Generic types and functions
 
 A function may take type parameters:

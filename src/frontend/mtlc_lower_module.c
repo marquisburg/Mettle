@@ -548,6 +548,21 @@ static void populate_function_symbol(IRProgram *program,
   params = build_param_types(s, &pc);
   entry.param_types = params;
   entry.param_count = pc;
+  char clause[512];
+  clause[0] = '\0';
+  if (fd->effects_with_count > 0) {
+    size_t used = 0;
+    for (size_t i = 0; i < fd->effects_with_count && used + 2 < sizeof(clause);
+         i++) {
+      int wrote = snprintf(clause + used, sizeof(clause) - used, "%s%s",
+                           i ? "," : "", fd->effects_with[i]);
+      if (wrote < 0) {
+        break;
+      }
+      used += (size_t)wrote;
+    }
+    entry.effect_clause = clause;
+  }
   ir_program_add_symbol(program, &entry); /* copies param_types */
   free(params);
 }

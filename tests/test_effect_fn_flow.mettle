@@ -1,0 +1,11 @@
+effect Sim;
+
+fn step() with Sim {
+}
+
+fn main() -> int32 {
+  var g: fn() -> void = step;
+  var h: fn() -> void with Sim = g;
+  h();
+  return 0;
+}

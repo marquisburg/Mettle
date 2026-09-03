@@ -204,15 +204,18 @@ collects at a point nobody wrote.
 The second is that the properties a model depends on are stated in the program
 and checked on every build. A job that must not allocate is `@noalloc`. A
 queue index that must stay in the ring is a [declared type](types.md) the
-compiler proves in range. Properties the compiler has no word for are
-[rules](rules.md): a job is reached from the worker and never from `main`, a
-state machine's `step` decides every state, a handler runs on one thread. A
-rule that cannot decide says so, which is what happens the moment a call goes
-through a function pointer.
+compiler proves in range. Where code may run is an [effect](effects.md): a job
+`requires Worker`, the worker's entry `provides` it, and a job reached from
+anywhere else is refused with the call chain, so thread affinity is a fact the
+compiler holds and never a comment. What the compiler has no word for is a
+[rule](rules.md): a state machine's `step` decides every state, every function
+that performs `Render` lives in one module. A rule that cannot decide says so,
+which is what happens the moment a call goes through a function pointer whose
+type says nothing about its effects.
 
 [`examples/job_system/`](../examples/job_system/) is the whole shape in one
 file: a queue on `std/thread`, a priority function swapped at `quiesce`, a
-`Slot` type, and three rules the build stops on.
+`Slot` type, a `Worker` effect, and three rules the build stops on.
 
 What a program cannot get is the other kind of model: `async`/`await` with a
 yield the compiler inserts, or a work-stealing pool that runs code at a point

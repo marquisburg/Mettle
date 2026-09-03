@@ -602,11 +602,21 @@ program names, and staged work lands there and nowhere else; it is the proof
 that the consented model works in release builds. And the properties a model
 depends on are written in the program and checked on every build: a job that
 may not allocate is `@noalloc`, a slot that stays in the ring is a declared
-type the compiler proves in range, and what the compiler has no word for is a
-`@rule`, such as a job being reached from the worker and never from `main`,
-or a state machine's `step` deciding every state. `examples/job_system/` is
-that shape in one file, and a module offers its rules to whoever imports it,
-which is how a house style stops being a script in another language.
+type the compiler proves in range, where code may run is an effect the
+program declares (`requires Worker` on the job, `provides Worker` on the
+thread's entry, and the compiler infers everything between and refuses a job
+reached from `main` with the chain that reached it), and what the compiler has
+no word for is a `@rule`, such as a state machine's `step` deciding every
+state. `examples/job_system/` is that shape in one file, and a module offers
+its rules and its effects to whoever imports it, which is how a house style
+stops being a script in another language.
+
+Effects are the general form of what `@noalloc` and `@pure` were two fixed
+cases of. `alloc`, `asm` and `syscall` are built in because the compiler knows
+their sources; everything else the program declares, and the compiler holds it
+to the same standard: inferred through the call graph, refused with the chain,
+gapped at a call it cannot follow, and re-checked at run time by a machine
+that does not trust the analysis.
 
 VII.7 has already decided the other half. The model where the points are
 inserted, `async`/`await` with a compiler-placed yield, a pool that steals
@@ -863,7 +873,13 @@ only where proven.
   `--check-proofs` extends that check into a compiled program.
 - ~~An execution model.~~ *(V.6)* Landed as a position and a worked shape:
   the model is the program's, `quiesce` is its point, and its properties are
-  a contract, a declared type and rules that hold on every build.
+  a contract, a declared type, effects and rules that hold on every build.
+  Effects are what made the compiler see the model: `with`, `forbids`,
+  `requires` and `provides` are declared at the edges, inferred through the
+  whole call graph, refused with the chain that broke them (F0001 to F0003),
+  carried on function types so a call through a pointer stays honest, read by
+  rules, and re-checked under `mettle test` and `--check-effects` by a
+  machine that does not trust the analysis.
 - ~~A machine concept, the reachable half.~~ *(III.3)* Landed. A target's
   description is a Mettle `const` the compiler reads: `mettle target
   <triple>` prints every built-in one, `--target desc.mettle` builds for a

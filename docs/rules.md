@@ -48,7 +48,12 @@ variants its `match` and `switch` arms name, as `Shape.Circle`), `param_types`,
 `return_type`, and the flags `is_extern`, `is_exported`, `is_recursive`
 (part of a call cycle, itself included), `is_address_taken`,
 `has_indirect_calls`, `is_noalloc`, `is_pure`, `is_inline`, `is_swappable`
-and `is_kernel`.
+and `is_kernel`. Its [effects](effects.md) are `effects` (what it performs,
+inferred, `alloc` and `unknown` included), `requires` (what it needs,
+inferred), and `forbids` and `provides` as declared.
+
+`p.effects` lists every effect the program can name, built-in ones included,
+as `EffectInfo` with `name`, `module`, `site` and `is_builtin`.
 
 A `TypeInfo` carries `name`, `qualified`, `module`, `site`, `kind`
 (`struct`, `enum`, `tagged_enum` or `declared`), `base` (what a declared type
@@ -58,8 +63,10 @@ refines, empty for the rest), `size`, `align`, `layout` (the same digest
 
 `std/rule` also has `function_calls(f, callee)`, `function_matches(f, owner,
 variant)`, `program_function_index(p, qualified)`, `program_type_index(p,
-qualified)` and `function_reaches(p, f, callee)`, which follows direct calls
-transitively.
+qualified)`, `function_reaches(p, f, callee)`, which follows direct calls
+transitively, and `function_performs`, `function_requires`,
+`function_forbids`, `function_provides` and `program_effect_index` over the
+effects.
 
 Compile-time functions marked `@test` and the rules themselves are not in
 `p.functions`. They never ship, so no property of the shipped program depends

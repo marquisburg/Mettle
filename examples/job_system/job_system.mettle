@@ -6,6 +6,8 @@ extern fn mettle_swap_stage(slot: rawptr, replacement: rawptr) -> int32;
 
 type Slot = uint32 where value < 64;
 
+effect Worker;
+
 enum Phase { Idle, Running, Draining, Done }
 
 struct Job {
@@ -24,7 +26,7 @@ var g_phase: int32 = 0;
   j.result = j.cost * j.cost;
 }
 
-@noalloc fn job_run(j: Job*) {
+@noalloc fn job_run(j: Job*) requires Worker {
   job_square(j);
 }
 
@@ -54,7 +56,7 @@ fn queue_take(out: Job**) -> bool {
   return true;
 }
 
-fn worker_main(arg: cstring) -> uint32 {
+fn worker_main(arg: cstring) -> uint32 provides Worker {
   var done: uint32 = 0;
   while (true) {
     var j: Job* = 0;
@@ -104,6 +106,9 @@ fn advance() {
     if (f.name[0] == 'j' && f.name[1] == 'o' && f.name[2] == 'b' && f.name[3] == '_') {
       if (function_reaches(p, p.functions[entry], f.qualified)) {
         return verdict_fail(f.site, "a job is reached from main; only worker_main may run jobs");
+      }
+      if (f.name == "job_run" && !function_requires(f, "Worker")) {
+        return verdict_fail(f.site, "job_run runs on the worker, so it requires Worker");
       }
     }
     if (f.has_indirect_calls && f.name != "main") {

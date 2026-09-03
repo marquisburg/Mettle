@@ -34,6 +34,7 @@
 #include "semantic/rule_reflect.h"
 #include "semantic/target_desc.h"
 #include "ir/ir_rules.h"
+#include "ir/ir_effects.h"
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -3896,6 +3897,8 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
     options->report_rules = 1;
   } else if (strcmp(argv[i], "--check-proofs") == 0) {
     options->check_proofs = 1;
+  } else if (strcmp(argv[i], "--check-effects") == 0) {
+    options->check_effects = 1;
   } else if (strncmp(argv[i], "--rule-budget=", 14) == 0) {
     long long budget = strtoll(argv[i] + 14, NULL, 10);
     if (budget <= 0) {
@@ -4205,6 +4208,16 @@ static int mettle_check_target_options(CompilerOptions *options,
             "Error: --safe on the %s target has no runtime to report a "
             "violation to; its checks call into the shadow map the runtime "
             "owns, and a freestanding image links no library\n",
+            mtlc_target()->triple);
+    free((void *)options->import_directories);
+    free((void *)options->link_arguments);
+    return 1;
+  }
+  if (options->check_effects && mtlc_target()->freestanding) {
+    fprintf(stderr,
+            "Error: --check-effects on the %s target has no runtime to keep "
+            "the effect stack in, and a freestanding image links no "
+            "library\n",
             mtlc_target()->triple);
     free((void *)options->import_directories);
     free((void *)options->link_arguments);
@@ -5483,6 +5496,7 @@ int compile_file(const char *input_filename, const char *output_filename,
   CompilerProfile profile;
   double phase_start = 0.0;
   const int arm64_object_output = compile_targets_arm64_object(options);
+  IREffectResults *effect_results = NULL;
 
   compiler_profile_init(&profile, options && options->profile);
 
@@ -5842,6 +5856,56 @@ int compile_file(const char *input_filename, const char *output_filename,
     goto cleanup;
   }
 
+  if (ir_program_declares_effects(ir_program) ||
+      type_checker->effect_obligation_count > 0) {
+    IREffectInput effect_input;
+    IREffectDecl *effect_decls =
+        calloc(type_checker->effect_count ? type_checker->effect_count : 1,
+               sizeof(IREffectDecl));
+    IREffectObligation *obligations = calloc(
+        type_checker->effect_obligation_count
+            ? type_checker->effect_obligation_count
+            : 1,
+        sizeof(IREffectObligation));
+    int effects_ok = effect_decls && obligations;
+    if (effects_ok) {
+      for (size_t i = 0; i < type_checker->effect_count; i++) {
+        effect_decls[i].name = type_checker->effects[i].name;
+        effect_decls[i].site = type_checker->effects[i].site;
+        effect_decls[i].is_builtin = type_checker->effects[i].is_builtin;
+        effect_decls[i].is_exported = type_checker->effects[i].is_exported;
+      }
+      for (size_t i = 0; i < type_checker->effect_obligation_count; i++) {
+        obligations[i].function = type_checker->effect_obligations[i].function;
+        obligations[i].signature =
+            type_checker->effect_obligations[i].signature;
+        obligations[i].location = type_checker->effect_obligations[i].location;
+      }
+      memset(&effect_input, 0, sizeof(effect_input));
+      effect_input.effects = effect_decls;
+      effect_input.effect_count = type_checker->effect_count;
+      effect_input.obligations = obligations;
+      effect_input.obligation_count = type_checker->effect_obligation_count;
+      effect_input.instrument = options->check_effects || options->test_mode ||
+                                options->trace_function != NULL ||
+                                ir_verify_enabled();
+      effect_input.library_build = options->shared_output;
+      effects_ok = ir_effects_run(ir_program, &effect_input, error_reporter,
+                                  &effect_results);
+    }
+    free(effect_decls);
+    free(obligations);
+    if (!effects_ok) {
+      if (error_reporter_has_errors(error_reporter)) {
+        error_reporter_print_errors(error_reporter);
+      } else {
+        fprintf(stderr, "Error: could not analyse the program's effects\n");
+      }
+      result = 1;
+      goto cleanup;
+    }
+  }
+
   /* Resolve the access marks before anything else looks at the IR: prove away
    * what cannot fail, compile the rest into ordinary instructions. Every later
    * stage, the interpreter included, sees IR with no safety opcodes in it. */
@@ -5868,7 +5932,8 @@ int compile_file(const char *input_filename, const char *output_filename,
     IRRuleStats rule_stats;
     int rules_ok;
     if (!rule_reflect_build(type_checker, program, input_filename,
-                            mtlc_target()->triple, &rule_image, &rule_error)) {
+                            mtlc_target()->triple, effect_results, &rule_image,
+                            &rule_error)) {
       fprintf(stderr, "Error: %s\n",
               rule_error ? rule_error : "could not reflect the program");
       free(rule_error);
@@ -6272,6 +6337,7 @@ cleanup:
     symbol_table_destroy(symbol_table);
   }
   free(ir_error_message);
+  ir_effect_results_free(effect_results);
   code_generator_destroy(code_generator);
   register_allocator_destroy(register_allocator);
   parser_destroy(parser);
@@ -6411,6 +6477,9 @@ void print_usage(const char *program_name) {
   printf("  --report-rules      Print the verdict and interpreter steps of every @rule\n");
   printf("  --check-proofs      Trap at run time when a value the compiler proved to be a\n"
          "                      declared type is not one (survives --release)\n");
+  printf("  --check-effects     Trap at run time when an effect the compiler proved absent\n"
+         "                      is performed, or one it proved provided is not (survives\n"
+         "                      --release)\n");
   printf("  --report-target     Print the target in effect as a Mettle TargetDesc\n");
   printf("  --rule-budget=N     Fail the build when the rules spend more than N steps\n");
   printf("  --explain           Report every optimization decision in the input file --\n"

@@ -1,0 +1,28 @@
+effect Sim;
+effect Render;
+effect MainThread;
+
+fn step() with Sim {
+}
+
+fn paint() with Render {
+}
+
+fn touch_window() requires MainThread {
+}
+
+fn run_sim(job: fn() -> void with Sim) {
+  job();
+}
+
+fn sneaky(job: fn() -> void) {
+  job();
+}
+
+fn main() -> int32 {
+  run_sim(step);
+  run_sim(paint);
+  sneaky(step);
+  sneaky(touch_window);
+  return 0;
+}

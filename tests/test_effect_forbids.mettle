@@ -1,0 +1,21 @@
+effect Render;
+
+fn gl_draw() with Render {
+}
+
+fn draw_scene() {
+  gl_draw();
+}
+
+fn frame() {
+  draw_scene();
+}
+
+fn mix() forbids Render {
+  frame();
+}
+
+fn main() -> int32 {
+  mix();
+  return 0;
+}

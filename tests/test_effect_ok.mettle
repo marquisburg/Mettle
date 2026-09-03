@@ -1,0 +1,63 @@
+import "std/io";
+import "import_fixtures/house_effects";
+
+effect Render;
+effect MainThread;
+
+extern fn mettle_thread_current_id() -> uint32 with none;
+
+fn gl_draw() with Render {
+  println("draw");
+}
+
+fn draw_scene() {
+  gl_draw();
+}
+
+fn mix() forbids Render {
+  var id: uint32 = mettle_thread_current_id();
+  if (id == 0) { println("no thread"); }
+  println("mix");
+}
+
+fn touch_window() requires MainThread {
+  println("window");
+}
+
+fn ui_tick() {
+  touch_window();
+}
+
+fn main_loop() provides MainThread {
+  ui_tick();
+  beep();
+}
+
+fn run_render(job: fn() -> void with Render, alloc) {
+  job();
+}
+
+fn run_ui(job: fn() -> void requires MainThread) provides MainThread {
+  job();
+}
+
+fn silent() forbids Render, Audio, alloc, asm, syscall {
+  var x: uint32 = mettle_thread_current_id();
+  x = x + 1;
+}
+
+@test fn effects_hold_in_the_interpreter() {
+  main_loop();
+  run_render(draw_scene);
+  silent();
+}
+
+fn main() -> int32 {
+  main_loop();
+  mix();
+  run_render(draw_scene);
+  run_ui(touch_window);
+  silent();
+  quiet_helper();
+  return 0;
+}

@@ -3974,6 +3974,162 @@ void mettle_crash_write_stderr(const char *text) {
   mettle_crash_write_stderr_bytes(text, strlen(text));
 }
 
+#define MT_EFFECT_THREADS 256
+#define MT_EFFECT_FRAMES 4096
+
+typedef struct {
+  const char *name;
+  const char *forbids;
+  const char *provides;
+} MtEffectFrame;
+
+typedef struct {
+  mt_u32 thread;
+  mt_u32 depth;
+  MtEffectFrame *frames;
+} MtEffectStack;
+
+static MtEffectStack mt_effect_stacks[MT_EFFECT_THREADS];
+static volatile int mt_effect_lock;
+static volatile int mt_effects_active;
+
+static void mt_effects_acquire(void) {
+  while (__atomic_exchange_n(&mt_effect_lock, 1, __ATOMIC_ACQUIRE)) {
+  }
+}
+
+static void mt_effects_release(void) {
+  __atomic_store_n(&mt_effect_lock, 0, __ATOMIC_RELEASE);
+}
+
+static MtEffectStack *mt_effect_stack(int create) {
+  mt_u32 thread = mettle_thread_current_id();
+  MtEffectStack *free_slot = MT_NULL;
+  for (mt_size i = 0; i < MT_EFFECT_THREADS; i++) {
+    MtEffectStack *stack = &mt_effect_stacks[i];
+    if (stack->frames && stack->thread == thread) {
+      return stack;
+    }
+    if (!stack->frames && !free_slot) {
+      free_slot = stack;
+    }
+  }
+  if (!create || !free_slot) {
+    return MT_NULL;
+  }
+  free_slot->frames =
+      (MtEffectFrame *)malloc(MT_EFFECT_FRAMES * sizeof(MtEffectFrame));
+  free_slot->thread = thread;
+  free_slot->depth = 0;
+  return free_slot->frames ? free_slot : MT_NULL;
+}
+
+static int mt_effect_list_has(const char *list, const char *effect,
+                              mt_size length) {
+  const char *p = list ? list : "";
+  while (*p) {
+    const char *end = p;
+    while (*end && *end != ',') {
+      end++;
+    }
+    if ((mt_size)(end - p) == length && memcmp(p, effect, length) == 0) {
+      return 1;
+    }
+    p = *end ? end + 1 : end;
+  }
+  return 0;
+}
+
+MT_NORETURN static void mt_effect_violation(const char *function,
+                                            const char *effect,
+                                            mt_size effect_length,
+                                            const char *other,
+                                            int is_requirement) {
+  mettle_crash_write_stderr("Fatal error: effect violation: `");
+  mettle_crash_write_stderr(function);
+  mettle_crash_write_stderr(is_requirement ? "` requires `" : "` performs `");
+  mettle_crash_write_stderr_bytes(effect, effect_length);
+  if (is_requirement) {
+    mettle_crash_write_stderr("` and no caller provides it\n");
+  } else {
+    mettle_crash_write_stderr("`, which `");
+    mettle_crash_write_stderr(other);
+    mettle_crash_write_stderr("` forbids\n");
+  }
+  _exit(1);
+}
+
+static void mt_effects_check_list(MtEffectStack *stack, const char *list,
+                                  const char *function, int is_requirement) {
+  const char *p = list ? list : "";
+  while (*p) {
+    const char *end = p;
+    mt_size length;
+    while (*end && *end != ',') {
+      end++;
+    }
+    length = (mt_size)(end - p);
+    if (is_requirement) {
+      int provided = 0;
+      for (mt_u32 i = stack ? stack->depth : 0; i > 0 && !provided; i--) {
+        provided = mt_effect_list_has(stack->frames[i - 1].provides, p, length);
+      }
+      if (!provided) {
+        mt_effects_release();
+        mt_effect_violation(function, p, length, MT_NULL, 1);
+      }
+    } else {
+      for (mt_u32 i = stack ? stack->depth : 0; i > 0; i--) {
+        if (mt_effect_list_has(stack->frames[i - 1].forbids, p, length)) {
+          const char *other = stack->frames[i - 1].name;
+          mt_effects_release();
+          mt_effect_violation(function, p, length, other, 0);
+        }
+      }
+    }
+    p = *end ? end + 1 : end;
+  }
+}
+
+void mettle_effects_enter(const char *name, const char *with,
+                          const char *forbids, const char *requires,
+                          const char *provides) {
+  MtEffectStack *stack;
+  mt_effects_acquire();
+  __atomic_store_n(&mt_effects_active, 1, __ATOMIC_RELEASE);
+  stack = mt_effect_stack(1);
+  mt_effects_check_list(stack, with, name, 0);
+  mt_effects_check_list(stack, requires, name, 1);
+  if (stack && stack->depth < MT_EFFECT_FRAMES) {
+    stack->frames[stack->depth].name = name;
+    stack->frames[stack->depth].forbids = forbids;
+    stack->frames[stack->depth].provides = provides;
+    stack->depth++;
+  }
+  mt_effects_release();
+}
+
+void mettle_effects_leave(void) {
+  MtEffectStack *stack;
+  mt_effects_acquire();
+  stack = mt_effect_stack(0);
+  if (stack && stack->depth > 0) {
+    stack->depth--;
+  }
+  mt_effects_release();
+}
+
+void mettle_effects_perform(const char *effect, const char *function) {
+  MtEffectStack *stack;
+  if (!__atomic_load_n(&mt_effects_active, __ATOMIC_ACQUIRE)) {
+    return;
+  }
+  mt_effects_acquire();
+  stack = mt_effect_stack(0);
+  mt_effects_check_list(stack, effect, function, 0);
+  mt_effects_release();
+}
+
 long long (*mettle_crash_heap_classifier)(void *address) = MT_NULL;
 
 void mettle_crash_set_heap_classifier(long long (*classifier)(void *)) {

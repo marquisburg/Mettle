@@ -112,6 +112,7 @@ typedef struct {
   const char *target_desc_path;
   int report_target;
   int check_proofs;
+  int check_effects;
   int emit_object;
   int generate_debug_symbols;
   int generate_line_mapping;

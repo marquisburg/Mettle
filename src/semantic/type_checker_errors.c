@@ -208,6 +208,10 @@ void type_checker_report_assign_mismatch(TypeChecker *checker,
     type_checker_report_refinement_failure(checker, src_expr, location);
     return;
   }
+  if (checker && checker->effect_failure) {
+    type_checker_report_effect_failure(checker, src_expr, location);
+    return;
+  }
   const char *expected = dest_type && dest_type->name ? dest_type->name : "?";
   const char *actual = src_type && src_type->name ? src_type->name : "?";
   size_t span_length = src_expr ? type_checker_node_span_length(src_expr) : 1;

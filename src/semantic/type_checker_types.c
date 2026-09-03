@@ -458,6 +458,8 @@ Type *type_checker_volatile_of(TypeChecker *checker, Type *base) {
     qualified->fn_param_count = base->fn_param_count;
     qualified->fn_return_type = base->fn_return_type;
     qualified->closure_env = base->closure_env;
+    qualified->fn_effects_closed = base->fn_effects_closed;
+    qualified->fn_effect_signature = base->fn_effect_signature;
     qualified->field_names = base->field_names;
     qualified->field_types = base->field_types;
     qualified->field_offsets = base->field_offsets;
@@ -720,6 +722,8 @@ Type *type_checker_parse_function_pointer_type(TypeChecker *checker,
     free(param_types);
     return NULL;
   }
+  const char *effect_clauses =
+      type_checker_fn_type_effect_clause_start(return_type_start);
   char *return_copy = strdup(return_type_start);
   if (!return_copy) {
     free(params_copy);
@@ -727,7 +731,9 @@ Type *type_checker_parse_function_pointer_type(TypeChecker *checker,
     return NULL;
   }
   size_t return_start = 0;
-  size_t return_end = strlen(return_copy);
+  size_t return_end = effect_clauses
+                          ? (size_t)(effect_clauses - return_type_start)
+                          : strlen(return_copy);
   while (return_start < return_end &&
          isspace((unsigned char)return_copy[return_start])) {
     return_start++;
@@ -759,6 +765,12 @@ Type *type_checker_parse_function_pointer_type(TypeChecker *checker,
   free(param_types);
   free(return_copy);
   if (!fp_type) {
+    return NULL;
+  }
+  if (effect_clauses &&
+      !type_checker_fn_type_apply_effect_clauses(checker, fp_type,
+                                                 effect_clauses)) {
+    type_destroy(fp_type);
     return NULL;
   }
   if (is_closure_type) {
@@ -815,25 +827,31 @@ int type_checker_types_equal(const Type *lhs, const Type *rhs) {
     }
     return lhs->name == rhs->name;
   case TYPE_FUNCTION_POINTER:
-    // Function pointer types with same signature are equal
-    if (lhs->fn_param_count != rhs->fn_param_count) {
-      return 0;
-    }
-    // Check return type
-    if (!type_checker_types_equal(lhs->fn_return_type, rhs->fn_return_type)) {
-      return 0;
-    }
-    // Check parameter types
-    for (size_t i = 0; i < lhs->fn_param_count; i++) {
-      if (!type_checker_types_equal(lhs->fn_param_types[i],
-                                    rhs->fn_param_types[i])) {
-        return 0;
-      }
-    }
-    return 1;
+    return type_checker_fn_signatures_equal(lhs, rhs) &&
+           type_checker_fn_effect_sets_equal(lhs, rhs);
   default:
     return 1;
   }
+}
+
+int type_checker_fn_signatures_equal(const Type *lhs, const Type *rhs) {
+  if (!lhs || !rhs || lhs->kind != TYPE_FUNCTION_POINTER ||
+      rhs->kind != TYPE_FUNCTION_POINTER) {
+    return 0;
+  }
+  if (lhs->fn_param_count != rhs->fn_param_count) {
+    return 0;
+  }
+  if (!type_checker_types_equal(lhs->fn_return_type, rhs->fn_return_type)) {
+    return 0;
+  }
+  for (size_t i = 0; i < lhs->fn_param_count; i++) {
+    if (!type_checker_types_equal(lhs->fn_param_types[i],
+                                  rhs->fn_param_types[i])) {
+      return 0;
+    }
+  }
+  return 1;
 }
 
 int type_checker_is_cstring_type(const Type *type) {
@@ -1620,6 +1638,11 @@ int type_checker_is_assignable(TypeChecker *checker, Type *dest_type,
         (dst_is_closure && src_is_thin_fn)) {
       return 0;
     }
+    if (src_type->kind == TYPE_FUNCTION_POINTER &&
+        dest_type->kind == TYPE_FUNCTION_POINTER &&
+        type_checker_fn_signatures_equal(dest_type, src_type)) {
+      return type_checker_fn_effects_flow(checker, dest_type, src_type);
+    }
   }
 
   if (type_checker_types_equal(dest_type, src_type)) {
@@ -1736,6 +1759,21 @@ int type_checker_is_assignable_from(TypeChecker *checker, Type *dest_type,
                                     Type *src_type, ASTNode *src_expr) {
   long long folded = 0;
 
+  if (checker && dest_type && src_type && src_expr &&
+      dest_type->kind == TYPE_FUNCTION_POINTER &&
+      src_type->kind == TYPE_FUNCTION_POINTER &&
+      !src_type->fn_effects_closed && src_type->fn_require_count == 0 &&
+      (dest_type->closure_env != NULL) == (src_type->closure_env != NULL) &&
+      type_checker_fn_signatures_equal(dest_type, src_type)) {
+    const char *named = type_checker_function_value_name(checker, src_expr);
+    if (named) {
+      return type_checker_add_effect_obligation(
+          checker, named,
+          dest_type->fn_effect_signature ? dest_type->fn_effect_signature
+                                         : "open",
+          src_expr->location);
+    }
+  }
   if (type_checker_is_assignable(checker, dest_type, src_type)) {
     return 1;
   }

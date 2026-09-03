@@ -105,6 +105,32 @@ calls a function is not re-evaluated in either.
 A rule sees a declared type in `p.types` with kind `declared` and its base
 named, and does not see the predicate itself.
 
+## Effects
+
+A function type with no `with` clause is open, so a call through it performs
+`unknown`, and a function that `forbids` any effect cannot make one. Give the
+type a `with` clause; `with none` is the closed empty set.
+
+A call outside the program with no `with` clause is taken to perform `alloc`
+and nothing else. It may in truth perform a user effect, and the compiler
+cannot know; declare the extern `with` what it does.
+
+A closed `with` clause on a function type includes the built-in effects, so a
+function that prints does not fit `fn() -> void with Sim`; the type has to say
+`with Sim, alloc`.
+
+`main`, `@interrupt` and `@naked` functions, kernels, tests and the exports of
+a `--shared` library are the entry points where requirements have to be
+settled. A function whose address is taken and called from outside the
+program through some other route is not seen as an entry point.
+
+A method's clauses are checked like a function's. A lambda's effects are
+inferred; a lambda cannot declare a clause.
+
+The run-time check keeps one effect frame per function that declares a
+clause, on a stack of at most 4096 frames per thread and 256 threads, in
+`--check-effects` and `mettle test` only.
+
 ## Closures
 
 A plain function value already sitting in a variable is not adapted to a

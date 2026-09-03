@@ -63,6 +63,12 @@ typedef struct Type {
   // a thin function pointer. The closure VALUE is an 8-byte pointer to a heap
   // record whose field 0 is the code pointer and remaining fields are captures.
   struct Type *closure_env;
+  const char **fn_effects;
+  size_t fn_effect_count;
+  int fn_effects_closed;
+  const char **fn_requires;
+  size_t fn_require_count;
+  const char *fn_effect_signature;
 
   // Struct-specific fields. Names are interned and live for the compile;
   // do not strdup them. Layout (byte/bit offsets) is computed in the frontend

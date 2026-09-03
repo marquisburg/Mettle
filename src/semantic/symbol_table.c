@@ -436,6 +436,12 @@ Type *type_create(TypeKind kind, const char *name) {
   type->fn_param_count = 0;
   type->fn_return_type = NULL;
   type->closure_env = NULL;
+  type->fn_effects = NULL;
+  type->fn_effect_count = 0;
+  type->fn_effects_closed = 0;
+  type->fn_requires = NULL;
+  type->fn_require_count = 0;
+  type->fn_effect_signature = NULL;
 
   // Initialize struct-specific fields
   type->field_names = NULL;
@@ -535,6 +541,8 @@ void type_destroy(Type *type) {
     if (type->fn_param_types) {
       free(type->fn_param_types);
     }
+    free(type->fn_effects);
+    free(type->fn_requires);
     if (type->tagged_variant_names) {
       for (size_t i = 0; i < type->tagged_variant_count; i++) {
         mettle_free_string(type->tagged_variant_names[i]);

@@ -555,6 +555,7 @@ typedef struct {
    * them. Borrowed from the type checker's expansion table, which outlives
    * every consumer of the IR. */
   const char *expansion_note;
+  const char *effect_signature;
 } IRInstruction;
 
 /* Compatibility mapping used at frontend/public-call boundaries. It is the
@@ -668,6 +669,14 @@ typedef struct {
    * returns with iret. */
   int is_interrupt;
   int is_rule;
+  const char **effects_with;
+  size_t effects_with_count;
+  const char **effects_forbids;
+  size_t effects_forbids_count;
+  const char **effects_requires;
+  size_t effects_requires_count;
+  const char **effects_provides;
+  size_t effects_provides_count;
   /* Set the moment a volatile load or store is appended, and never cleared.
    * The optimizer driver uses it to decide whether a function is worth
    * auditing for dropped, duplicated or reordered volatile accesses. */
@@ -746,6 +755,7 @@ typedef struct {
   int has_body;             /* functions: defined (has an IR body) vs declared */
   int is_kernel;            /* functions: GPU entry point */
   char *link_name;          /* owned; object-file linkage name, or NULL = name */
+  char *effect_clause;
   long long const_value;    /* IR_MODSYM_CONSTANT: folded integer value */
   /* Global-variable initializer, evaluated to a constant at lowering. */
   int has_initializer;
@@ -891,6 +901,14 @@ int ir_function_append_instruction(IRFunction *function,
                                    const IRInstruction *instruction);
 int ir_function_insert_instruction(IRFunction *function, size_t index,
                                    const IRInstruction *instruction);
+enum {
+  IR_EFFECT_CLAUSE_WITH = 0,
+  IR_EFFECT_CLAUSE_FORBIDS = 1,
+  IR_EFFECT_CLAUSE_REQUIRES = 2,
+  IR_EFFECT_CLAUSE_PROVIDES = 3
+};
+int ir_function_set_effects(IRFunction *function, int clause,
+                            const char *const *names, size_t count);
 int ir_program_register_scalar_pointer_types(IRProgram *program);
 /* Opaque handle over the optimizer's integer value-range analysis, for the
  * backend's narrow-home canonicalization: when the 64-bit arithmetic result

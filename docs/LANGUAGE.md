@@ -35,15 +35,16 @@ frontend, see [Writing a frontend](embedding.md).
 16. [Runtime model](runtime-model.md)
 17. [Rewrite rules](rewrite-rules.md)
 18. [Rules](rules.md)
+19. [Effects](effects.md)
 
 ## Beyond the CPU
 
-19. [GPU offload](gpu.md)
+20. [GPU offload](gpu.md)
 
 ## Reference
 
-20. [Quick reference](quick-reference.md)
-21. [Known limitations](known-limitations.md)
+21. [Quick reference](quick-reference.md)
+22. [Known limitations](known-limitations.md)
 
 For the backend itself, the IR, the optimizers, the code generators, the
 linker, and the public C API, see the [documentation index](README.md).

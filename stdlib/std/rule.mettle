@@ -46,12 +46,24 @@ export struct Function {
   is_inline: bool;
   is_swappable: bool;
   is_kernel: bool;
+  effects: string[];
+  requires: string[];
+  forbids: string[];
+  provides: string[];
+}
+
+export struct EffectInfo {
+  name: string;
+  module: string;
+  site: Site;
+  is_builtin: bool;
 }
 
 export struct Program {
   functions: Function[];
   types: TypeInfo[];
   modules: string[];
+  effects: EffectInfo[];
   target: string;
   file: string;
 }
@@ -96,6 +108,41 @@ export fn function_calls(f: Function, callee: string) -> bool {
     if (c == callee) { return true; }
   }
   return false;
+}
+
+export fn function_performs(f: Function, effect: string) -> bool {
+  for e in f.effects {
+    if (e == effect) { return true; }
+  }
+  return false;
+}
+
+export fn function_requires(f: Function, effect: string) -> bool {
+  for e in f.requires {
+    if (e == effect) { return true; }
+  }
+  return false;
+}
+
+export fn function_forbids(f: Function, effect: string) -> bool {
+  for e in f.forbids {
+    if (e == effect) { return true; }
+  }
+  return false;
+}
+
+export fn function_provides(f: Function, effect: string) -> bool {
+  for e in f.provides {
+    if (e == effect) { return true; }
+  }
+  return false;
+}
+
+export fn program_effect_index(p: Program, name: string) -> int64 {
+  for i in 0..p.effects.length {
+    if (p.effects[i].name == name) { return i; }
+  }
+  return -1;
 }
 
 export fn program_function_index(p: Program, qualified: string) -> int64 {

@@ -1,0 +1,69 @@
+import "std/rule";
+import "import_fixtures/house_effects";
+
+effect Render;
+
+fn gl_draw() with Render {
+}
+
+fn draw() {
+  gl_draw();
+  beep();
+}
+
+fn mix() forbids Render {
+}
+
+fn on_worker() requires Render {
+}
+
+fn worker() provides Render {
+  on_worker();
+}
+
+@rule fn effects_are_visible(p: Program) -> Verdict {
+  var seen_draw: bool = false;
+  for f in p.functions {
+    if (f.name == "draw") {
+      seen_draw = true;
+      if (!function_performs(f, "Render") || !function_performs(f, "Audio")) {
+        return verdict_fail(f.site, "draw performs Render and Audio");
+      }
+      if (function_performs(f, "alloc") == false) {
+        return verdict_fail(f.site, "draw reaches println, which allocates");
+      }
+    }
+    if (f.name == "mix" && !function_forbids(f, "Render")) {
+      return verdict_fail(f.site, "mix forbids Render");
+    }
+    if (f.name == "worker" && (!function_provides(f, "Render") || function_requires(f, "Render"))) {
+      return verdict_fail(f.site, "worker provides Render and needs nothing");
+    }
+    if (f.name == "on_worker" && !function_requires(f, "Render")) {
+      return verdict_fail(f.site, "on_worker requires Render");
+    }
+  }
+  if (!seen_draw) {
+    return verdict_fail_program("draw is missing");
+  }
+  var render: int64 = program_effect_index(p, "Render");
+  var audio: int64 = program_effect_index(p, "Audio");
+  var heap: int64 = program_effect_index(p, "alloc");
+  if (render < 0 || audio < 0 || heap < 0) {
+    return verdict_fail_program("an effect is missing from p.effects");
+  }
+  if (p.effects[render].module != "" || p.effects[audio].module != "import_fixtures/house_effects") {
+    return verdict_fail(p.effects[audio].site, "effects carry the module that declared them");
+  }
+  if (!p.effects[heap].is_builtin || p.effects[render].is_builtin) {
+    return verdict_fail_program("is_builtin tells the built-in effects apart");
+  }
+  return verdict_pass();
+}
+
+fn main() -> int32 {
+  draw();
+  mix();
+  worker();
+  return 0;
+}

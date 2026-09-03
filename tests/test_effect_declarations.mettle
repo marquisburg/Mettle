@@ -1,0 +1,9 @@
+effect Render;
+
+fn draw() with Rendr {
+}
+
+fn main() -> int32 {
+  draw();
+  return 0;
+}

@@ -11,6 +11,7 @@ static const char *const node_names[] = {
     [AST_ENUM_DECLARATION] = "AST_ENUM_DECLARATION",
     [AST_TYPE_DECLARATION] = "AST_TYPE_DECLARATION",
     [AST_TRAIT_DECLARATION] = "AST_TRAIT_DECLARATION",
+    [AST_EFFECT_DECLARATION] = "AST_EFFECT_DECLARATION",
     [AST_IMPL_DECLARATION] = "AST_IMPL_DECLARATION",
     [AST_METHOD_DECLARATION] = "AST_METHOD_DECLARATION",
     [AST_ASSIGNMENT] = "AST_ASSIGNMENT",
@@ -166,6 +167,11 @@ static void dump_node_data(FILE *out, const ASTNode *node) {
   }
   case AST_TRAIT_DECLARATION: {
     const TraitDeclaration *decl = node->data;
+    dump_text(out, "name", decl ? decl->name : NULL);
+    break;
+  }
+  case AST_EFFECT_DECLARATION: {
+    const EffectDeclaration *decl = node->data;
     dump_text(out, "name", decl ? decl->name : NULL);
     break;
   }

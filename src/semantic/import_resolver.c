@@ -1311,6 +1311,7 @@ static int rewrite_node_names(ASTNode *node, const NameRewrite *rewrites,
   case AST_STRUCT_DECLARATION:
   case AST_ENUM_DECLARATION:
   case AST_TYPE_DECLARATION:
+  case AST_EFFECT_DECLARATION:
   case AST_TRAIT_DECLARATION:
   case AST_IMPL_DECLARATION:
     return rewrite_declaration_names(node, rewrites, rewrite_count, bindings,
@@ -1888,6 +1889,18 @@ static int rewrite_declaration_names(ASTNode *node,
     return 1;
   }
 
+  case AST_EFFECT_DECLARATION: {
+    EffectDeclaration *effect_decl = (EffectDeclaration *)node->data;
+    if (!effect_decl) {
+      return 1;
+    }
+    if (!scope &&
+        !rename_string_if_needed(&effect_decl->name, rewrites, rewrite_count)) {
+      return 0;
+    }
+    return 1;
+  }
+
   case AST_TRAIT_DECLARATION: {
     TraitDeclaration *trait_decl = (TraitDeclaration *)node->data;
     if (!trait_decl) {
@@ -1981,6 +1994,23 @@ static int rewrite_function_declaration_names(ASTNode *node,
                                         rewrites, rewrite_count, bindings,
                                         binding_count)) {
         return 0;
+      }
+    }
+
+    {
+      char **clauses[4] = {func_decl->effects_with, func_decl->effects_forbids,
+                           func_decl->effects_requires,
+                           func_decl->effects_provides};
+      size_t counts[4] = {
+          func_decl->effects_with_count, func_decl->effects_forbids_count,
+          func_decl->effects_requires_count, func_decl->effects_provides_count};
+      for (size_t c = 0; c < 4; c++) {
+        for (size_t i = 0; i < counts[c]; i++) {
+          if (!rename_string_if_needed(&clauses[c][i], rewrites,
+                                       rewrite_count)) {
+            return 0;
+          }
+        }
       }
     }
 
@@ -2564,6 +2594,9 @@ static int is_declaration_exported(ASTNode *decl) {
   if (decl->type == AST_TYPE_DECLARATION) {
     return ((TypeDeclaration *)decl->data)->is_exported;
   }
+  if (decl->type == AST_EFFECT_DECLARATION) {
+    return ((EffectDeclaration *)decl->data)->is_exported;
+  }
   if (decl->type == AST_TRAIT_DECLARATION) {
     return ((TraitDeclaration *)decl->data)->is_exported;
   }
@@ -2590,6 +2623,8 @@ static const char *get_declaration_name(ASTNode *decl) {
     return ((EnumDeclaration *)decl->data)->name;
   case AST_TYPE_DECLARATION:
     return ((TypeDeclaration *)decl->data)->name;
+  case AST_EFFECT_DECLARATION:
+    return ((EffectDeclaration *)decl->data)->name;
   case AST_TRAIT_DECLARATION:
     return ((TraitDeclaration *)decl->data)->name;
   case AST_VAR_DECLARATION:
@@ -2792,6 +2827,7 @@ static void collect_dependency_names(ASTNode *node, char ***names,
   case AST_STRUCT_DECLARATION:
   case AST_ENUM_DECLARATION:
   case AST_TYPE_DECLARATION:
+  case AST_EFFECT_DECLARATION:
   case AST_TRAIT_DECLARATION:
   case AST_IMPL_DECLARATION:
     collect_declaration_dependency_names(node, names, count, capacity);
@@ -2996,11 +3032,27 @@ static void collect_declaration_dependency_names(ASTNode *node, char ***names,
                                        count, capacity);
       }
     }
+    {
+      char **clauses[4] = {func->effects_with, func->effects_forbids,
+                           func->effects_requires, func->effects_provides};
+      size_t counts[4] = {func->effects_with_count, func->effects_forbids_count,
+                          func->effects_requires_count,
+                          func->effects_provides_count};
+      for (size_t c = 0; c < 4; c++) {
+        for (size_t i = 0; i < counts[c]; i++) {
+          if (clauses[c][i] && clauses[c][i][0] != '\0') {
+            (void)path_set_add(names, count, capacity, clauses[c][i]);
+          }
+        }
+      }
+    }
     if (func->body) {
       collect_dependency_names(func->body, names, count, capacity);
     }
     return;
   }
+  case AST_EFFECT_DECLARATION:
+    return;
   case AST_STRUCT_DECLARATION: {
     StructDeclaration *strct = (StructDeclaration *)node->data;
     if (!strct) {

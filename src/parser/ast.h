@@ -22,6 +22,7 @@ typedef enum {
   AST_STRUCT_DECLARATION,
   AST_ENUM_DECLARATION,
   AST_TYPE_DECLARATION,
+  AST_EFFECT_DECLARATION,
   AST_TRAIT_DECLARATION,
   AST_IMPL_DECLARATION,
   AST_METHOD_DECLARATION,
@@ -163,6 +164,14 @@ typedef struct {
   int is_interrupt;
   int is_rule;
   int rewrite_role;
+  char **effects_with;
+  size_t effects_with_count;
+  char **effects_forbids;
+  size_t effects_forbids_count;
+  char **effects_requires;
+  size_t effects_requires_count;
+  char **effects_provides;
+  size_t effects_provides_count;
   /* The last parameter was written `T[..]`, so a call gathers whatever follows
    * the fixed parameters into it. Inside the body it is an ordinary `T[]`. */
   int is_variadic;
@@ -225,6 +234,11 @@ typedef struct {
   int is_exported;
   ASTNode *composed_name;
 } TypeDeclaration;
+
+typedef struct {
+  char *name;
+  int is_exported;
+} EffectDeclaration;
 
 typedef struct {
   char *name;
@@ -292,6 +306,7 @@ typedef struct {
   int is_indirect_call; // 1 if callee is a variable with function pointer type
   struct Type *callee_closure_env; // non-NULL if the callee is a capturing
                                    // closure; set by the type checker
+  const char *effect_signature;
   int is_gpu_index; /* parser-recognized thread/block/dimension member access */
   int is_gpu_atomic;
   MtlcAddressSpace atomic_address_space;
@@ -334,6 +349,7 @@ typedef struct {
   ASTNode *function;
   ASTNode **arguments;
   size_t argument_count;
+  const char *effect_signature;
 } FuncPtrCall;
 
 /* Semantic GPU launch statement. Compact source launches synthesize the unused
@@ -615,6 +631,16 @@ ASTNode *ast_create_enum_declaration(const char *name, EnumVariant *variants,
                                      SourceLocation location);
 ASTNode *ast_create_trait_declaration(const char *name,
                                       SourceLocation location);
+ASTNode *ast_create_effect_declaration(const char *name,
+                                       SourceLocation location);
+int ast_function_set_effects(FunctionDeclaration *decl, int clause,
+                             char **names, size_t count);
+enum {
+  AST_EFFECT_CLAUSE_WITH = 0,
+  AST_EFFECT_CLAUSE_FORBIDS = 1,
+  AST_EFFECT_CLAUSE_REQUIRES = 2,
+  AST_EFFECT_CLAUSE_PROVIDES = 3
+};
 ASTNode *ast_create_impl_declaration(const char *trait_name,
                                      const char *for_type_name,
                                      SourceLocation location);

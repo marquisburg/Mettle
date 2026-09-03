@@ -1,0 +1,18 @@
+effect MainThread;
+
+fn touch_window() requires MainThread {
+}
+
+fn ui_tick() {
+  touch_window();
+}
+
+fn main_loop() provides MainThread {
+  ui_tick();
+}
+
+fn main() -> int32 {
+  main_loop();
+  ui_tick();
+  return 0;
+}
