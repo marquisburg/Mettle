@@ -485,6 +485,9 @@ static void print_declaration(AstPrinter *printer, const ASTNode *node) {
             decl->base_type ? decl->base_type : "<base>");
     if (decl->predicate) {
       fputs(" where ", printer->out);
+      if (decl->binding) {
+        fprintf(printer->out, "%s: ", decl->binding);
+      }
       print_expression(printer, decl->predicate);
     }
     fputs(";\n\n", printer->out);

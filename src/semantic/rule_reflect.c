@@ -41,6 +41,7 @@ typedef struct {
   const char *module;
   IRRuleSite site;
   const char *kind;
+  const char *base;
   long long size;
   long long align;
   long long layout;
@@ -327,13 +328,18 @@ static int collect_type(Reflect *reflect, ASTNode *decl) {
     EnumDeclaration *ed = (EnumDeclaration *)decl->data;
     name = ed->name;
     type_params = ed->type_param_count;
+  } else if (decl->type == AST_TYPE_DECLARATION && decl->data) {
+    name = ((TypeDeclaration *)decl->data)->name;
   }
   if (!name || type_params > 0) {
     return 1;
   }
   Type *type = type_checker_get_type_by_name(reflect->checker, name);
-  if (!type || (type->kind != TYPE_STRUCT && type->kind != TYPE_ENUM &&
-                type->kind != TYPE_TAGGED_ENUM)) {
+  if (!type) {
+    return 1;
+  }
+  if (!type->refined_base && type->kind != TYPE_STRUCT &&
+      type->kind != TYPE_ENUM && type->kind != TYPE_TAGGED_ENUM) {
     return 1;
   }
   if (!grow((void **)&reflect->types, &reflect->type_capacity,
@@ -351,9 +357,11 @@ static int collect_type(Reflect *reflect, ASTNode *decl) {
   entry->site.file = decl->location.filename;
   entry->site.line = decl->location.line;
   entry->site.column = decl->location.column;
-  entry->kind = type->kind == TYPE_STRUCT   ? "struct"
-                : type->kind == TYPE_ENUM ? "enum"
-                                          : "tagged_enum";
+  entry->kind = type->refined_base            ? "declared"
+                : type->kind == TYPE_STRUCT   ? "struct"
+                : type->kind == TYPE_ENUM     ? "enum"
+                                              : "tagged_enum";
+  entry->base = type->refined_base ? type_display_name(type->refined_base) : "";
   entry->size = (long long)type->size;
   entry->align = (long long)type->alignment;
   entry->layout = type_checker_layout_digest(type);
@@ -732,6 +740,9 @@ static int build_image(Reflect *reflect, const char *root_file,
     image_put_string(&image,
                      base + field_offset(type_info_type, "kind", &image),
                      entry->kind);
+    image_put_string(&image,
+                     base + field_offset(type_info_type, "base", &image),
+                     entry->base);
     image_put_u64(&image, base + field_offset(type_info_type, "size", &image),
                   (unsigned long long)entry->size);
     image_put_u64(&image, base + field_offset(type_info_type, "align", &image),
@@ -862,8 +873,9 @@ static void dump_program(Reflect *reflect) {
   }
   for (size_t i = 0; i < reflect->type_count; i++) {
     RType *entry = &reflect->types[i];
-    fprintf(stderr, "  %s %s size %lld align %lld layout %lld\n", entry->kind,
-            entry->qualified, entry->size, entry->align, entry->layout);
+    fprintf(stderr, "  %s %s%s%s size %lld align %lld layout %lld\n",
+            entry->kind, entry->qualified, entry->base[0] ? " of " : "",
+            entry->base, entry->size, entry->align, entry->layout);
   }
 }
 
@@ -910,7 +922,8 @@ int rule_reflect_build(TypeChecker *checker, ASTNode *program,
     if (decl->type == AST_FUNCTION_DECLARATION) {
       ok = collect_function(&reflect, decl);
     } else if (decl->type == AST_STRUCT_DECLARATION ||
-               decl->type == AST_ENUM_DECLARATION) {
+               decl->type == AST_ENUM_DECLARATION ||
+               decl->type == AST_TYPE_DECLARATION) {
       ok = collect_type(&reflect, decl);
     }
   }

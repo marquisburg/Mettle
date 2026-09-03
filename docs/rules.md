@@ -51,7 +51,8 @@ variants its `match` and `switch` arms name, as `Shape.Circle`), `param_types`,
 and `is_kernel`.
 
 A `TypeInfo` carries `name`, `qualified`, `module`, `site`, `kind`
-(`struct`, `enum` or `tagged_enum`), `size`, `align`, `layout` (the same digest
+(`struct`, `enum`, `tagged_enum` or `declared`), `base` (what a declared type
+refines, empty for the rest), `size`, `align`, `layout` (the same digest
 `layoutof` answers), `fields` as `FieldInfo[]` with `name`, `type_name`,
 `offset` and `size`, and `variants`.
 
@@ -73,6 +74,10 @@ A rule answers with one of three:
 | `verdict_pass()` | Nothing is printed. |
 | `verdict_fail(site, message)` | `error[R0002]` at the site, and the build stops. |
 | `verdict_gap(site, message)` | `warning[R0003]` at the site, and the build goes on. |
+
+`verdict_fail_program(message)` and `verdict_gap_program(message)` say the
+same about the program as a whole, for a complaint no single line owns. They
+report at the rule's own site.
 
 The gap is the important one. A rule reports what it can prove and announces
 what it cannot, which is the standard the borrow analyser is held to. A rule
@@ -116,6 +121,38 @@ rules: 2 run, 2 passed, 0 failed, 0 gaps, 2485 steps
 `N` steps together fails with `error[R0004]`, and a single rule that runs past
 `N` gives no verdict. A program with no rules pays nothing: no reflection is
 built and no interpreter runs.
+
+## Rules a module offers
+
+A rule can live in a module and apply to whoever imports it, which is how a
+team keeps one copy of its house style:
+
+```mettle
+// house.mettle
+import "std/rule";
+
+@rule export fn no_recursion(p: Program) -> Verdict {
+  for f in p.functions {
+    if (f.module == "" && f.is_recursive) {
+      return verdict_fail(f.site, "the house style forbids recursion");
+    }
+  }
+  return verdict_pass();
+}
+```
+
+```mettle
+import "house";
+```
+
+The import is the opt-in: a rule applies when it is `export`ed and the
+program imports the module. The error points at the importing program's own
+line, and the note names the module and line the rule came from, so a
+failing build says both what broke and whose rule it broke.
+
+Inside a rule, `f.module` is the module a function came from, and `""` is the
+program's own file. A house rule that means "in the program that imported me"
+tests for that.
 
 ## What a rule is not
 

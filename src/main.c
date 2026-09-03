@@ -3894,6 +3894,8 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
     options->swap_new_name = argv[++i];
   } else if (strcmp(argv[i], "--report-rules") == 0) {
     options->report_rules = 1;
+  } else if (strcmp(argv[i], "--check-proofs") == 0) {
+    options->check_proofs = 1;
   } else if (strncmp(argv[i], "--rule-budget=", 14) == 0) {
     long long budget = strtoll(argv[i] + 14, NULL, 10);
     if (budget <= 0) {
@@ -5799,7 +5801,7 @@ int compile_file(const char *input_filename, const char *output_filename,
   }
   ir_lowering_set_explain(options->explain && options->optimize &&
                           !options->emit_ptx && !options->emit_spirv);
-  ir_lowering_set_refinement_checks(options->test_mode ||
+  ir_lowering_set_refinement_checks(options->check_proofs || options->test_mode ||
                                     options->trace_function != NULL ||
                                     ir_verify_enabled());
   ir_explain_safety_set_collect(options->explain && options->optimize,
@@ -6407,6 +6409,8 @@ void print_usage(const char *program_name) {
   printf("  --dump-ir           Write optimized IR sidecar (.ir) without debug metadata\n");
   printf("  --simd-report       Report what each @simd loop became (needs -O/--release)\n");
   printf("  --report-rules      Print the verdict and interpreter steps of every @rule\n");
+  printf("  --check-proofs      Trap at run time when a value the compiler proved to be a\n"
+         "                      declared type is not one (survives --release)\n");
   printf("  --report-target     Print the target in effect as a Mettle TargetDesc\n");
   printf("  --rule-budget=N     Fail the build when the rules spend more than N steps\n");
   printf("  --explain           Report every optimization decision in the input file --\n"

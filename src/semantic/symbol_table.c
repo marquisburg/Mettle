@@ -458,6 +458,7 @@ Type *type_create(TypeKind kind, const char *name) {
   type->qualified_name = NULL;
   type->refined_base = NULL;
   type->refinement = NULL;
+  type->refine_binding = NULL;
   type->refine_has_range = 0;
   type->refine_min = 0;
   type->refine_max = 0;

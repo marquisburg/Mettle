@@ -182,9 +182,9 @@ static const IRRuleSite *match_site(const IRRuleImage *image,
   return NULL;
 }
 
-static void report_at_rule(ErrorReporter *reporter, const IRFunction *rule,
-                           const char *message, const char *label,
-                           int is_error) {
+static void report_at_rule_code(ErrorReporter *reporter, const IRFunction *rule,
+                                const char *message, const char *label,
+                                int is_error, const char *code) {
   SourceSpan span = source_span_from_location(rule->location, 4);
   span = error_reporter_span_snap_to_token(reporter, span, "rule");
   if (is_error) {
@@ -196,7 +196,13 @@ static void report_at_rule(ErrorReporter *reporter, const IRFunction *rule,
   if (label) {
     error_reporter_set_last_label(reporter, label);
   }
-  error_reporter_set_last_code(reporter, "R0001");
+  error_reporter_set_last_code(reporter, code);
+}
+
+static void report_at_rule(ErrorReporter *reporter, const IRFunction *rule,
+                           const char *message, const char *label,
+                           int is_error) {
+  report_at_rule_code(reporter, rule, message, label, is_error, "R0001");
 }
 
 static void report_leaks(ErrorReporter *reporter, IRInterpMachine *machine,
@@ -391,10 +397,10 @@ static int run_one_rule(IRProgram *program, IRFunction *rule,
                                         ? "the rule that failed the build"
                                         : "the rule that announced the gap");
   } else {
-    report_at_rule(reporter, rule, message,
-                   verdict.outcome == 1 ? "failed without naming a site"
-                                        : "gap without a site",
-                   verdict.outcome == 1);
+    report_at_rule_code(reporter, rule, message,
+                        "this rule speaks about the program as a whole",
+                        verdict.outcome == 1,
+                        verdict.outcome == 1 ? "R0002" : "R0003");
   }
   if (report) {
     fprintf(report, "rule %s: %s, %lld steps\n", display,

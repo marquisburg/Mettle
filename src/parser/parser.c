@@ -1058,10 +1058,21 @@ static ASTNode *parser_parse_type_declaration(Parser *parser) {
     return NULL;
   }
   ASTNode *predicate = NULL;
+  char *binding = NULL;
   if (parser->current_token.type == TOKEN_WHERE) {
     parser_advance(parser);
+    /* `where n: n >= 0` names the value the predicate speaks about. Two
+     * tokens settle it: nothing that starts an expression is an identifier
+     * followed by a colon, so the default `value` stays unambiguous. */
+    if (parser_is_identifier_like(parser->current_token.type) &&
+        parser->peek_token.type == TOKEN_COLON) {
+      binding = strdup(parser->current_token.value);
+      parser_advance(parser);
+      parser_advance(parser);
+    }
     predicate = parser_parse_expression(parser);
     if (!predicate) {
+      free(binding);
       free(name);
       free(base);
       return NULL;
@@ -1069,6 +1080,7 @@ static ASTNode *parser_parse_type_declaration(Parser *parser) {
   }
   if (parser->current_token.type != TOKEN_SEMICOLON) {
     parser_set_error(parser, "Expected ';' after the type declaration");
+    free(binding);
     free(name);
     free(base);
     if (predicate) {
@@ -1077,7 +1089,9 @@ static ASTNode *parser_parse_type_declaration(Parser *parser) {
     return NULL;
   }
   parser_advance(parser);
-  ASTNode *decl = ast_create_type_declaration(name, base, predicate, location);
+  ASTNode *decl =
+      ast_create_type_declaration(name, base, binding, predicate, location);
+  free(binding);
   free(name);
   free(base);
   return decl;

@@ -1,0 +1,8 @@
+import "import_fixtures/house_rules";
+
+fn down(n: int32) -> int32 {
+  if (n <= 0) { return 0; }
+  return down(n - 1);
+}
+
+fn main() -> int32 { return down(3); }

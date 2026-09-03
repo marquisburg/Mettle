@@ -297,6 +297,9 @@ The records a `@rule fn` reads and returns: `Program`, `Function`, `TypeInfo`,
 `FieldInfo`, `Site` and `Verdict`, with `verdict_pass()`,
 `verdict_fail(site, message)` and `verdict_gap(site, message)`.
 
+Verdicts about the program as a whole, for a complaint no line owns:
+`verdict_fail_program(message)` and `verdict_gap_program(message)`.
+
 Queries over a program: `function_calls(f, callee) -> bool`,
 `function_matches(f, owner, variant) -> bool`,
 `program_function_index(p, qualified) -> int64`,

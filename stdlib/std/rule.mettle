@@ -19,6 +19,7 @@ export struct TypeInfo {
   module: string;
   site: Site;
   kind: string;
+  base: string;
   size: int64;
   align: int64;
   layout: int64;
@@ -77,6 +78,16 @@ export fn verdict_fail(site: Site, message: string) -> Verdict {
 
 export fn verdict_gap(site: Site, message: string) -> Verdict {
   var v: Verdict = { outcome: 2, site: site, message: message };
+  return v;
+}
+
+export fn verdict_fail_program(message: string) -> Verdict {
+  var v: Verdict = { outcome: 1, message: message };
+  return v;
+}
+
+export fn verdict_gap_program(message: string) -> Verdict {
+  var v: Verdict = { outcome: 2, message: message };
   return v;
 }
 

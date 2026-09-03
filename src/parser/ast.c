@@ -207,6 +207,7 @@ static ASTNode *ast_clone_type_declaration(ASTNode *clone, const ASTNode *node) 
   }
   dst->name = ast_intern_string(src ? src->name : NULL);
   dst->base_type = ast_intern_string(src ? src->base_type : NULL);
+  dst->binding = ast_intern_string(src ? src->binding : NULL);
   dst->is_exported = src ? src->is_exported : 0;
   dst->predicate = NULL;
   dst->composed_name = NULL;
@@ -1306,6 +1307,7 @@ void ast_destroy_node(ASTNode *node) {
     if (type_decl) {
       ast_free_string(type_decl->name);
       ast_free_string(type_decl->base_type);
+      ast_free_string(type_decl->binding);
       free(type_decl);
     }
     break;
@@ -1894,7 +1896,7 @@ ASTNode *ast_create_struct_declaration(const char *name, char **field_names,
 }
 
 ASTNode *ast_create_type_declaration(const char *name, const char *base_type,
-                                     ASTNode *predicate,
+                                     const char *binding, ASTNode *predicate,
                                      SourceLocation location) {
   ASTNode *node = ast_create_node(AST_TYPE_DECLARATION, location);
   if (!node)
@@ -1906,6 +1908,7 @@ ASTNode *ast_create_type_declaration(const char *name, const char *base_type,
   }
   decl->name = ast_intern_string(name);
   decl->base_type = ast_intern_string(base_type);
+  decl->binding = ast_intern_string(binding);
   decl->predicate = predicate;
   decl->is_exported = 0;
   decl->composed_name = NULL;

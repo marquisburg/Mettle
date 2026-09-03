@@ -843,6 +843,8 @@ int type_checker_process_type_declaration(TypeChecker *checker,
   refined->is_volatile = base->is_volatile;
   refined->refined_base = base;
   refined->refinement = decl->predicate;
+  refined->refine_binding =
+      decl->binding ? string_intern(decl->binding) : "value";
   type_checker_intern_type(checker, refined);
   type_checker_set_qualified_name(checker, refined,
                                   type_decl_node->location.filename);
@@ -883,7 +885,9 @@ int type_checker_check_type_predicate(TypeChecker *checker,
     if (!symbol_table_enter_scope(checker->symbol_table, SCOPE_BLOCK)) {
       return 0;
     }
-    value_symbol = symbol_create("value", SYMBOL_PARAMETER, base);
+    value_symbol = symbol_create(
+        refined->refine_binding ? refined->refine_binding : "value",
+        SYMBOL_PARAMETER, base);
     if (!value_symbol ||
         !symbol_table_declare(checker->symbol_table, value_symbol)) {
       if (value_symbol) {

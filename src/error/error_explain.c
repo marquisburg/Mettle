@@ -341,7 +341,10 @@ static const ErrorCodeDoc DOCS[] = {
      "types never mix in arithmetic.\n"
      "\n"
      "Fix: guard the value where it is converted, or narrow what it is\n"
-     "computed from.\n"},
+     "computed from.\n"
+     "\n"
+     "The predicate speaks about `value` unless the declaration names the\n"
+     "binding itself: `type Slot = uint32 where n: n < 64;`.\n"},
     {"P0002", "A bounds check was proven away by a declared type",
      "Not an error. `--explain` reports it: an index whose declared type\n"
      "pins its range inside the array it indexes needs no bounds check, so\n"
@@ -351,7 +354,12 @@ static const ErrorCodeDoc DOCS[] = {
      "\n"
      "A property the program declared and the compiler proved earns the\n"
      "same treatment as one the compiler discovered on its own, and no\n"
-     "more: an index of a plain integer type keeps its check.\n"},
+     "more: an index of a plain integer type keeps its check.\n"
+     "\n"
+     "The prover is code, so it is not believed on its own authority.\n"
+     "`mettle test`, `mettle trace` and `--verify` re-check every proven\n"
+     "conversion as the interpreter runs, and `--check-proofs` does the\n"
+     "same inside a compiled program, in `--release` too.\n"},
 };
 
 /* ---- optimizer decision codes ----------------------------------------------

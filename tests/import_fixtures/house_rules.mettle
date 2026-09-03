@@ -1,0 +1,17 @@
+import "std/rule";
+
+@rule export fn house_forbids_recursion(p: Program) -> Verdict {
+  for f in p.functions {
+    if (f.module == "" && f.is_recursive) {
+      return verdict_fail(f.site, "the house style forbids recursion");
+    }
+  }
+  return verdict_pass();
+}
+
+@rule export fn house_wants_a_target(p: Program) -> Verdict {
+  if (p.target.length == 0) {
+    return verdict_fail_program("the build named no target");
+  }
+  return verdict_pass();
+}

@@ -711,6 +711,7 @@ typedef struct {
   const ASTNode *pattern;
   int pattern_negated;
   const ASTNode *filler;
+  const char *binding;
   int found;
 } MatchContext;
 
@@ -723,7 +724,7 @@ static void match_visit(void *raw, ASTNode *node, int negated) {
     return;
   }
   if (negated == ctx->pattern_negated &&
-      nodes_equal(ctx->pattern, node, "value", ctx->filler, 0)) {
+      nodes_equal(ctx->pattern, node, ctx->binding, ctx->filler, 0)) {
     ctx->found = 1;
     return;
   }
@@ -735,19 +736,21 @@ static void match_visit(void *raw, ASTNode *node, int negated) {
     const char *flipped = negate_operator(op);
     if (flipped && binary_parts(ctx->pattern, &pop, &pleft, &pright) &&
         strcmp(pop, flipped) == 0 &&
-        nodes_equal(pleft, left, "value", ctx->filler, 0) &&
-        nodes_equal(pright, right, "value", ctx->filler, 0)) {
+        nodes_equal(pleft, left, ctx->binding, ctx->filler, 0) &&
+        nodes_equal(pright, right, ctx->binding, ctx->filler, 0)) {
       ctx->found = 1;
     }
   }
 }
 
 static int guards_prove_atom(TypeChecker *checker, ASTNode *atom,
-                             int atom_negated, ASTNode *filler) {
+                             int atom_negated, ASTNode *filler,
+                             const char *binding) {
   MatchContext ctx;
   ctx.pattern = atom;
   ctx.pattern_negated = atom_negated;
   ctx.filler = filler;
+  ctx.binding = binding;
   ctx.found = 0;
   for (size_t i = 0; i < checker->guard_count && !ctx.found; i++) {
     struct TypeCheckerGuard *guard = &checker->guards[i];
@@ -896,6 +899,7 @@ static void describe(const ASTNode *node, char *out, size_t capacity,
 typedef struct {
   TypeChecker *checker;
   ASTNode *expr;
+  const char *binding;
   Range value_range;
   int have_range;
   int failed;
@@ -915,11 +919,12 @@ static void prove_visit(void *raw, ASTNode *atom, int negated) {
     const char *effective = negated ? negate_operator(op) : op;
     ASTNode *other = NULL;
     const char *use = NULL;
-    if (identifier_name(left) && strcmp(identifier_name(left), "value") == 0) {
+    if (identifier_name(left) &&
+        strcmp(identifier_name(left), ctx->binding) == 0) {
       other = right;
       use = effective;
     } else if (identifier_name(right) &&
-               strcmp(identifier_name(right), "value") == 0) {
+               strcmp(identifier_name(right), ctx->binding) == 0) {
       other = left;
       use = flip_operator(effective);
     }
@@ -931,7 +936,8 @@ static void prove_visit(void *raw, ASTNode *atom, int negated) {
       }
     }
   }
-  if (guards_prove_atom(ctx->checker, atom, negated, ctx->expr)) {
+  if (guards_prove_atom(ctx->checker, atom, negated, ctx->expr,
+                        ctx->binding)) {
     return;
   }
   ctx->failed = 1;
@@ -969,6 +975,7 @@ int type_checker_prove_refinement(TypeChecker *checker, Type *refined,
     if (!layer->refinement) {
       continue;
     }
+    ctx.binding = layer->refine_binding ? layer->refine_binding : "value";
     visit_atoms(layer->refinement, 0, prove_visit, &ctx, 0);
     if (ctx.failed) {
       char atom_text[160] = "";
@@ -1014,7 +1021,7 @@ void type_checker_compute_refinement_range(TypeChecker *checker,
   if (refined->refinement) {
     NarrowContext ctx;
     ctx.checker = checker;
-    ctx.name = "value";
+    ctx.name = refined->refine_binding ? refined->refine_binding : "value";
     ctx.range = &r;
     ctx.depth = 0;
     visit_atoms(refined->refinement, 0, narrow_visit, &ctx, 0);

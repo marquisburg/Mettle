@@ -104,6 +104,7 @@ typedef struct Type {
   char *qualified_name;
   struct Type *refined_base;
   struct ASTNode *refinement;
+  const char *refine_binding;
   int refine_has_range;
   long long refine_min;
   long long refine_max;

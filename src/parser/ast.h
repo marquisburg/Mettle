@@ -218,6 +218,9 @@ typedef struct {
 typedef struct {
   char *name;
   char *base_type;
+  /* The name the predicate binds the value under. NULL means `value`, the
+   * default, which is what almost every declaration wants. */
+  char *binding;
   ASTNode *predicate;
   int is_exported;
   ASTNode *composed_name;
@@ -605,7 +608,8 @@ ASTNode *ast_create_struct_declaration(const char *name, char **field_names,
                                        ASTNode **methods, size_t method_count,
                                        SourceLocation location);
 ASTNode *ast_create_type_declaration(const char *name, const char *base_type,
-                                     ASTNode *predicate, SourceLocation location);
+                                     const char *binding, ASTNode *predicate,
+                                     SourceLocation location);
 ASTNode *ast_create_enum_declaration(const char *name, EnumVariant *variants,
                                      size_t variant_count,
                                      SourceLocation location);

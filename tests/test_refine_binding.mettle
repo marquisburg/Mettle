@@ -1,0 +1,17 @@
+import "std/io";
+
+type Slot = uint32 where n: n < 8;
+fn is_even(x: int32) -> bool { return x % 2 == 0; }
+type Even = int32 where k: is_even(k);
+
+fn take(s: Slot) -> uint32 { return s; }
+
+fn main() -> int32 {
+  var s: Slot = 3;
+  var n: int32 = 8;
+  if (is_even(n)) {
+    var e: Even = n;
+    println("{take(s)} {e}");
+  }
+  return 0;
+}

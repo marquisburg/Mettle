@@ -605,7 +605,8 @@ may not allocate is `@noalloc`, a slot that stays in the ring is a declared
 type the compiler proves in range, and what the compiler has no word for is a
 `@rule`, such as a job being reached from the worker and never from `main`,
 or a state machine's `step` deciding every state. `examples/job_system/` is
-that shape in one file.
+that shape in one file, and a module offers its rules to whoever imports it,
+which is how a house style stops being a script in another language.
 
 VII.7 has already decided the other half. The model where the points are
 inserted, `async`/`await` with a compiler-placed yield, a pool that steals
@@ -859,6 +860,7 @@ only where proven.
   array carries no bounds check, `--explain` names the proof, and the
   interpreter re-checks every proven conversion under `mettle test`, so a
   wrong proof is caught by a machine that does not trust the prover.
+  `--check-proofs` extends that check into a compiled program.
 - ~~An execution model.~~ *(V.6)* Landed as a position and a worked shape:
   the model is the program's, `quiesce` is its point, and its properties are
   a contract, a declared type and rules that hold on every build.

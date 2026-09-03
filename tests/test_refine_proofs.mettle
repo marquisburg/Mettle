@@ -1,0 +1,12 @@
+import "std/io";
+
+type Digit = int32 where value >= 0 && value < 10;
+
+fn take(d: Digit) -> int32 { return d; }
+
+fn main() -> int32 {
+  var x: int32 = 50;
+  var d: Digit = x;
+  println("{take(d)}");
+  return 0;
+}

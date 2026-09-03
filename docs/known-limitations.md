@@ -98,8 +98,12 @@ proven.
 A declared type refines a number, a bool, a char, a string, a pointer or a
 slice. A struct, an enum or an array cannot be the base.
 
-`mettle test` checks the range conjuncts of a proven conversion as it runs.
-A conjunct that calls a function is not re-evaluated there.
+`mettle test` checks the range conjuncts of a proven conversion as it runs,
+and `--check-proofs` does the same in a compiled program. A conjunct that
+calls a function is not re-evaluated in either.
+
+A rule sees a declared type in `p.types` with kind `declared` and its base
+named, and does not see the predicate itself.
 
 ## Closures
 

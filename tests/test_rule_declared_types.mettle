@@ -1,0 +1,31 @@
+import "std/rule";
+
+type Percent = int32 where value >= 0 && value <= 100;
+struct Packet { a: int32; b: int32; }
+enum Sort { One, Two }
+
+@rule fn every_kind_is_visible(p: Program) -> Verdict {
+  var declared: int64 = 0;
+  var structs: int64 = 0;
+  var enums: int64 = 0;
+  var based_on_int32: int64 = 0;
+  for t in p.types {
+    if (t.module != "") { continue; }
+    if (t.kind == "struct") { structs = structs + 1; }
+    if (t.kind == "enum") { enums = enums + 1; }
+    if (t.kind == "declared") {
+      declared = declared + 1;
+      if (t.base == "int32") { based_on_int32 = based_on_int32 + 1; }
+    }
+  }
+  if (structs == 1 && enums == 1 && declared == 1 && based_on_int32 == 1) {
+    return verdict_pass();
+  }
+  return verdict_fail_program("a rule cannot see every kind of declared type");
+}
+
+@rule fn undecidable(p: Program) -> Verdict {
+  return verdict_gap_program("this one decides nothing on purpose");
+}
+
+fn main() -> int32 { var p: Percent = 7; return p - 7; }

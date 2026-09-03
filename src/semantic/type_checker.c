@@ -229,8 +229,7 @@ int type_checker_validate_rule_signature(TypeChecker *checker,
                  type_checker_type_is_named(param_types[0],
                                             "std/rule.Program") &&
                  type_checker_type_is_named(return_type, "std/rule.Verdict");
-  if (shape_ok && !func_decl->is_exported && !func_decl->is_extern &&
-      func_decl->body) {
+  if (shape_ok && !func_decl->is_extern && func_decl->body) {
     return 1;
   }
   type_checker_set_error_at_location(

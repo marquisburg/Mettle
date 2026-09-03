@@ -544,6 +544,17 @@ error[P0001]: cannot prove `value <= 100` for `b`, which 'Percent' requires
 A cast, `(Percent)n`, is the same conversion spelled out, and it needs the
 same proof. There is no way to assert a value into a declared type.
 
+The predicate speaks about `value` unless it is given another name, which is
+worth doing where `value` reads badly:
+
+```mettle
+type Slot = uint32 where n: n < 64;
+type Even = int32 where k: is_even(k);
+```
+
+The name binds only inside the predicate, and the diagnostics use whichever
+name was written.
+
 A declared type without a predicate is a unit. `Meters` and `Seconds` never
 mix: `m + s` is an error, `m + m` is a `Meters`, `m * 2.0` is a `Meters`, and
 `plain / s` is a `float64`. A plain `float64` becomes a `Meters` only by a
@@ -562,6 +573,13 @@ fn get(a: int32[10], d: Digit) -> int32 { return a[d]; }
 it: every proven conversion is checked as the interpreter runs, and a value
 that violates its type stops the run naming the type. The prover is code, and
 code is not trusted on its own authority.
+
+`--check-proofs` extends that to a compiled program: every proven conversion
+traps at run time when the value is not what the compiler proved, in
+`--release` too. It is a separate flag from `--safe`, because it answers a
+different question. `--safe` distrusts the program's indices; `--check-proofs`
+distrusts the compiler's own prover. A program that declares no such type
+compiles to the same bytes with the flag as without it.
 
 ## Conversions
 

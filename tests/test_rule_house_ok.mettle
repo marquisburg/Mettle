@@ -1,0 +1,9 @@
+import "import_fixtures/house_rules";
+import "std/io";
+
+fn twice(n: int32) -> int32 { return n + n; }
+
+fn main() -> int32 {
+  println("house held: {twice(21)}");
+  return 0;
+}

@@ -4215,6 +4215,108 @@ catch {
 }
 }
 
+# A rule reads every kind the program declared, declared types included, and
+# can answer about the program as a whole when no single line owns the
+# complaint.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_rule_declared_types.mettle" -o (Join-Path $tmpDir "rule_declared.exe") --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the build failed: $out" }
+  if ($out -notmatch "rule every_kind_is_visible: pass") { throw "a rule cannot see structs, enums and declared types together: $out" }
+  if ($out -notmatch "warning\[R0003\]: rule 'undecidable' could not decide here: this one decides nothing on purpose") { throw "a program-wide gap is not reported as R0003: $out" }
+  if ($out -notmatch "this rule speaks about the program as a whole") { throw "a program-wide verdict is labelled as a defect: $out" }
+  Write-CaseResult -Name "rule_sees_declared_types" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rule_sees_declared_types" -Passed $false -Reason $_.Exception.Message
+}
+
+# A module offers its rules, and they apply to whoever imports it: the error
+# lands on the importing program's line and the note names the module the rule
+# came from.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "rule_house.exe"
+  $out = & $CompilerPath --build "tests/test_rule_house_ok.mettle" -o $exe --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a conforming program failed: $out" }
+  if ($out -notmatch "rules: 2 run, 2 passed") { throw "the imported rules did not run: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or $run -notmatch "house held: 42") { throw "wrong output: $run" }
+  $out = & $CompilerPath --build "tests/test_rule_house_broken.mettle" -o (Join-Path $tmpDir "rule_house_broken.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "an imported rule did not fail the build" }
+  if ($out -notmatch "error\[R0002\]: rule 'house_forbids_recursion' failed: the house style forbids recursion") { throw "the imported rule did not report as written: $out" }
+  if ($out -notmatch "test_rule_house_broken\.mettle:3:1") { throw "the error does not point at the importing program: $out" }
+  if ($out -notmatch "house_rules\.mettle") { throw "the note does not name the module the rule came from: $out" }
+  Write-CaseResult -Name "rule_module_applies_to_importers" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rule_module_applies_to_importers" -Passed $false -Reason $_.Exception.Message
+}
+
+# A predicate speaks about `value` unless it names the binding itself, and the
+# name it wrote is the name the diagnostics and `mettle expand` use.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "refine_binding.exe"
+  $out = & $CompilerPath --build "tests/test_refine_binding.mettle" -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "named bindings failed to build: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or $run -notmatch "3 8") { throw "wrong output: $run" }
+  $out = & $CompilerPath expand "tests/test_refine_binding.mettle" 2>&1 | Out-String
+  if ($out -notmatch "type Slot = uint32 where n: \(n < 8\);") { throw "expand does not print the named binding: $out" }
+  if ($out -notmatch "type Even = int32 where k: is_even\(k\);") { throw "expand does not print a call predicate's binding: $out" }
+  $out = & $CompilerPath --build "tests/test_refine_binding_bad.mettle" -o (Join-Path $tmpDir "refine_binding_bad.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "an out-of-range value was accepted" }
+  if ($out -notmatch "cannot prove ``n < 8`` for ``99``") { throw "the diagnostic does not use the declared name: $out" }
+  Write-CaseResult -Name "refine_named_binding" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "refine_named_binding" -Passed $false -Reason $_.Exception.Message
+}
+
+# --check-proofs distrusts the prover inside a compiled program, survives
+# --release, and costs nothing where there is no declared type to check.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_refine_proofs.mettle" -o (Join-Path $tmpDir "refine_proofs.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $out -notmatch "cannot prove ``value >= 0`` for ``x``") { throw "the honest prover accepted the conversion: $out" }
+  $env:METTLE_TRUST_REFINEMENTS = "1"
+  try {
+    foreach ($mode in @("debug", "release")) {
+      $exe = Join-Path $tmpDir ("refine_proofs_{0}.exe" -f $mode)
+      $buildArgs = @("--build", "tests/test_refine_proofs.mettle", "-o", $exe, "--check-proofs")
+      if ($mode -eq "release") { $buildArgs = @("--release") + $buildArgs }
+      $out = & $CompilerPath @buildArgs 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) { throw "the $mode build failed: $out" }
+      $run = & $exe 2>&1 | Out-String
+      if ($LASTEXITCODE -eq 0) { throw "the $mode build ran a value the prover got wrong" }
+      if ($run -notmatch "a value the compiler proved to be 'Digit' is not one") { throw "the $mode trap does not name the type: $run" }
+    }
+  }
+  finally {
+    Remove-Item Env:\METTLE_TRUST_REFINEMENTS -ErrorAction SilentlyContinue
+  }
+  $plain = Join-Path $tmpDir "refine_proofs_plain.exe"
+  $plainChecked = Join-Path $tmpDir "refine_proofs_plain_checked.exe"
+  $out = & $CompilerPath --build "tests/test_noalloc.mettle" -o $plain 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the plain build failed: $out" }
+  $out = & $CompilerPath --build "tests/test_noalloc.mettle" -o $plainChecked --check-proofs 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the plain build with the flag failed: $out" }
+  if ((Get-Sha256FileHash $plain) -ne (Get-Sha256FileHash $plainChecked)) { throw "--check-proofs cost a program that declares no such type" }
+  Write-CaseResult -Name "refine_check_proofs_flag" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "refine_check_proofs_flag" -Passed $false -Reason $_.Exception.Message
+}
+
 # Runtime excision: each optional component has to be absent from a binary that
 # did not ask for it, and the absence has to be checkable rather than asserted.
 # What is excisable is optional; what is mandatory is a tax, so this is the
