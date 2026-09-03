@@ -1,0 +1,150 @@
+import "std/io";
+import "std/thread";
+import "std/rule";
+
+extern fn mettle_swap_stage(slot: rawptr, replacement: rawptr) -> int32;
+
+type Slot = uint32 where value < 64;
+
+enum Phase { Idle, Running, Draining, Done }
+
+struct Job {
+  id: int32;
+  cost: int32;
+  result: int32;
+}
+
+var g_jobs: Job[64];
+var g_pushed: uint32 = 0;
+var g_taken: uint32 = 0;
+var g_lock: int32 = 0;
+var g_phase: int32 = 0;
+
+@noalloc fn job_square(j: Job*) {
+  j.result = j.cost * j.cost;
+}
+
+@noalloc fn job_run(j: Job*) {
+  job_square(j);
+}
+
+@swappable fn priority_v1(cost: int32) -> int32 { return cost; }
+@swappable fn priority_v2(cost: int32) -> int32 { return 100 - cost; }
+
+var priority: fn(int32) -> int32 = &priority_v1;
+
+fn queue_push(id: int32, cost: int32) -> bool {
+  if (g_pushed >= 64) { return false; }
+  var at: Slot = g_pushed;
+  g_jobs[at] = { id: id, cost: cost, result: 0 };
+  g_pushed = g_pushed + 1;
+  return true;
+}
+
+fn queue_take(out: Job**) -> bool {
+  spin_lock(&g_lock);
+  if (g_taken >= g_pushed || g_taken >= 64) {
+    spin_unlock(&g_lock);
+    return false;
+  }
+  var at: Slot = g_taken;
+  *out = &g_jobs[at];
+  g_taken = g_taken + 1;
+  spin_unlock(&g_lock);
+  return true;
+}
+
+fn worker_main(arg: cstring) -> uint32 {
+  var done: uint32 = 0;
+  while (true) {
+    var j: Job* = 0;
+    if (queue_take(&j)) {
+      job_run(j);
+      done = done + 1;
+    } else if (g_phase == 2) {
+      return done;
+    } else {
+      thread_sleep_ms(1);
+    }
+  }
+  return done;
+}
+
+fn step(p: Phase) -> Phase {
+  switch (p) {
+    case Phase.Idle: return Phase.Running;
+    case Phase.Running: return Phase.Draining;
+    case Phase.Draining: return Phase.Done;
+    case Phase.Done: return Phase.Done;
+  }
+  return Phase.Done;
+}
+
+fn advance() {
+  g_phase = (int32)step((Phase)g_phase);
+}
+
+@rule fn jobs_never_allocate(p: Program) -> Verdict {
+  for f in p.functions {
+    if (f.module != "") { continue; }
+    if (f.name.length < 4) { continue; }
+    if (f.name[0] == 'j' && f.name[1] == 'o' && f.name[2] == 'b' && f.name[3] == '_' && !f.is_noalloc) {
+      return verdict_fail(f.site, "a job runs on the worker and may not allocate; mark it @noalloc");
+    }
+  }
+  return verdict_pass();
+}
+
+@rule fn jobs_run_on_the_worker_only(p: Program) -> Verdict {
+  var entry: int64 = program_function_index(p, "main");
+  if (entry < 0) { return verdict_pass(); }
+  for f in p.functions {
+    if (f.module != "") { continue; }
+    if (f.name.length < 4) { continue; }
+    if (f.name[0] == 'j' && f.name[1] == 'o' && f.name[2] == 'b' && f.name[3] == '_') {
+      if (function_reaches(p, p.functions[entry], f.qualified)) {
+        return verdict_fail(f.site, "a job is reached from main; only worker_main may run jobs");
+      }
+    }
+    if (f.has_indirect_calls && f.name != "main") {
+      return verdict_gap(f.site, "a call through a pointer could reach a job from any thread");
+    }
+  }
+  return verdict_pass();
+}
+
+@rule fn transitions_are_total(p: Program) -> Verdict {
+  var phase: int64 = program_type_index(p, "Phase");
+  var stepper: int64 = program_function_index(p, "step");
+  if (phase < 0 || stepper < 0) { return verdict_pass(); }
+  for v in p.types[phase].variants {
+    if (!function_matches(p.functions[stepper], "Phase", v)) {
+      return verdict_fail(p.functions[stepper].site, "step does not decide every Phase");
+    }
+  }
+  return verdict_pass();
+}
+
+fn main() -> int32 {
+  advance();
+  for i in 0..16 {
+    queue_push(i, priority(i));
+  }
+  var worker: int64 = CreateThread(0, 0, &worker_main, 0, 0, 0);
+  mettle_swap_stage(&priority, &priority_v2);
+  quiesce;
+  for i in 16..32 {
+    queue_push(i, priority(i));
+  }
+  advance();
+  thread_join_infinite(worker);
+  thread_close(worker);
+  advance();
+  var total: int64 = 0;
+  for i in 0..32 {
+    var at: Slot = (uint32)i;
+    total = total + g_jobs[at].result;
+  }
+  println("jobs {g_taken} of {g_pushed}, phase {g_phase}, sum {total}");
+  return 0;
+}

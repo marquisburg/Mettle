@@ -187,6 +187,39 @@ The staging table is fixed-size and allocates nothing, so a swap cannot fail
 for want of memory at the moment a program is trying to replace the code that
 was going wrong. Restaging a slot replaces the earlier intent.
 
+## The execution model is the program's
+
+Mettle used to ship a scheduler, and it was deleted for the reasons above. What
+a program does now is build the one it needs, in the language, and say what it
+must satisfy. `std/thread` maps to Kernel32 threads on Windows and to `clone`
+with futexes on Linux, and stops there: no thread pool, no executor, no
+message loop is linked unless the program wrote one.
+
+Two things make that a supported shape and not an absence. The first is
+`quiesce`: a point the program names, at which staged work lands and at no
+other time. Every model worth having has such points, a frame boundary or the
+top of a request, and the program writes them. Nothing yields, ticks or
+collects at a point nobody wrote.
+
+The second is that the properties a model depends on are stated in the program
+and checked on every build. A job that must not allocate is `@noalloc`. A
+queue index that must stay in the ring is a [declared type](types.md) the
+compiler proves in range. Properties the compiler has no word for are
+[rules](rules.md): a job is reached from the worker and never from `main`, a
+state machine's `step` decides every state, a handler runs on one thread. A
+rule that cannot decide says so, which is what happens the moment a call goes
+through a function pointer.
+
+[`examples/job_system/`](../examples/job_system/) is the whole shape in one
+file: a queue on `std/thread`, a priority function swapped at `quiesce`, a
+`Slot` type, and three rules the build stops on.
+
+What a program cannot get is the other kind of model: `async`/`await` with a
+yield the compiler inserts, or a work-stealing pool that runs code at a point
+the program did not name. A yield point the compiler inserts is unauthored
+control flow, the same event as a collection point, and the line above forbids
+it however good the feature would be.
+
 ## The runtime is moving to Mettle
 
 A runtime you cannot inspect is indistinguishable from a runtime that is

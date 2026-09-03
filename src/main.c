@@ -32,6 +32,7 @@
 #include "ir/ir_debug_hooks.h"
 #include "semantic/import_resolver.h"
 #include "semantic/rule_reflect.h"
+#include "semantic/target_desc.h"
 #include "ir/ir_rules.h"
 #include <ctype.h>
 #include <errno.h>
@@ -612,6 +613,9 @@ static char *replace_extension(const char *path, const char *extension) {
 /* Does this host emit ELF? Ask this rather than comparing against one ELF
  * format: a native AArch64 Linux build reports ELF_ARM64, and a test written
  * against ELF_X64 alone quietly hands it the Windows answer. */
+int target_argument_is_description(const char *argument);
+int load_target_description(CompilerOptions *options);
+
 static int host_target_is_elf(void) {
   BinaryTargetFormat format = mtlc_target()->format;
   return format == BINARY_TARGET_FORMAT_ELF_X64 ||
@@ -4010,6 +4014,11 @@ static DriverFlagResult parse_flag_target(CompilerOptions *options,
   if (strcmp(argv[i], "--target") == 0 && i + 1 < argc) {
     char target_error[256];
     options->target_triple = argv[++i];
+    if (target_argument_is_description(options->target_triple)) {
+      options->target_desc_path = options->target_triple;
+      *index = i;
+      return DRIVER_FLAG_TAKEN;
+    }
     if (!mtlc_target_select(options->target_triple, target_error,
                             sizeof(target_error))) {
       fprintf(stderr, "Error: %s\n", target_error);
@@ -4018,6 +4027,8 @@ static DriverFlagResult parse_flag_target(CompilerOptions *options,
     if (mtlc_target()->arch == MTLC_TARGET_ARCH_AARCH64) {
       options->emit_arm64_obj = 1;
     }
+  } else if (strcmp(argv[i], "--report-target") == 0) {
+    options->report_target = 1;
   } else if (strcmp(argv[i], "--target") == 0) {
     fprintf(stderr, "Error: Missing triple after '--target'; known targets "
                     "are %s\n",
@@ -4026,6 +4037,11 @@ static DriverFlagResult parse_flag_target(CompilerOptions *options,
   } else if (strncmp(argv[i], "--target=", 9) == 0) {
     char target_error[256];
     options->target_triple = argv[i] + 9;
+    if (target_argument_is_description(options->target_triple)) {
+      options->target_desc_path = options->target_triple;
+      *index = i;
+      return DRIVER_FLAG_TAKEN;
+    }
     if (!mtlc_target_select(options->target_triple, target_error,
                             sizeof(target_error))) {
       fprintf(stderr, "Error: %s\n", target_error);
@@ -4317,6 +4333,23 @@ int main(int argc, char *argv[]) {
         return 1;
       }
     }
+    if (strcmp(argv[1], "target") == 0) {
+      MtlcTargetDescription description;
+      char error[256];
+      if (argc < 3) {
+        fprintf(stderr, "usage: mettle target <triple>   (prints the target's "
+                        "description as Mettle; known targets: %s)\n",
+                mtlc_target_triple_list());
+        return 1;
+      }
+      if (!mtlc_target_description_of(argv[2], &description, error,
+                                      sizeof(error))) {
+        fprintf(stderr, "Error: %s\n", error);
+        return 1;
+      }
+      mtlc_target_print_description(stdout, &description);
+      return 0;
+    }
     if (strcmp(argv[1], "test") == 0) {
       /* `mettle test <file> [--filter=S] [flags...]`: shift the subcommand
        * out and let the normal flag loop see the rest. */
@@ -4372,9 +4405,30 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  if (!options.stdlib_directory) {
+    auto_stdlib_directory = infer_default_stdlib_directory(argv[0]);
+    if (auto_stdlib_directory) {
+      options.stdlib_directory = auto_stdlib_directory;
+    }
+  }
+
+  if (!load_target_description(&options)) {
+    free((void *)options.import_directories);
+    free((void *)options.link_arguments);
+    free(auto_stdlib_directory);
+    return 1;
+  }
+  if (options.report_target) {
+    const MtlcTargetDescription *current = mtlc_target_current_description();
+    if (current) {
+      mtlc_target_print_description(stdout, current);
+    }
+  }
+
   {
     int target_status = mettle_check_target_options(&options, &flags);
     if (target_status != 0) {
+      free(auto_stdlib_directory);
       return target_status;
     }
   }
@@ -4382,13 +4436,6 @@ int main(int argc, char *argv[]) {
     options.emit_object = 1;
     if (!flags.linker_mode_explicit) {
       options.linker_mode = LINKER_MODE_INTERNAL;
-    }
-  }
-
-  if (!options.stdlib_directory) {
-    auto_stdlib_directory = infer_default_stdlib_directory(argv[0]);
-    if (auto_stdlib_directory) {
-      options.stdlib_directory = auto_stdlib_directory;
     }
   }
 
@@ -5360,6 +5407,75 @@ static void compile_prepend_auto_imports(const CompilerOptions *options,
   }
 }
 
+int target_argument_is_description(const char *argument) {
+  size_t length = argument ? strlen(argument) : 0;
+  return length > 7 && strcmp(argument + length - 7, ".mettle") == 0;
+}
+
+/* `--target desc.mettle`: the target is a Mettle module declaring a
+ * `const NAME: TargetDesc`. It is read the way any module is read, checked,
+ * and then handed to the backend as data. */
+int load_target_description(CompilerOptions *options) {
+  const char *path = options ? options->target_desc_path : NULL;
+  char *source = NULL;
+  ErrorReporter *reporter = NULL;
+  Lexer *lexer = NULL;
+  Parser *parser = NULL;
+  ASTNode *program = NULL;
+  MtlcTargetDescription description;
+  char error[512];
+  int ok = 0;
+  if (!path) {
+    return 1;
+  }
+  source = read_file(path);
+  if (!source) {
+    fprintf(stderr, "Error: Could not read target description '%s'\n", path);
+    return 0;
+  }
+  reporter = error_reporter_create(path, source);
+  lexer = lexer_create(source);
+  parser = lexer && reporter ? parser_create_with_error_reporter(lexer, reporter)
+                             : NULL;
+  if (!lexer || !reporter || !parser) {
+    fprintf(stderr, "Error: could not set up to read '%s'\n", path);
+    goto done;
+  }
+  program = parser_parse_program(parser);
+  if (!program || parser->had_error || error_reporter_has_errors(reporter)) {
+    error_reporter_print_errors(reporter);
+    goto done;
+  }
+  if (!target_desc_read(program, &description, error, sizeof(error))) {
+    fprintf(stderr, "Error: target description '%s': %s\n", path, error);
+    goto done;
+  }
+  if (!mtlc_target_describe(&description, error, sizeof(error))) {
+    fprintf(stderr, "Error: target description '%s': %s\n", path, error);
+    goto done;
+  }
+  if (mtlc_target()->arch == MTLC_TARGET_ARCH_AARCH64) {
+    options->emit_arm64_obj = 1;
+  }
+  ok = 1;
+done:
+  if (program) {
+    ast_destroy_node(program);
+  }
+  if (parser) {
+    parser_destroy(parser);
+  }
+  if (lexer) {
+    lexer_destroy(lexer);
+  }
+  if (reporter) {
+    error_reporter_destroy(reporter);
+  } else {
+    free(source);
+  }
+  return ok;
+}
+
 int compile_file(const char *input_filename, const char *output_filename,
                  CompilerOptions *options) {
   CompilerProfile profile;
@@ -6175,6 +6291,9 @@ void print_usage(const char *program_name) {
   printf("       %s explain <CODE>   Explain a code: a diagnostic (E0004, M0103) or an --explain\n"
          "                            decision (dot-shape-address); 'list' for the index\n",
          program_name);
+  printf("       %s target <triple>            Print a built-in target's description as\n"
+         "                           Mettle; `--target desc.mettle` builds for one\n",
+         program_name);
   printf("       %s test <file> [--filter=S]   Run @test functions in the compile-time\n"
          "                           interpreter (instant; no codegen or linking)\n",
          program_name);
@@ -6288,6 +6407,7 @@ void print_usage(const char *program_name) {
   printf("  --dump-ir           Write optimized IR sidecar (.ir) without debug metadata\n");
   printf("  --simd-report       Report what each @simd loop became (needs -O/--release)\n");
   printf("  --report-rules      Print the verdict and interpreter steps of every @rule\n");
+  printf("  --report-target     Print the target in effect as a Mettle TargetDesc\n");
   printf("  --rule-budget=N     Fail the build when the rules spend more than N steps\n");
   printf("  --explain           Report every optimization decision in the input file --\n"
          "                      loop vectorization and call inlining, with the reason\n"

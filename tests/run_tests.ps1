@@ -294,6 +294,9 @@ $script:CaseBlock = 24
 function Test-CaseIsMine {
   $ordinal = $script:CaseOrdinal
   $script:CaseOrdinal = $ordinal + 1
+  if ($env:METTLE_TRACE_ROSTER) {
+    Add-Content -Path $env:METTLE_TRACE_ROSTER -Value "$ordinal $((Get-PSCallStack)[1].ScriptLineNumber)"
+  }
   if ($Shards -le 1) { return $true }
   return ((([int][Math]::Floor($ordinal / $script:CaseBlock)) % $Shards) -eq $Shard)
 }
@@ -4075,6 +4078,141 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "refine_interpreter_checks_the_prover" -Passed $false -Reason $_.Exception.Message
+}
+
+# A target's description is data the compiler reads. `mettle target <triple>`
+# prints a built-in one as Mettle, and feeding it back through `--target`
+# reproduces the built-in output byte for byte: the description is checked by
+# a machine that does not trust it.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  foreach ($triple in @("x86_64-windows", "x86_64-linux", "x86_64-none", "aarch64-linux")) {
+    $desc = Join-Path $tmpDir "target_$triple.mettle"
+    $printed = & $CompilerPath target $triple 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $printed -notmatch "export const TARGET: TargetDesc = \{") { throw "mettle target $triple printed nothing usable: $printed" }
+    Set-Content -Path $desc -Value $printed -Encoding ascii
+    $builtin = Join-Path $tmpDir "target_builtin_$triple.o"
+    $described = Join-Path $tmpDir "target_described_$triple.o"
+    $out = & $CompilerPath "tests/test_target_desc.mettle" --target $triple --emit-obj -o $builtin 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "built-in $triple failed: $out" }
+    $out = & $CompilerPath "tests/test_target_desc.mettle" --target $desc --emit-obj -o $described 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "described $triple failed: $out" }
+    if ((Get-Sha256FileHash $builtin) -ne (Get-Sha256FileHash $described)) { throw "the description of $triple does not reproduce it" }
+  }
+  $desc16 = Join-Path $tmpDir "target_i8086.mettle"
+  $printed = & $CompilerPath target i8086-none 2>&1 | Out-String
+  Set-Content -Path $desc16 -Value $printed -Encoding ascii
+  $flatA = Join-Path $tmpDir "target_builtin_16.bin"
+  $flatB = Join-Path $tmpDir "target_described_16.bin"
+  $out = & $CompilerPath "tests/test_boot_sector.mettle" --target i8086-none --image-base 0x7c00 --emit-flat $flatA 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "built-in i8086-none failed: $out" }
+  $out = & $CompilerPath "tests/test_boot_sector.mettle" --target $desc16 --image-base 0x7c00 --emit-flat $flatB 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "described i8086-none failed: $out" }
+  if ((Get-Sha256FileHash $flatA) -ne (Get-Sha256FileHash $flatB)) { throw "the description of i8086-none does not reproduce it" }
+  Write-CaseResult -Name "target_description_round_trips" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "target_description_round_trips" -Passed $false -Reason $_.Exception.Message
+}
+
+# Enforce: a description that claims what the machine cannot do is refused and
+# told why, and a hosted target cannot rewrite the platform's convention.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $hosted = & $CompilerPath target x86_64-linux 2>&1 | Out-String
+  $free = & $CompilerPath target x86_64-none 2>&1 | Out-String
+  $invalidDescriptions = @(
+    @{ Base = $hosted; From = "pointer_bits: 64"; To = "pointer_bits: 32"; Expect = "``x86_64`` code has 64-bit pointers; the description says 32" },
+    @{ Base = $hosted; From = 'int_args: ["rdi", "rsi"'; To = 'int_args: ["rsi", "rdi"'; Expect = "a hosted target's calling convention is the platform's" },
+    @{ Base = $free; From = '"rdx", "rcx"'; To = '"rdx", "rdx"'; Expect = "``rdx`` is listed twice among the integer argument registers" },
+    @{ Base = $free; From = "vector_width: 256"; To = "vector_width: 512"; Expect = "vectorizes at 256 bits and takes no other width" }
+  )
+  $i = 0
+  foreach ($case in $invalidDescriptions) {
+    $i++
+    $desc = Join-Path $tmpDir "target_invalid_$i.mettle"
+    Set-Content -Path $desc -Value ($case.Base.Replace($case.From, $case.To)) -Encoding ascii
+    $out = & $CompilerPath "tests/test_target_desc.mettle" --target $desc --emit-obj -o (Join-Path $tmpDir "target_invalid_$i.o") 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0) { throw "invalid description $i was accepted" }
+    $flat = ($out -replace '\s+', ' ')
+    if ($flat -notmatch [regex]::Escape($case.Expect)) { throw "invalid description $i was refused for the wrong reason: $out" }
+  }
+  Write-CaseResult -Name "target_description_is_validated" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "target_description_is_validated" -Passed $false -Reason $_.Exception.Message
+}
+
+# A freestanding x86_64 target may choose its calling convention, and the
+# choice reaches the emitted code: the first integer argument lands in the
+# register the description named, and --report-target says which target this is.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $base = & $CompilerPath target x86_64-none 2>&1 | Out-String
+  $mine = $base.Replace('int_args: ["rdi", "rsi"', 'int_args: ["rsi", "rdi"').Replace('indirect_return: "rdi"', 'indirect_return: "rsi"').Replace('name: "x86_64-none"', 'name: "x86_64-mine"')
+  $desc = Join-Path $tmpDir "target_mine.mettle"
+  Set-Content -Path $desc -Value $mine -Encoding ascii
+  $builtin = Join-Path $tmpDir "target_none_builtin.o"
+  $custom = Join-Path $tmpDir "target_none_custom.o"
+  $out = & $CompilerPath "tests/test_target_desc.mettle" --target x86_64-none --emit-obj -o $builtin 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "built-in build failed: $out" }
+  $out = & $CompilerPath "tests/test_target_desc.mettle" --target $desc --emit-obj -o $custom --report-target 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "described build failed: $out" }
+  if ($out -notmatch 'name: "x86_64-mine"') { throw "--report-target does not name the described target: $out" }
+  if ((Get-Sha256FileHash $builtin) -eq (Get-Sha256FileHash $custom)) { throw "the described convention changed nothing" }
+  $objdump = Get-Command objdump -ErrorAction SilentlyContinue
+  if ($objdump) {
+    $dis = & objdump -d $custom 2>&1 | Out-String
+    $mainAt = $dis.IndexOf("<main>:")
+    if ($mainAt -lt 0) { throw "no main in the disassembly" }
+    $mainBody = $dis.Substring($mainAt)
+    $firstCall = $mainBody.IndexOf("call")
+    if ($firstCall -lt 0) { throw "no call in main" }
+    $prologue = $mainBody.Substring(0, $firstCall)
+    if ($prologue -notmatch 'mov\s+\$0x1,%esi') { throw "the first argument did not land in esi under the described convention: $prologue" }
+    if ($prologue -notmatch 'mov\s+\$0x2,%edi') { throw "the second argument did not land in edi under the described convention: $prologue" }
+  }
+  Write-CaseResult -Name "target_description_chooses_a_convention" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "target_description_chooses_a_convention" -Passed $false -Reason $_.Exception.Message
+}
+
+# An execution model is a thing the program builds: a job system on std/thread
+# with a swap point the program named. Its properties are stated in the
+# program (a contract, a declared type, three rules) and checked on every
+# build; the swap lands at quiesce and nowhere else, which the sum proves.
+if (-not $script:OnWindows) { Skip-WindowsOnly "execution_model_is_the_programs" "Windows-only: std/thread on this host is Kernel32" } else {
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "job_system.exe"
+  $out = & $CompilerPath --build "examples/job_system/job_system.mettle" -o $exe --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the job system failed to build: $out" }
+  if ($out -notmatch "rules: 3 run, 3 passed, 0 failed, 0 gaps") { throw "the three rules did not all pass: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or $run -notmatch "jobs 32 of 32, phase 3, sum 95216") { throw "wrong output: $run" }
+  $broken = Join-Path $tmpDir "job_system_broken.mettle"
+  $source = Get-Content "examples/job_system/job_system.mettle" -Raw
+  Set-Content -Path $broken -Value ($source.Replace("@noalloc fn job_square", "fn job_square")) -Encoding ascii
+  $out = & $CompilerPath --build $broken -o (Join-Path $tmpDir "job_system_broken.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $out -notmatch "rule 'jobs_never_allocate' failed: a job runs on the worker and may not allocate") { throw "dropping the contract went unnoticed: $out" }
+  $broken2 = Join-Path $tmpDir "job_system_broken2.mettle"
+  Set-Content -Path $broken2 -Value ($source.Replace("    case Phase.Done: return Phase.Done;", "    default: return Phase.Done;")) -Encoding ascii
+  $out = & $CompilerPath --build $broken2 -o (Join-Path $tmpDir "job_system_broken2.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $out -notmatch "rule 'transitions_are_total' failed: step does not decide every Phase") { throw "an undecided transition went unnoticed: $out" }
+  Write-CaseResult -Name "execution_model_is_the_programs" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "execution_model_is_the_programs" -Passed $false -Reason $_.Exception.Message
+}
 }
 
 # Runtime excision: each optional component has to be absent from a binary that

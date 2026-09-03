@@ -106,6 +106,7 @@ divergence. See [ML-driven IR optimization](ml-opt.md).
 | `--dump-ir` | Write the optimized IR to a `.ir` sidecar. |
 | `--report-rules` | The verdict and interpreter steps of every `@rule`; see [Rules](rules.md). |
 | `--rule-budget=N` | Fail the build when the rules spend more than N interpreter steps together. |
+| `--report-target` | The target in effect, printed as a `TargetDesc` in Mettle; `mettle target <triple>` prints a built-in one and `--target desc.mettle` builds for a described one. See [Bare metal](bare-metal.md). |
 
 `--explain` needs `-O` or `--release`, because there are no decisions to
 report without the optimizer. A repeat run leads with what changed since the

@@ -42,7 +42,44 @@ static const BinaryAbi SYSV_ABI = {
 
 static const BinaryAbi *g_active_abi = &MS_X64_ABI;
 
+static BinaryGpRegister g_described_int[16];
+static BinaryXmmRegister g_described_float[16];
+static BinaryAbi g_described_abi;
+static int g_described_valid;
+
+void code_generator_binary_describe_abi(const BinaryGpRegister *int_regs,
+                                        size_t int_count,
+                                        const BinaryXmmRegister *float_regs,
+                                        size_t float_count, int shadow_space,
+                                        BinaryGpRegister indirect_return,
+                                        int separate_classes) {
+  size_t i;
+  if (!int_regs || !float_regs || int_count == 0 || int_count > 16 ||
+      float_count == 0 || float_count > 16) {
+    g_described_valid = 0;
+    return;
+  }
+  for (i = 0; i < int_count; i++) {
+    g_described_int[i] = int_regs[i];
+  }
+  for (i = 0; i < float_count; i++) {
+    g_described_float[i] = float_regs[i];
+  }
+  g_described_abi.int_param_registers = g_described_int;
+  g_described_abi.int_param_count = int_count;
+  g_described_abi.float_param_registers = g_described_float;
+  g_described_abi.float_param_count = float_count;
+  g_described_abi.shadow_space_size = shadow_space;
+  g_described_abi.indirect_return_register = indirect_return;
+  g_described_abi.counts_classes_separately = separate_classes ? 1 : 0;
+  g_described_valid = 1;
+}
+
 void code_generator_binary_select_abi(BinaryTargetFormat format) {
+  if (g_described_valid) {
+    g_active_abi = &g_described_abi;
+    return;
+  }
   switch (format) {
   case BINARY_TARGET_FORMAT_ELF_X64:
     g_active_abi = &SYSV_ABI;

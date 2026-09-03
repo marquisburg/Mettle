@@ -1,0 +1,17 @@
+export struct TargetDesc {
+  name: string;
+  arch: string;
+  os: string;
+  format: string;
+  pointer_bits: int64;
+  stack_alignment: int64;
+  shadow_space: int64;
+  red_zone: int64;
+  int_args: string[16];
+  float_args: string[16];
+  indirect_return: string;
+  separate_classes: bool;
+  widths: int64[8];
+  vector_width: int64;
+  address_spaces: string[8];
+}

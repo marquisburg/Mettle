@@ -611,7 +611,7 @@ static const char *type_display_name(const Type *type) {
   if (!type) {
     return "?";
   }
-  if (type->qualified_name) {
+  if (type->qualified_name && strchr(type->qualified_name, '/')) {
     return type->qualified_name;
   }
   return strip_import_prefix(type->name);
@@ -854,6 +854,9 @@ static void dump_program(Reflect *reflect) {
             fn->is_extern ? " extern" : "");
     for (size_t c = 0; c < fn->callee_count; c++) {
       fprintf(stderr, " %s", fn->callees[c]);
+    }
+    for (size_t m = 0; m < fn->match_count; m++) {
+      fprintf(stderr, " matches:%s", fn->matches[m]);
     }
     fprintf(stderr, "\n");
   }

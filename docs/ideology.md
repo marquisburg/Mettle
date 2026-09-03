@@ -583,6 +583,36 @@ runtime that was correctly deleted. The old one violated the rule constantly
 and by design; a collection point is definitionally unauthored control flow.
 Nothing proposed here does.
 
+### V.6: What a program does now
+
+The deletion in V.1 left a question this document had not answered: with the
+scheduler gone, what does a program that needs one do? The answer is that the
+execution model is a thing the program builds. A job system, a frame graph, a
+fiber scheme, a request pipeline, a state machine, an actor mailbox: every
+serious program builds one already, and Mettle's position is that it builds
+it in Mettle, and that the compiler understands what it built.
+
+`std/thread` is the whole of what ships: threads, mutexes, atomics and spin
+locks, mapped onto Kernel32 on Windows and onto `clone` with futexes on
+Linux. Nothing above that is linked unless the program wrote it, which is
+V.3.2 applied to scheduling.
+
+What makes that a supported shape has two halves. `quiesce` is the point the
+program names, and staged work lands there and nowhere else; it is the proof
+that the consented model works in release builds. And the properties a model
+depends on are written in the program and checked on every build: a job that
+may not allocate is `@noalloc`, a slot that stays in the ring is a declared
+type the compiler proves in range, and what the compiler has no word for is a
+`@rule`, such as a job being reached from the worker and never from `main`,
+or a state machine's `step` deciding every state. `examples/job_system/` is
+that shape in one file.
+
+VII.7 has already decided the other half. The model where the points are
+inserted, `async`/`await` with a compiler-placed yield, a pool that steals
+work at a point nobody wrote, is foreclosed, and the reason is worth stating
+so it is not rediscovered: a yield point the compiler inserts is the same
+event as a collection point wearing better clothes.
+
 ---
 
 ## Part VI: Why these are one product
@@ -639,7 +669,11 @@ asking. A design document without this section is a marketing document.
 
 3. No second language. Not a preprocessor, not a macro grammar, not a build
    DSL, not an annotation mini-language. A metaprogram is Mettle. If it needs a
-   capability, Mettle gets that capability.
+   capability, Mettle gets that capability. This governs the GPU too: CUDA C
+   is a second language and so is GLSL, and Mettle declined both for the same
+   reason it declines a macro grammar. `kernel`, `dispatch` and `shared` are
+   Mettle, checked by the one type checker, and a target's description is a
+   Mettle `const`, read by the Mettle parser.
 
 4. No metaprogram may forge a contract. Checks run on the expanded program.
    Generated code receives exactly the trust hand-written code receives, which
@@ -795,6 +829,48 @@ Before the runtime grows:
   starting point precisely because it touches none of that.
 - The Part V.5 test applied to every single addition, individually, with no
   aggregate exceptions.
+
+Before the language can be reshaped around a program, each of the five
+things a program might need and the language might lack has to have its
+answer, and each answer has to discharge the five obligations: understood by
+the checker and the interpreter, enforced by a build that fails, explained as
+ordinary Mettle, verified by a machine that does not trust it, and optimized
+only where proven.
+
+- ~~An abstraction.~~ Part III, landed above.
+- ~~A rule.~~ *(I.2, VII.3)* Landed. `@rule fn f(p: Program) -> Verdict` is
+  an ordinary function the compiler runs in its own interpreter after type
+  checking, on the checked program as data: every function with its direct
+  callees, matched variants and decorators, every declared type with its
+  layout digest, the modules, the target. A failing verdict stops the build
+  at the site it names; a gap is announced; a site the program never handed
+  out is refused, because a rule is code the compiler does not trust. Rules
+  never link, cannot be called, and their cost is a ledger
+  (`--report-rules`) and a contract (`--rule-budget=N`). Not a plugin, not
+  a predicate language.
+- ~~A type.~~ *(I.4)* Landed. `type Percent = int32 where value >= 0 &&
+  value <= 100;` declares a type that carries a rule. A value of the base
+  becomes one only where the compiler proves the predicate, and the proof
+  is inferred from a constant, the value's own type, bounded arithmetic, a
+  loop range, a dominating test or an early exit; what it cannot prove it
+  refuses with the conjunct and the range it knew. A declared type without
+  a predicate is a unit that never mixes. The rule pays back where the
+  compiler already optimizes: an index whose type pins its range inside the
+  array carries no bounds check, `--explain` names the proof, and the
+  interpreter re-checks every proven conversion under `mettle test`, so a
+  wrong proof is caught by a machine that does not trust the prover.
+- ~~An execution model.~~ *(V.6)* Landed as a position and a worked shape:
+  the model is the program's, `quiesce` is its point, and its properties are
+  a contract, a declared type and rules that hold on every build.
+- ~~A machine concept, the reachable half.~~ *(III.3)* Landed. A target's
+  description is a Mettle `const` the compiler reads: `mettle target
+  <triple>` prints every built-in one, `--target desc.mettle` builds for a
+  described one, and a printed description fed back reproduces the built-in
+  target byte for byte on every triple. A freestanding x86_64 target chooses
+  its calling convention; a hosted one cannot rewrite the platform's, and a
+  description that claims what the emitter cannot honour is refused and told
+  which fact it contradicted. Whether a description is enough for a genuinely
+  new machine remains unproven, and is said to be.
 
 ---
 

@@ -304,6 +304,15 @@ Queries over a program: `function_calls(f, callee) -> bool`,
 `function_reaches(p, f, callee) -> bool`, which follows direct calls
 transitively. [Rules](rules.md) covers what a rule is and what it sees.
 
+## std/target
+
+`TargetDesc`, the record a target description is written as: `name`, `arch`,
+`os`, `format`, `pointer_bits`, `stack_alignment`, `shadow_space`,
+`red_zone`, `int_args`, `float_args`, `indirect_return`, `separate_classes`,
+`widths`, `vector_width` and `address_spaces`. `mettle target <triple>`
+prints one for every built-in target and `--target desc.mettle` reads one
+back. [Bare metal](bare-metal.md) covers what a description may change.
+
 ## std/net
 
 TCP and UDP sockets. Windows, over Winsock. On Linux import

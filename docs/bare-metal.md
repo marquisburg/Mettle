@@ -251,6 +251,73 @@ emitting the object here and linking it there. Naming this machine's own
 triple changes nothing at all: the object is byte-identical to the one that
 comes out with no `--target` at all, which is what the test suite checks.
 
+## Describing a target
+
+A target is data the compiler reads. `mettle target <triple>` prints a
+built-in target's description as Mettle:
+
+```bash
+mettle target x86_64-none
+```
+
+```mettle
+import "std/target";
+
+export const TARGET: TargetDesc = {
+  name: "x86_64-none",
+  arch: "x86_64",
+  os: "none",
+  format: "elf",
+  pointer_bits: 64,
+  stack_alignment: 16,
+  shadow_space: 0,
+  red_zone: 0,
+  int_args: ["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
+  float_args: ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"],
+  indirect_return: "rdi",
+  separate_classes: true,
+  widths: [8, 16, 32, 64],
+  vector_width: 256,
+  address_spaces: []
+};
+```
+
+That is an ordinary Mettle module: `TargetDesc` is a struct in `std/target`,
+the literal is checked by the type checker, and there is no second syntax to
+learn. Save it, edit it, and hand it back:
+
+```bash
+mettle app.mettle --target mine.mettle --emit-obj -o app.o
+```
+
+Feeding a printed description back unchanged reproduces the built-in target
+byte for byte, which the test suite checks for every triple. That is the
+description's proof: it is verified against the machinery it describes, not
+believed.
+
+What a description may change is what an emitter can honour. A freestanding
+`x86_64` target chooses its calling convention: which of `rdi`, `rsi`, `rdx`,
+`rcx`, `r8` and `r9` carry integer arguments and in what order, which of
+`xmm0` to `xmm7` carry floats, whether the two classes count separately, the
+shadow space, and the indirect-return register (always the first integer
+register). A hosted target's convention is the platform's, and a description
+that rewrites it is refused, because the code on the other side of every
+`extern` call was compiled by someone who did not read the description.
+Pointer width, stack alignment, the integer widths, the vector width and the
+absence of address spaces are the machine's; a description that claims
+otherwise is refused and told which emitter fact it contradicted. The
+register file's callee-saved set is fixed per architecture and is not
+described.
+
+`--report-target` prints the description in effect, built-in or described, so
+a build can be read back as the machine it was made for.
+
+This is the reachable half of a larger claim. Handing out the description
+keeps the machinery, and every concept above arrived by editing that
+machinery: `kernel`, `@interrupt`, the 16-bit mode, a new object format. A
+description cannot add one. Whether a description is enough for a genuinely
+new machine is not proven, and this document does not claim it.
+
 ## A chosen link address
 
 `--image-base <addr>` sets where the linked image is loaded, replacing the

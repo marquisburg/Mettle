@@ -23,6 +23,17 @@ AVI file. The container parser, the baseline JPEG decoder, the inverse DCT, the
 chroma upsampler, and the playback clock are all Mettle; Win32 supplies the
 window, the blit, and the wave device. See [`video_player/README.md`](video_player/README.md).
 
+## Execution models
+
+[`job_system/`](job_system/) is a job queue on `std/thread` with a swap point
+the program names. It is the shape [Runtime model](../docs/runtime-model.md)
+describes: the compiler ships no scheduler, and the program states what its
+own scheduler must satisfy. A job may not allocate (`@noalloc`), a queue slot
+is a declared type the compiler proves in range, and three `@rule`s hold on
+every build: jobs are `@noalloc`, jobs are reached from the worker and never
+from `main`, and the phase machine's `step` decides every `Phase`. The build
+fails when any of that stops being true.
+
 ## Benchmark examples
 
 Each directory below contains `*.mettle`, `*.c`, `*.rs`, and `build.bat`. They are wired into [`docs/benchmarks/harness.json`](../docs/benchmarks/harness.json) and run via [`tools/benchmark/run-benchmarks.ps1`](../tools/benchmark/run-benchmarks.ps1). Every benchmark entry carries a `suite` number; benchmarks without one default to Suite 1.

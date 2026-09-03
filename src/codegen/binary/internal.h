@@ -438,6 +438,12 @@ typedef struct {
  * generator's target object format. Defined in abi_spec.c. */
 const BinaryAbi *code_generator_binary_active_abi(void);
 void code_generator_binary_select_abi(BinaryTargetFormat format);
+void code_generator_binary_describe_abi(const BinaryGpRegister *int_regs,
+                                        size_t int_count,
+                                        const BinaryXmmRegister *float_regs,
+                                        size_t float_count, int shadow_space,
+                                        BinaryGpRegister indirect_return,
+                                        int separate_classes);
 
 
 /* Classifies an aggregate under SysV. Returns 0 when `type` is not an
