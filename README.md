@@ -136,6 +136,17 @@ vectorize, `@inline!` that every call site inline, `@noalloc` that a call graph
 allocate nothing. When the compiler cannot deliver, it stops and names the site
 that defeated it.
 
+**Lets the program add its own promises.** A `@rule fn` is an ordinary
+function the compiler runs while compiling, over the checked program as data,
+and a failing verdict stops the build at the site it names: no function in
+this module recurses, this struct stays under 64 bytes, every variant is
+handled in this file. `type Percent = int32 where value >= 0 && value <=
+100;` declares a type that carries a rule, and a value becomes one only where
+the compiler proves it. A target is a Mettle `const` the compiler reads, so
+`mettle target x86_64-none` prints one and `--target mine.mettle` builds for
+it. [Rules](docs/rules.md), [Types](docs/types.md) and
+[Bare metal](docs/bare-metal.md) cover them.
+
 **Vectorizes for AVX2** across reductions, maps, dot products, byte kernels,
 kernels over quantized integers, and some serial recurrences. It beats
 `gcc -O3` on several kernels in the benchmark suite.
