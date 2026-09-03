@@ -670,7 +670,19 @@ int code_generator_emit_binary_global_variable(CodeGenerator *generator,
       memcpy(bytes, &numeric_value, sizeof(numeric_value));
     } else if (float_bits == 32) {
       float value = (float)numeric_value;
-      memcpy(bytes, &value, sizeof(value));
+      if (type && (type->kind == MTLC_TYPE_FLOAT16 || type->kind == MTLC_TYPE_BFLOAT16)) {
+        uint32_t b = 0;
+        uint16_t h = 0;
+        memcpy(&b, &value, 4);
+        if (type->kind == MTLC_TYPE_FLOAT16) {
+          h = mettle_f32bits_to_f16bits(b);
+        } else {
+          h = mettle_f32bits_to_bf16bits(b);
+        }
+        memcpy(bytes, &h, 2);
+      } else {
+        memcpy(bytes, &value, sizeof(value));
+      }
     } else {
       if (sym->init_is_float) {
         code_generator_set_error(

@@ -3442,8 +3442,58 @@ int code_generator_binary_emit_cast(CodeGenerator *generator,
       goto emit_failure;
     }
   } else if (instruction->is_float && target_is_float) {
-    /* float -> float: convert precision only when the widths differ. */
-    if (src_fbits == 32 && dst_fbits == 64) {
+    if (target_type && (target_type->kind == MTLC_TYPE_FLOAT16 || target_type->kind == MTLC_TYPE_BFLOAT16)) {
+      if (target_type->kind == MTLC_TYPE_FLOAT16) {
+        if (src_fbits == 64) {
+          if (!binary_emit_movq_xmm_reg(&context->code, BINARY_XMM0, BINARY_GP_RAX) ||
+              !binary_emit_cvtsd2ss_xmm_xmm(&context->code, BINARY_XMM0, BINARY_XMM0) ||
+              !binary_emit_movd_reg_xmm(&context->code, BINARY_GP_RAX, BINARY_XMM0)) {
+            goto emit_failure;
+          }
+        }
+        if (!binary_emit_movd_xmm_reg(&context->code, BINARY_XMM0, BINARY_GP_RAX) ||
+            !wcs_avx_vcvtps2ph_xmm(&context->code, (int)BINARY_XMM0, (int)BINARY_XMM0, 0) ||
+            !wcs_avx_vcvtph2ps_xmm(&context->code, (int)BINARY_XMM0, (int)BINARY_XMM0) ||
+            !binary_emit_movd_reg_xmm(&context->code, BINARY_GP_RAX, BINARY_XMM0)) {
+          goto emit_failure;
+        }
+      } else {
+        if (src_fbits == 64) {
+          if (!binary_emit_movq_xmm_reg(&context->code, BINARY_XMM0, BINARY_GP_RAX) ||
+              !binary_emit_cvtsd2ss_xmm_xmm(&context->code, BINARY_XMM0, BINARY_XMM0) ||
+              !binary_emit_movd_reg_xmm(&context->code, BINARY_GP_RAX, BINARY_XMM0)) {
+            goto emit_failure;
+          }
+        }
+        {
+          BinaryGpRegister tmp = BINARY_GP_R10;
+          if (!binary_emit_mov_reg_reg(&context->code, tmp, BINARY_GP_RAX)) {
+            goto emit_failure;
+          }
+          if (!binary_emit_shift_reg_imm8(&context->code, 5, tmp, 16)) {
+            goto emit_failure;
+          }
+          if (!binary_emit_and_reg_imm32(&context->code, tmp, 1)) {
+            goto emit_failure;
+          }
+          if (!binary_emit_mov_reg_imm32_zero_extend(&context->code, BINARY_GP_R11, 0x7FFF)) {
+            goto emit_failure;
+          }
+          if (!binary_emit_alu_reg_reg(&context->code, 0x03, BINARY_GP_R11, tmp)) {
+            goto emit_failure;
+          }
+          if (!binary_emit_alu_reg_reg(&context->code, 0x03, BINARY_GP_RAX, BINARY_GP_R11)) {
+            goto emit_failure;
+          }
+          if (!binary_emit_shift_reg_imm8(&context->code, 5, BINARY_GP_RAX, 16)) {
+            goto emit_failure;
+          }
+          if (!binary_emit_shift_reg_imm8(&context->code, 4, BINARY_GP_RAX, 16)) {
+            goto emit_failure;
+          }
+        }
+      }
+    } else if (src_fbits == 32 && dst_fbits == 64) {
       if (!binary_emit_movd_xmm_reg(&context->code, BINARY_XMM0,
                                     BINARY_GP_RAX) ||
           !binary_emit_cvtss2sd_xmm_xmm(&context->code, BINARY_XMM0,

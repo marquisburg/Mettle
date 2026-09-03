@@ -2483,6 +2483,9 @@ int code_generator_binary_emit_temp_stack_load(
     CodeGenerator *generator, BinaryFunctionContext *context, int stack_offset,
     BinaryGpRegister target_register, MtlcType *type) {
   int width = code_generator_binary_type_scalar_width(type);
+  if (type && (type->kind == MTLC_TYPE_FLOAT16 || type->kind == MTLC_TYPE_BFLOAT16)) {
+    width = 4;
+  }
   int is_signed = type
                       ? code_generator_binary_resolved_type_is_signed_integer(type)
                       : 0;
@@ -2509,6 +2512,9 @@ int code_generator_binary_emit_temp_stack_store(
     CodeGenerator *generator, BinaryFunctionContext *context, int stack_offset,
     BinaryGpRegister source_register, MtlcType *type) {
   int width = code_generator_binary_type_scalar_width(type);
+  if (type && (type->kind == MTLC_TYPE_FLOAT16 || type->kind == MTLC_TYPE_BFLOAT16)) {
+    width = 4;
+  }
 
   if (!generator || !context || stack_offset <= 0) {
     return 0;
@@ -2534,6 +2540,9 @@ int code_generator_binary_emit_symbol_stack_load(
   if (type) {
     size = code_generator_binary_resolved_type_scalar_size(type);
     is_signed = code_generator_binary_resolved_type_is_signed_integer(type);
+    if (type->kind == MTLC_TYPE_FLOAT16 || type->kind == MTLC_TYPE_BFLOAT16) {
+      size = 4;
+    }
   }
 
   switch (size) {
@@ -2587,6 +2596,9 @@ int code_generator_binary_emit_symbol_stack_store(
 
   if (type) {
     size = code_generator_binary_resolved_type_scalar_size(type);
+    if (type->kind == MTLC_TYPE_FLOAT16 || type->kind == MTLC_TYPE_BFLOAT16) {
+      size = 4;
+    }
   }
 
   switch (size) {
@@ -2609,12 +2621,18 @@ int code_generator_binary_symbol_move_width(const CgSym *symbol) {
   if (!symbol || !symbol->type) {
     return 8;
   }
+  if ((symbol->type->kind == MTLC_TYPE_FLOAT16 || symbol->type->kind == MTLC_TYPE_BFLOAT16)) {
+    return 4;
+  }
   return code_generator_binary_resolved_type_scalar_size(symbol->type);
 }
 
 int code_generator_binary_type_scalar_width(MtlcType *type) {
   if (!type) {
     return 8;
+  }
+  if ((type->kind == MTLC_TYPE_FLOAT16 || type->kind == MTLC_TYPE_BFLOAT16)) {
+    return 4;
   }
   return code_generator_binary_resolved_type_scalar_size(type);
 }

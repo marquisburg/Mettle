@@ -6438,6 +6438,10 @@ static int mir_lower_address_of(MirFunction *fn, CodeGenerator *g,
               code_generator_binary_resolved_type_is_signed_integer(lt);
         }
       }
+      if (lt && (lt->kind == MTLC_TYPE_FLOAT16 || lt->kind == MTLC_TYPE_BFLOAT16)) {
+        fn->vregs[src.vreg].home_width = 2;
+        fn->vregs[src.vreg].home_signed = 0;
+      }
       /* Read off the IR, exactly as the fallback layout does: the safety pass
        * has already said which locals it describes, by emitting a registration
        * whose argument is the address of one. A described local's home must

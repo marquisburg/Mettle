@@ -2334,6 +2334,27 @@ static int encode_load_global(MirFunction *fn, const MirInst *in) {
     if (!link || !link[0] || !s) {
       return enc_err(fn, "unresolved global in MIR_LOAD_GLOBAL");
     }
+    if (s->type && (s->type->kind == MTLC_TYPE_FLOAT16 || s->type->kind == MTLC_TYPE_BFLOAT16)) {
+      if (!code_generator_binary_emit_global_symbol_load(g, ctx, link, s->type, s->is_extern, SCRATCH_A)) {
+        return enc_err(fn, "out of memory loading float global");
+      }
+      if (s->type->kind == MTLC_TYPE_FLOAT16) {
+        if (!binary_emit_movd_xmm_reg(&ctx->code, FSCRATCH_A, SCRATCH_A)) {
+          return enc_err(fn, "out of memory staging float global to xmm");
+        }
+        if (!wcs_avx_vcvtph2ps_xmm(&ctx->code, (int)FSCRATCH_A, (int)FSCRATCH_A)) {
+          return enc_err(fn, "out of memory converting float global");
+        }
+      } else {
+        if (!binary_emit_shift_reg_imm8(&ctx->code, 4, SCRATCH_A, 16)) {
+          return enc_err(fn, "out of memory converting float global");
+        }
+        if (!binary_emit_movd_xmm_reg(&ctx->code, FSCRATCH_A, SCRATCH_A)) {
+          return enc_err(fn, "out of memory staging float global to xmm");
+        }
+      }
+      return xmm_store(fn, &in->dst, FSCRATCH_A, width);
+    }
     if (!code_generator_binary_emit_global_symbol_load(g, ctx, link, s->type,
                                                        s->is_extern, SCRATCH_A)) {
       return enc_err(fn, "out of memory loading float global");
@@ -2397,13 +2418,52 @@ static int encode_store_global(MirFunction *fn, const MirInst *in) {
     if (!xok) {
       return 0;
     }
-    int moved = (width == 4)
-                    ? binary_emit_movd_reg_xmm(&ctx->code, SCRATCH_A, xsrc)
-                    : binary_emit_movq_reg_xmm(&ctx->code, SCRATCH_A, xsrc);
-    if (!moved) {
-      return enc_err(fn, "out of memory staging float global from xmm");
+    const char *gname = in->a.sym;
+    const CgSym *gs = (g && g->ir_program && gname) ? code_generator_lookup_symbol(g, gname) : NULL;
+    if (gs && gs->type && (gs->type->kind == MTLC_TYPE_FLOAT16 || gs->type->kind == MTLC_TYPE_BFLOAT16)) {
+      if (gs->type->kind == MTLC_TYPE_FLOAT16) {
+        if (!wcs_avx_vcvtps2ph_xmm(&ctx->code, (int)FSCRATCH_A, (int)xsrc, 0)) {
+          return enc_err(fn, "out of memory converting float global");
+        }
+        if (!binary_emit_movd_reg_xmm(&ctx->code, SCRATCH_A, FSCRATCH_A)) {
+          return enc_err(fn, "out of memory staging float global from xmm");
+        }
+      } else {
+        if (!binary_emit_movd_reg_xmm(&ctx->code, SCRATCH_A, xsrc)) {
+          return enc_err(fn, "out of memory staging float global from xmm");
+        }
+        {
+          BinaryGpRegister tmp = BINARY_GP_R11;
+          if (!binary_emit_mov_reg_reg(&ctx->code, tmp, SCRATCH_A)) {
+            return enc_err(fn, "out of memory converting float global");
+          }
+          if (!binary_emit_shift_reg_imm8(&ctx->code, 5, tmp, 16)) {
+            return enc_err(fn, "out of memory converting float global");
+          }
+          if (!binary_emit_and_reg_imm32(&ctx->code, tmp, 1)) {
+            return enc_err(fn, "out of memory converting float global");
+          }
+          if (!binary_emit_alu_reg_imm32(&ctx->code, 0, tmp, 0x7FFF)) {
+            return enc_err(fn, "out of memory converting float global");
+          }
+          if (!binary_emit_alu_reg_reg(&ctx->code, 0x03, SCRATCH_A, tmp)) {
+            return enc_err(fn, "out of memory converting float global");
+          }
+          if (!binary_emit_shift_reg_imm8(&ctx->code, 5, SCRATCH_A, 16)) {
+            return enc_err(fn, "out of memory converting float global");
+          }
+        }
+      }
+      src = SCRATCH_A;
+    } else {
+      int moved = (width == 4)
+                      ? binary_emit_movd_reg_xmm(&ctx->code, SCRATCH_A, xsrc)
+                      : binary_emit_movq_reg_xmm(&ctx->code, SCRATCH_A, xsrc);
+      if (!moved) {
+        return enc_err(fn, "out of memory staging float global from xmm");
+      }
+      src = SCRATCH_A;
     }
-    src = SCRATCH_A;
   } else {
     int rok = 1;
     src = value_reg(fn, &in->b, SCRATCH_A, &rok);

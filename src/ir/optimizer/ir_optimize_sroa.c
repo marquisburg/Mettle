@@ -20,12 +20,6 @@ static const char *ir_builtin_scalar_type_for_slot(int size, int is_float,
                                                     int float_bits,
                                                     int is_unsigned,
                                                     int alias_class) {
-  if (is_float && size == 2) {
-    if (alias_class == IR_ALIAS_CLASS_BF16) {
-      return "bfloat16";
-    }
-    return "float16";
-  }
   if (is_float) {
     return float_bits == 32 ? "float32" : "float64";
   }
@@ -495,6 +489,7 @@ static int ir_sroa_is_scalar_type_name(const char *t) {
                strcmp(t, "uint8") == 0 || strcmp(t, "uint16") == 0 ||
                strcmp(t, "uint32") == 0 || strcmp(t, "uint64") == 0 ||
                strcmp(t, "float32") == 0 || strcmp(t, "float64") == 0 ||
+               strcmp(t, "float16") == 0 || strcmp(t, "bfloat16") == 0 ||
                strcmp(t, "bool") == 0);
 }
 
