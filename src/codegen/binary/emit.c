@@ -3441,9 +3441,11 @@ int code_generator_binary_emit_cast(CodeGenerator *generator,
                                   instruction->is_unsigned)) {
       goto emit_failure;
     }
-  } else if (instruction->is_float && target_is_float) {
-    if (target_type && (target_type->kind == MTLC_TYPE_FLOAT16 || target_type->kind == MTLC_TYPE_BFLOAT16)) {
-      if (target_type->kind == MTLC_TYPE_FLOAT16) {
+  } else if (instruction->is_float && (target_is_float || (instruction->text && (strcmp(instruction->text, "float16") == 0 || strcmp(instruction->text, "bfloat16") == 0)))) {
+    int is_f16_target = (target_type && target_type->kind == MTLC_TYPE_FLOAT16) || (instruction->text && strcmp(instruction->text, "float16") == 0);
+    int is_bf16_target = (target_type && target_type->kind == MTLC_TYPE_BFLOAT16) || (instruction->text && strcmp(instruction->text, "bfloat16") == 0);
+    if (is_f16_target || is_bf16_target) {
+      if (is_f16_target) {
         if (src_fbits == 64) {
           if (!binary_emit_movq_xmm_reg(&context->code, BINARY_XMM0, BINARY_GP_RAX) ||
               !binary_emit_cvtsd2ss_xmm_xmm(&context->code, BINARY_XMM0, BINARY_XMM0) ||

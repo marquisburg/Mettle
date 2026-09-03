@@ -4292,7 +4292,9 @@ static int mir_lower_cast_across_banks(MirFunction *fn, CodeGenerator *g,
     if (in->text && g && g->ir_program) {
       dt = code_generator_named_type(g, in->text);
     }
-    if (dt && (dt->kind == MTLC_TYPE_FLOAT16 || dt->kind == MTLC_TYPE_BFLOAT16)) {
+    int is_f16 = (dt && dt->kind == MTLC_TYPE_FLOAT16) || (in->text && strcmp(in->text, "float16") == 0);
+    int is_bf16 = (dt && dt->kind == MTLC_TYPE_BFLOAT16) || (in->text && strcmp(in->text, "bfloat16") == 0);
+    if (is_f16 || is_bf16) {
       MirVregId xsrc = mir_new_vreg(fn, MIR_RC_XMM, 4);
       if (xsrc == MIR_VREG_NONE) {
         fn->has_error = 1;
@@ -4307,7 +4309,7 @@ static int mir_lower_cast_across_banks(MirFunction *fn, CodeGenerator *g,
           return 0;
         }
       }
-      if (dt->kind == MTLC_TYPE_FLOAT16) {
+      if (is_f16) {
         MirVregId xh = mir_new_vreg(fn, MIR_RC_XMM, 4);
         if (xh == MIR_VREG_NONE) {
           fn->has_error = 1;
