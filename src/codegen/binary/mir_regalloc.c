@@ -2383,6 +2383,8 @@ static int mir_op_pure_def(MirOpcode op) {
   case MIR_CVTF2F:
   case MIR_MOVD_TO_XMM:
   case MIR_MOVD_TO_GP:
+  case MIR_CVTPH2PS:
+  case MIR_CVTPS2PH:
     return 1;
   default:
     return 0;

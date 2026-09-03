@@ -711,6 +711,7 @@ static void cost_model(const MirFunction *fn, const MirInst *in, int *lat,
   case MIR_UCOMIS:
     *kind = "float"; *ports = "p0"; mask = M_P0; centi = 100; *lat = 2; break;
   case MIR_CVTSI2F: case MIR_CVTF2SI: case MIR_CVTF2F:
+  case MIR_CVTPH2PS: case MIR_CVTPS2PH:
     *kind = "float"; *ports = "p01"; mask = M_P01; centi = 100; *lat = 5; break;
   case MIR_FSETCC:
     *kind = "float"; *ports = "p0"; mask = M_P0; centi = 100; *lat = 4; break;

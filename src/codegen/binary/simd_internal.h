@@ -113,6 +113,9 @@ int wcs_avx_vmaxpd_ymm(BinaryCodeBuffer *b, int dst, int s1, int s2);
 int wcs_avx_vroundps_ymm(BinaryCodeBuffer *b, int dst, int src, unsigned char imm);
 int wcs_avx_vcvttps2dq_ymm(BinaryCodeBuffer *b, int dst, int src);
 int wcs_avx_vcvtdq2ps_ymm(BinaryCodeBuffer *b, int dst, int src);
+int wcs_avx_vcvtph2ps_xmm(BinaryCodeBuffer *b, int dst, int src);
+int wcs_avx_vcvtps2ph_xmm(BinaryCodeBuffer *b, int dst, int src,
+                           unsigned char imm);
 int wcs_avx_vpslld_ymm_imm(BinaryCodeBuffer *b, int dst, int src, unsigned char imm);
 int wcs_avx_vpsrld_ymm_imm(BinaryCodeBuffer *b, int dst, int src, unsigned char imm);
 int wcs_avx_vpsrad_ymm_imm(BinaryCodeBuffer *b, int dst, int src, unsigned char imm);

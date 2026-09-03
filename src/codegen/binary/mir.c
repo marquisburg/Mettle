@@ -258,6 +258,8 @@ const char *mir_opcode_name(MirOpcode op) {
   case MIR_FCMPBR: return "fcmpbr";
   case MIR_MOVD_TO_XMM: return "movd2xmm";
   case MIR_MOVD_TO_GP: return "movd2gp";
+  case MIR_CVTPH2PS: return "cvtph2ps";
+  case MIR_CVTPS2PH: return "cvtps2ph";
   case MIR_VADD: return "vadd";
   case MIR_VSUB: return "vsub";
   case MIR_VMUL: return "vmul";

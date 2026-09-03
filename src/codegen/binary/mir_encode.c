@@ -1380,6 +1380,40 @@ static int encode_cvtf2f(MirFunction *fn, const MirInst *in) {
                                 : 1;
 }
 
+static int encode_cvtph2ps(MirFunction *fn, const MirInst *in) {
+  BinaryCodeBuffer *code = &fn->context->code;
+  int ok;
+  BinaryXmmRegister aval = xmm_value(fn, &in->a, FSCRATCH_A, 4, &ok);
+  if (!ok) {
+    return 0;
+  }
+  BinaryXmmRegister D;
+  BinaryXmmRegister target = dst_is_xmm_reg(fn, &in->dst, &D) ? D : FSCRATCH_B;
+  int done = wcs_avx_vcvtph2ps_xmm(code, (int)target, (int)aval);
+  if (!done) {
+    return enc_err(fn, "out of memory in cvtph2ps");
+  }
+  return (target == FSCRATCH_B) ? xmm_store(fn, &in->dst, FSCRATCH_B, 4)
+                                : 1;
+}
+
+static int encode_cvtps2ph(MirFunction *fn, const MirInst *in) {
+  BinaryCodeBuffer *code = &fn->context->code;
+  int ok;
+  BinaryXmmRegister aval = xmm_value(fn, &in->a, FSCRATCH_A, 4, &ok);
+  if (!ok) {
+    return 0;
+  }
+  BinaryXmmRegister D;
+  BinaryXmmRegister target = dst_is_xmm_reg(fn, &in->dst, &D) ? D : FSCRATCH_B;
+  int done = wcs_avx_vcvtps2ph_xmm(code, (int)target, (int)aval, 0);
+  if (!done) {
+    return enc_err(fn, "out of memory in cvtps2ph");
+  }
+  return (target == FSCRATCH_B) ? xmm_store(fn, &in->dst, FSCRATCH_B, 4)
+                                : 1;
+}
+
 /* Load `size` bytes from [base (+ index*scale) + disp] straight into `target`,
  * sign/zero-extending to 64 bits in the SAME instruction (movsxd/movsx/movzx
  * from memory, or a plain mov for 8 bytes / unsigned 4). This is the general
@@ -2733,6 +2767,40 @@ int mir_encode(MirFunction *fn) {
     case MIR_CVTF2F:
       ok = encode_cvtf2f(fn, in);
       break;
+    case MIR_CVTPH2PS:
+      ok = encode_cvtph2ps(fn, in);
+      break;
+    case MIR_CVTPS2PH:
+      ok = encode_cvtps2ph(fn, in);
+      break;
+    case MIR_MOVD_TO_XMM:
+    case MIR_MOVD_TO_GP: {
+      int ok2;
+      if (in->op == MIR_MOVD_TO_XMM) {
+        BinaryGpRegister areg = value_reg(fn, &in->a, SCRATCH_A, &ok2);
+        BinaryXmmRegister D;
+        int dst_in_reg = dst_is_xmm_reg(fn, &in->dst, &D);
+        BinaryXmmRegister target = dst_in_reg ? D : FSCRATCH_B;
+        if (!ok2) { ok = 0; break; }
+        if (!binary_emit_movd_xmm_reg(&fn->context->code, target, areg)) {
+          ok = enc_err(fn, "out of memory in movd2xmm");
+          break;
+        }
+        ok = dst_in_reg ? 1 : xmm_store(fn, &in->dst, FSCRATCH_B, 4);
+        break;
+      }
+      BinaryXmmRegister aval = xmm_value(fn, &in->a, FSCRATCH_A, 4, &ok2);
+      BinaryGpRegister D;
+      int dst_in_reg = dst_is_reg(fn, &in->dst, &D);
+      BinaryGpRegister target = dst_in_reg ? D : SCRATCH_A;
+      if (!ok2) { ok = 0; break; }
+      if (!binary_emit_movd_reg_xmm(&fn->context->code, target, aval)) {
+        ok = enc_err(fn, "out of memory in movd2gp");
+        break;
+      }
+      ok = dst_in_reg ? 1 : store_from(fn, &in->dst, target);
+      break;
+    }
     case MIR_FSETCC: {
       int rok;
       BinaryXmmRegister av = xmm_value(fn, &in->a, FSCRATCH_A, in->width, &rok);

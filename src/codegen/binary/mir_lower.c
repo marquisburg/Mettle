@@ -4288,7 +4288,75 @@ static int mir_lower_cast_across_banks(MirFunction *fn, CodeGenerator *g,
                      to_u64 ? 1 : 0, 0);
   }
   if (dfb && sfb) {
-    /* float -> float; same width is just a copy, else cvtsd2ss/cvtss2sd. */
+    MtlcType *dt = NULL;
+    if (in->text && g && g->ir_program) {
+      dt = code_generator_named_type(g, in->text);
+    }
+    if (dt && (dt->kind == MTLC_TYPE_FLOAT16 || dt->kind == MTLC_TYPE_BFLOAT16)) {
+      MirVregId xsrc = mir_new_vreg(fn, MIR_RC_XMM, 4);
+      if (xsrc == MIR_VREG_NONE) {
+        fn->has_error = 1;
+        return 0;
+      }
+      if (sfb == 64) {
+        if (!mir_emit1(fn, MIR_CVTF2F, mir_op_vreg(xsrc), a, mir_op_none(), 4, 0, 0)) {
+          return 0;
+        }
+      } else {
+        if (!mir_emit_fmov(fn, mir_op_vreg(xsrc), a, 4)) {
+          return 0;
+        }
+      }
+      if (dt->kind == MTLC_TYPE_FLOAT16) {
+        MirVregId xh = mir_new_vreg(fn, MIR_RC_XMM, 4);
+        if (xh == MIR_VREG_NONE) {
+          fn->has_error = 1;
+          return 0;
+        }
+        if (!mir_emit1(fn, MIR_CVTPS2PH, mir_op_vreg(xh), mir_op_vreg(xsrc), mir_op_none(), 4, 0, 0)) {
+          return 0;
+        }
+        return mir_emit1(fn, MIR_CVTPH2PS, dst, mir_op_vreg(xh), mir_op_none(), 4, 0, 0);
+      }
+      MirVregId gbits = mir_new_vreg(fn, MIR_RC_GP, 8);
+      MirVregId glsb = mir_new_vreg(fn, MIR_RC_GP, 8);
+      MirVregId gbias = mir_new_vreg(fn, MIR_RC_GP, 8);
+      MirVregId gtmp = mir_new_vreg(fn, MIR_RC_GP, 8);
+      MirVregId gdst = mir_new_vreg(fn, MIR_RC_GP, 8);
+      MirVregId xdst = mir_new_vreg(fn, MIR_RC_XMM, 4);
+      if (gbits == MIR_VREG_NONE || glsb == MIR_VREG_NONE || gbias == MIR_VREG_NONE || gtmp == MIR_VREG_NONE || gdst == MIR_VREG_NONE || xdst == MIR_VREG_NONE) {
+        fn->has_error = 1;
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_MOVD_TO_GP, mir_op_vreg(gbits), mir_op_vreg(xsrc), mir_op_none(), 4, 0, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_SHR, mir_op_vreg(glsb), mir_op_vreg(gbits), mir_op_imm(16), 8, 1, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_AND, mir_op_vreg(glsb), mir_op_vreg(glsb), mir_op_imm(1), 8, 0, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_MOV, mir_op_vreg(gbias), mir_op_imm(0x7FFF), mir_op_none(), 8, 0, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_ADD, mir_op_vreg(gbias), mir_op_vreg(gbias), mir_op_vreg(glsb), 8, 0, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_ADD, mir_op_vreg(gtmp), mir_op_vreg(gbits), mir_op_vreg(gbias), 8, 0, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_SHR, mir_op_vreg(gtmp), mir_op_vreg(gtmp), mir_op_imm(16), 8, 1, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_SHL, mir_op_vreg(gdst), mir_op_vreg(gtmp), mir_op_imm(16), 8, 0, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_MOVD_TO_XMM, mir_op_vreg(xdst), mir_op_vreg(gdst), mir_op_none(), 4, 0, 0)) {
+        return 0;
+      }
+      return mir_emit_fmov(fn, dst, mir_op_vreg(xdst), 4);
+    }
     if (dfb == sfb) {
       return mir_emit_fmov(fn, dst, a, dfb / 8);
     }
@@ -4451,6 +4519,29 @@ static int mir_lower_load(MirFunction *fn, CodeGenerator *g,
     }
     MirOperand dst = mir_value_operand(fn, g, ctx, map, &in->dest);
     MirOperand mem = mir_op_mem_vreg(addr.vreg, MIR_VREG_NONE, 1, 0);
+    if (in->is_float && size == 2 &&
+        (in->alias_class == IR_ALIAS_CLASS_F16 ||
+         in->alias_class == IR_ALIAS_CLASS_BF16)) {
+      MirVregId gtmp = mir_new_vreg(fn, MIR_RC_GP, 8);
+      MirVregId xtmp = mir_new_vreg(fn, MIR_RC_XMM, 4);
+      if (gtmp == MIR_VREG_NONE || xtmp == MIR_VREG_NONE) {
+        fn->has_error = 1;
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_MOV, mir_op_vreg(gtmp), mem, mir_op_none(), 2, 1, 0)) {
+        return 0;
+      }
+      if (in->alias_class == IR_ALIAS_CLASS_F16) {
+        if (!mir_emit1(fn, MIR_MOVD_TO_XMM, mir_op_vreg(xtmp), mir_op_vreg(gtmp), mir_op_none(), 4, 0, 0)) {
+          return 0;
+        }
+        return mir_emit1(fn, MIR_CVTPH2PS, dst, mir_op_vreg(xtmp), mir_op_none(), 4, 0, 0);
+      }
+      if (!mir_emit1(fn, MIR_SHL, mir_op_vreg(gtmp), mir_op_vreg(gtmp), mir_op_imm(16), 8, 0, 0)) {
+        return 0;
+      }
+      return mir_emit1(fn, MIR_MOVD_TO_XMM, dst, mir_op_vreg(gtmp), mir_op_none(), 4, 0, 0);
+    }
     if (in->is_float) {
       int fb = code_generator_binary_instruction_result_float_bits(g, ctx, in);
       return mir_emit_fmov(fn, dst, mem, fb ? fb / 8 : size);
@@ -4495,6 +4586,65 @@ static int mir_lower_store(MirFunction *fn, CodeGenerator *g,
       return mir_emit_struct_copy(fn, addr.vreg, src_base.vreg, size);
     }
     MirOperand mem = mir_op_mem_vreg(addr.vreg, MIR_VREG_NONE, 1, 0);
+    if (in->is_float && size == 2 &&
+        (in->alias_class == IR_ALIAS_CLASS_F16 ||
+         in->alias_class == IR_ALIAS_CLASS_BF16)) {
+      MirOperand fval = coerce_float_operand(fn, g, ctx, map, &in->lhs, 4);
+      MirVregId xsrc = mir_new_vreg(fn, MIR_RC_XMM, 4);
+      if (xsrc == MIR_VREG_NONE) {
+        fn->has_error = 1;
+        return 0;
+      }
+      if (!mir_emit_fmov(fn, mir_op_vreg(xsrc), fval, 4)) {
+        return 0;
+      }
+      if (in->alias_class == IR_ALIAS_CLASS_F16) {
+        MirVregId xdst = mir_new_vreg(fn, MIR_RC_XMM, 4);
+        MirVregId gdst = mir_new_vreg(fn, MIR_RC_GP, 8);
+        if (xdst == MIR_VREG_NONE || gdst == MIR_VREG_NONE) {
+          fn->has_error = 1;
+          return 0;
+        }
+        if (!mir_emit1(fn, MIR_CVTPS2PH, mir_op_vreg(xdst), mir_op_vreg(xsrc), mir_op_none(), 4, 0, 0)) {
+          return 0;
+        }
+        if (!mir_emit1(fn, MIR_MOVD_TO_GP, mir_op_vreg(gdst), mir_op_vreg(xdst), mir_op_none(), 4, 0, 0)) {
+          return 0;
+        }
+        return mir_emit1(fn, MIR_MOV, mem, mir_op_vreg(gdst), mir_op_none(), 2, 0, 0);
+      }
+      MirVregId gbits = mir_new_vreg(fn, MIR_RC_GP, 8);
+      MirVregId glsb = mir_new_vreg(fn, MIR_RC_GP, 8);
+      MirVregId gbias = mir_new_vreg(fn, MIR_RC_GP, 8);
+      MirVregId gtmp = mir_new_vreg(fn, MIR_RC_GP, 8);
+      MirVregId gdst = mir_new_vreg(fn, MIR_RC_GP, 8);
+      if (gbits == MIR_VREG_NONE || glsb == MIR_VREG_NONE || gbias == MIR_VREG_NONE || gtmp == MIR_VREG_NONE || gdst == MIR_VREG_NONE) {
+        fn->has_error = 1;
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_MOVD_TO_GP, mir_op_vreg(gbits), mir_op_vreg(xsrc), mir_op_none(), 4, 0, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_SHR, mir_op_vreg(glsb), mir_op_vreg(gbits), mir_op_imm(16), 8, 1, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_AND, mir_op_vreg(glsb), mir_op_vreg(glsb), mir_op_imm(1), 8, 0, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_MOV, mir_op_vreg(gbias), mir_op_imm(0x7FFF), mir_op_none(), 8, 0, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_ADD, mir_op_vreg(gbias), mir_op_vreg(gbias), mir_op_vreg(glsb), 8, 0, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_ADD, mir_op_vreg(gtmp), mir_op_vreg(gbits), mir_op_vreg(gbias), 8, 0, 0)) {
+        return 0;
+      }
+      if (!mir_emit1(fn, MIR_SHR, mir_op_vreg(gdst), mir_op_vreg(gtmp), mir_op_imm(16), 8, 1, 0)) {
+        return 0;
+      }
+      return mir_emit1(fn, MIR_MOV, mem, mir_op_vreg(gdst), mir_op_none(), 2, 0, 0);
+    }
     if (in->is_float) {
       /* Coerce the value to the store width: a literal is materialized at
        * that width, and a float64-tracked arithmetic result narrows via

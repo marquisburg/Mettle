@@ -296,6 +296,8 @@ typedef enum {
   MIR_FCMPBR,     /* ucomis a,b; jcc -> label (fused float compare-and-branch) */
   MIR_MOVD_TO_XMM,
   MIR_MOVD_TO_GP,
+  MIR_CVTPH2PS,
+  MIR_CVTPS2PH,
 
   /* packed SIMD (auto-vectorizer; see VECTORIZER_DESIGN.md). width = per-lane
    * bytes, lane count from the vreg. */

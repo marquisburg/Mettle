@@ -837,6 +837,22 @@ int wcs_avx_vcvtdq2ps_ymm(BinaryCodeBuffer *b, int dst, int src) {
              b, (unsigned char)(0xC0 | ((dst & 7) << 3) | (src & 7)));
 }
 
+int wcs_avx_vcvtph2ps_xmm(BinaryCodeBuffer *b, int dst, int src) {
+  return wcs_vex3(b, 2, 1, 0, 0, dst, src, 0) &&
+         binary_code_buffer_append_u8(b, 0x13) &&
+         binary_code_buffer_append_u8(
+             b, (unsigned char)(0xC0 | ((dst & 7) << 3) | (src & 7)));
+}
+
+int wcs_avx_vcvtps2ph_xmm(BinaryCodeBuffer *b, int dst, int src,
+                           unsigned char imm) {
+  return wcs_vex3(b, 3, 1, 0, 0, dst, src, 0) &&
+         binary_code_buffer_append_u8(b, 0x1D) &&
+         binary_code_buffer_append_u8(
+             b, (unsigned char)(0xC0 | ((dst & 7) << 3) | (src & 7))) &&
+         binary_code_buffer_append_u8(b, imm);
+}
+
 /* vpslld ymm,ymm,imm8, VEX.256.66.0F 72 /6 ib. Shift int32 lanes left. Used
  * in-place (dst == src) to build 2^n exponents. */
 int wcs_avx_vpslld_ymm_imm(BinaryCodeBuffer *b, int dst, int src,
