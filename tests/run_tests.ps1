@@ -8977,7 +8977,7 @@ try {
   $dupBObj = Join-Path $tmpDir "linker_duplicate_b.obj"
   $unresolvedObj = Join-Path $tmpDir "linker_unresolved_entry.obj"
 
-  $compileHarness = & gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE tests/symbol_resolve_test.c src/common.c src/lexer/lexer.c src/error/error_reporter.c src/error/diag_style.c src/linker/coff_reader.c src/linker/link_object.c src/linker/elf_reader.c src/linker/symbol_resolve.c src/linker/elf_shared.c src/codegen/binary_emitter.c src/codegen/elf_emitter.c -Isrc -Isrc/codegen -o $symbolResolveExe 2>&1 | Out-String
+  $compileHarness = & gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE tests/symbol_resolve_test.c src/common.c src/lexer/lexer.c src/error/error_reporter.c src/error/diag_style.c src/linker/coff_reader.c src/linker/link_object.c src/linker/elf_reader.c src/linker/symbol_resolve.c src/linker/unresolved_hint.c src/linker/elf_shared.c src/codegen/binary_emitter.c src/codegen/elf_emitter.c -Isrc -Isrc/codegen -o $symbolResolveExe 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0) {
     throw "Symbol-resolve harness compile failed: $compileHarness"
   }
@@ -9023,7 +9023,7 @@ try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
   $relocationExe = Join-Path $tmpDir "relocation_test.exe"
 
-  $compileHarness = & gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE tests/relocation_test.c src/common.c src/lexer/lexer.c src/error/error_reporter.c src/error/diag_style.c src/linker/coff_reader.c src/linker/link_object.c src/linker/elf_reader.c src/linker/symbol_resolve.c src/linker/elf_shared.c src/linker/relocation.c src/codegen/binary_emitter.c src/codegen/elf_emitter.c -Isrc -Isrc/codegen -o $relocationExe 2>&1 | Out-String
+  $compileHarness = & gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE tests/relocation_test.c src/common.c src/lexer/lexer.c src/error/error_reporter.c src/error/diag_style.c src/linker/coff_reader.c src/linker/link_object.c src/linker/elf_reader.c src/linker/symbol_resolve.c src/linker/unresolved_hint.c src/linker/elf_shared.c src/linker/relocation.c src/codegen/binary_emitter.c src/codegen/elf_emitter.c -Isrc -Isrc/codegen -o $relocationExe 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0) {
     throw "Relocation harness compile failed: $compileHarness"
   }
@@ -9047,7 +9047,7 @@ try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
   $peEmitterExe = Join-Path $tmpDir "pe_emitter_test.exe"
 
-  $compileHarness = & gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE tests/pe_emitter_test.c src/common.c src/lexer/lexer.c src/error/error_reporter.c src/error/diag_style.c src/linker/coff_reader.c src/linker/link_object.c src/linker/elf_reader.c src/linker/symbol_resolve.c src/linker/elf_shared.c src/linker/relocation.c src/linker/pe_emitter.c src/linker/import_lib.c src/runtime/verify_owned.c src/codegen/binary_emitter.c src/codegen/elf_emitter.c -Isrc -Isrc/codegen -o $peEmitterExe 2>&1 | Out-String
+  $compileHarness = & gcc -Wall -Wextra -std=c99 -g -O0 -D_GNU_SOURCE tests/pe_emitter_test.c src/common.c src/lexer/lexer.c src/error/error_reporter.c src/error/diag_style.c src/linker/coff_reader.c src/linker/link_object.c src/linker/elf_reader.c src/linker/symbol_resolve.c src/linker/unresolved_hint.c src/linker/elf_shared.c src/linker/relocation.c src/linker/pe_emitter.c src/linker/import_lib.c src/runtime/verify_owned.c src/codegen/binary_emitter.c src/codegen/elf_emitter.c -Isrc -Isrc/codegen -o $peEmitterExe 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0) {
     throw "PE-emitter harness compile failed: $compileHarness"
   }
@@ -9089,6 +9089,26 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "internal_link_basic" -Passed $false -Reason $_.Exception.Message
+}
+
+# An unresolved extern fails as an error naming the symbol, with help on how
+# to provide it -- not a bare warning plus a generic "failed to produce" line.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exePath = Join-Path $tmpDir "internal_link_unresolved_extern.exe"
+  $out = & $CompilerPath --build --linker internal tests/test_unresolved_extern.mettle -o $exePath 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "an unresolved extern linked cleanly: $out" }
+  if ($out -notmatch "Error: Unresolved external symbol 'this_symbol_is_provided_nowhere'") { throw "the missing symbol is not named as an error: $out" }
+  if ($out -notmatch "help: ``extern`` declares a name") { throw "the declare-vs-provide help is missing: $out" }
+  if ($out -notmatch "--link-arg") { throw "the fix (a link argument) is not suggested: $out" }
+  if ($out -match "Warning: Internal linker") { throw "the failure still reports as a warning: $out" }
+  if ($out -match "failed to produce an executable") { throw "the generic second line is back: $out" }
+  Write-CaseResult -Name "internal_link_unresolved_extern" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "internal_link_unresolved_extern" -Passed $false -Reason $_.Exception.Message
 }
 
 # Float comparisons must use numeric FP ordering, not raw IEEE bit ordering.

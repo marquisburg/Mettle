@@ -1,0 +1,6 @@
+extern fn this_symbol_is_provided_nowhere(x: int32) -> int32;
+
+fn main() -> int32 {
+  var x: int32 = this_symbol_is_provided_nowhere(42);
+  return x;
+}

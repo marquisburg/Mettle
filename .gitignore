@@ -60,4 +60,5 @@ tests/parse_stress_test.mettle
 *.explain.base
 pondering/
 tests/test-failures.txt
+tests/*-failures.txt
 DS/
