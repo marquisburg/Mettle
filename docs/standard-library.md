@@ -291,6 +291,19 @@ Spin locks on an `int32*`: `spin_try_lock`, `spin_lock`, `spin_unlock`.
 Wait results come back as `WAIT_OBJECT_0()`, `WAIT_TIMEOUT()`, or
 `WAIT_FAILED()`, and `INFINITE()` is the timeout that never expires.
 
+## std/rule
+
+The records a `@rule fn` reads and returns: `Program`, `Function`, `TypeInfo`,
+`FieldInfo`, `Site` and `Verdict`, with `verdict_pass()`,
+`verdict_fail(site, message)` and `verdict_gap(site, message)`.
+
+Queries over a program: `function_calls(f, callee) -> bool`,
+`function_matches(f, owner, variant) -> bool`,
+`program_function_index(p, qualified) -> int64`,
+`program_type_index(p, qualified) -> int64`, and
+`function_reaches(p, f, callee) -> bool`, which follows direct calls
+transitively. [Rules](rules.md) covers what a rule is and what it sees.
+
 ## std/net
 
 TCP and UDP sockets. Windows, over Winsock. On Linux import

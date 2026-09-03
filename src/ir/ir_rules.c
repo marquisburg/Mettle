@@ -1,0 +1,453 @@
+#include "ir_rules.h"
+#include "ir_interp.h"
+#include <stdlib.h>
+#include <string.h>
+
+#define IR_RULE_DEFAULT_FUEL 50000000LL
+
+void ir_rule_image_free(IRRuleImage *image) {
+  if (!image) {
+    return;
+  }
+  free(image->bytes);
+  free(image->pointer_offsets);
+  free(image->sites);
+  memset(image, 0, sizeof(*image));
+}
+
+int ir_program_has_rules(const IRProgram *program) {
+  if (!program) {
+    return 0;
+  }
+  for (size_t i = 0; i < program->function_count; i++) {
+    if (program->functions[i] && program->functions[i]->is_rule) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static const char *rule_display_name(const char *name) {
+  const char *p = name ? name : "?";
+  while (strncmp(p, "__import_", 9) == 0) {
+    const char *rest = p + 9;
+    while (*rest && *rest != '_') {
+      rest++;
+    }
+    if (*rest != '_') {
+      break;
+    }
+    p = rest + 1;
+  }
+  return p;
+}
+
+static int type_has_field(const MtlcType *type, const char *name) {
+  if (!type || type->kind != MTLC_TYPE_STRUCT || !type->field_names) {
+    return 0;
+  }
+  for (size_t i = 0; i < type->field_count; i++) {
+    if (type->field_names[i] && strcmp(type->field_names[i], name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static size_t type_field_offset(const MtlcType *type, const char *name) {
+  for (size_t i = 0; i < type->field_count; i++) {
+    if (type->field_names[i] && strcmp(type->field_names[i], name) == 0) {
+      return type->field_offsets[i];
+    }
+  }
+  return 0;
+}
+
+static const MtlcType *type_field_type(const MtlcType *type,
+                                       const char *name) {
+  for (size_t i = 0; i < type->field_count; i++) {
+    if (type->field_names[i] && strcmp(type->field_names[i], name) == 0) {
+      return type->field_types[i];
+    }
+  }
+  return NULL;
+}
+
+static const MtlcType *find_verdict_type(IRProgram *program,
+                                         const IRFunction *rule) {
+  const MtlcType *type =
+      rule->return_type_name
+          ? ir_program_lookup_type(program, rule->return_type_name)
+          : NULL;
+  if (type_has_field(type, "outcome") && type_has_field(type, "site") &&
+      type_has_field(type, "message")) {
+    return type;
+  }
+  for (size_t i = 0; i < program->type_registry_count; i++) {
+    const MtlcType *candidate = program->type_registry[i].type;
+    if (type_has_field(candidate, "outcome") &&
+        type_has_field(candidate, "site") &&
+        type_has_field(candidate, "message")) {
+      return candidate;
+    }
+  }
+  return NULL;
+}
+
+typedef struct {
+  long long outcome;
+  char file[512];
+  long long line;
+  long long column;
+  char message[1024];
+  int readable;
+} RuleVerdict;
+
+static int read_u64(IRInterpMachine *machine, unsigned long long address,
+                    unsigned long long *out) {
+  unsigned char bytes[8];
+  if (ir_interp_read_bytes(machine, address, bytes, 8) != 8) {
+    return 0;
+  }
+  memcpy(out, bytes, 8);
+  return 1;
+}
+
+static int read_string(IRInterpMachine *machine, unsigned long long address,
+                       char *out, size_t capacity) {
+  unsigned long long chars = 0;
+  unsigned long long length = 0;
+  out[0] = '\0';
+  if (!read_u64(machine, address, &chars) ||
+      !read_u64(machine, address + 8, &length)) {
+    return 0;
+  }
+  if (length == 0) {
+    return 1;
+  }
+  if (length >= capacity) {
+    length = capacity - 1;
+  }
+  if (ir_interp_read_bytes(machine, chars, (unsigned char *)out,
+                           (size_t)length) != (long long)length) {
+    out[0] = '\0';
+    return 0;
+  }
+  out[length] = '\0';
+  return 1;
+}
+
+static void decode_verdict(IRInterpMachine *machine, const MtlcType *type,
+                           unsigned long long address, RuleVerdict *verdict) {
+  memset(verdict, 0, sizeof(*verdict));
+  const MtlcType *site_type = type_field_type(type, "site");
+  unsigned long long outcome = 0;
+  if (!read_u64(machine, address + type_field_offset(type, "outcome"),
+                &outcome)) {
+    return;
+  }
+  verdict->outcome = (long long)outcome;
+  if (!site_type || site_type->kind != MTLC_TYPE_STRUCT) {
+    return;
+  }
+  unsigned long long site = address + type_field_offset(type, "site");
+  unsigned long long line = 0;
+  unsigned long long column = 0;
+  if (!read_string(machine, site + type_field_offset(site_type, "file"),
+                   verdict->file, sizeof(verdict->file)) ||
+      !read_u64(machine, site + type_field_offset(site_type, "line"), &line) ||
+      !read_u64(machine, site + type_field_offset(site_type, "column"),
+                &column)) {
+    return;
+  }
+  verdict->line = (long long)line;
+  verdict->column = (long long)column;
+  if (!read_string(machine, address + type_field_offset(type, "message"),
+                   verdict->message, sizeof(verdict->message))) {
+    return;
+  }
+  verdict->readable = 1;
+}
+
+static const IRRuleSite *match_site(const IRRuleImage *image,
+                                    const RuleVerdict *verdict) {
+  for (size_t i = 0; i < image->site_count; i++) {
+    const IRRuleSite *site = &image->sites[i];
+    if ((long long)site->line == verdict->line &&
+        (long long)site->column == verdict->column && site->file &&
+        strcmp(site->file, verdict->file) == 0) {
+      return site;
+    }
+  }
+  return NULL;
+}
+
+static void report_at_rule(ErrorReporter *reporter, const IRFunction *rule,
+                           const char *message, const char *label,
+                           int is_error) {
+  SourceSpan span = source_span_from_location(rule->location, 4);
+  span = error_reporter_span_snap_to_token(reporter, span, "rule");
+  if (is_error) {
+    error_reporter_add_error_with_span(reporter, ERROR_SEMANTIC, span, message);
+  } else {
+    error_reporter_add_warning_with_span(reporter, ERROR_SEMANTIC, span,
+                                         message);
+  }
+  if (label) {
+    error_reporter_set_last_label(reporter, label);
+  }
+  error_reporter_set_last_code(reporter, "R0001");
+}
+
+static void report_leaks(ErrorReporter *reporter, IRInterpMachine *machine,
+                         const IRFunction *rule) {
+  size_t buffers = ir_interp_buffer_count(machine);
+  for (size_t i = 0; i < buffers; i++) {
+    size_t line = ir_interp_buffer_alloc_line(machine, i);
+    if (line == 0 || ir_interp_buffer_freed(machine, i)) {
+      continue;
+    }
+    long long size = 0;
+    ir_interp_buffer_data(machine, i, &size);
+    char message[256];
+    snprintf(message, sizeof(message),
+             "rule '%s' leaked %lld bytes: this allocation is never freed",
+             rule_display_name(rule->name), size);
+    SourceLocation location = source_location_create(line, 1);
+    error_reporter_add_warning_with_suggestion(
+        reporter, ERROR_SEMANTIC, location, message,
+        "free it before the rule returns");
+  }
+}
+
+static int run_one_rule(IRProgram *program, IRFunction *rule,
+                        const IRRuleImage *image, ErrorReporter *reporter,
+                        FILE *report, long long fuel, IRRuleStats *stats,
+                        int *failed_build) {
+  const char *display = rule_display_name(rule->name);
+  const MtlcType *verdict_type = find_verdict_type(program, rule);
+  IRInterpMachine *machine = ir_interp_create(program);
+  if (!machine || !verdict_type) {
+    if (machine) {
+      ir_interp_destroy(machine);
+    }
+    report_at_rule(reporter, rule,
+                   "the compiler could not prepare the interpreter for this "
+                   "rule",
+                   NULL, 1);
+    *failed_build = 1;
+    stats->malformed++;
+    return 0;
+  }
+  unsigned char *bytes = malloc(image->size ? image->size : 1);
+  if (!bytes) {
+    ir_interp_destroy(machine);
+    return 0;
+  }
+  memcpy(bytes, image->bytes, image->size);
+  unsigned long long base = ir_interp_next_buffer_address(machine);
+  for (size_t i = 0; i < image->pointer_count; i++) {
+    size_t offset = image->pointer_offsets[i];
+    unsigned long long value = 0;
+    if (offset + 8 > image->size) {
+      continue;
+    }
+    memcpy(&value, bytes + offset, 8);
+    value += base;
+    memcpy(bytes + offset, &value, 8);
+  }
+  unsigned long long address =
+      ir_interp_add_buffer(machine, bytes, (long long)image->size);
+  free(bytes);
+  if (address != base) {
+    ir_interp_destroy(machine);
+    report_at_rule(reporter, rule,
+                   "the compiler could not place the program image for this "
+                   "rule",
+                   NULL, 1);
+    *failed_build = 1;
+    stats->malformed++;
+    return 0;
+  }
+  IRInterpValue arg;
+  memset(&arg, 0, sizeof(arg));
+  arg.i = (long long)address;
+  IRInterpValue result;
+  memset(&result, 0, sizeof(result));
+  IRInterpStatus status = ir_interp_run(machine, rule, &arg, 1, &result, fuel);
+  long long steps = fuel - ir_interp_fuel_remaining(machine);
+  stats->steps += steps;
+  stats->rules++;
+
+  char message[1600];
+  if (status != IR_INTERP_OK) {
+    const char *why = status == IR_INTERP_FUEL
+                          ? "did not finish within its step budget"
+                          : status == IR_INTERP_UNSUPPORTED
+                                ? "uses something the compile-time "
+                                  "interpreter cannot run"
+                                : "trapped";
+    if (status == IR_INTERP_FUEL) {
+      snprintf(message, sizeof(message), "rule '%s' %s of %lld steps", display,
+               why, fuel);
+    } else {
+      snprintf(message, sizeof(message), "rule '%s' %s: %s", display, why,
+               ir_interp_status_detail(machine));
+    }
+    report_at_rule(reporter, rule, message, "this rule gave no verdict", 1);
+    if (report) {
+      fprintf(report, "rule %s: no verdict (%s), %lld steps\n", display, why,
+              steps);
+    }
+    ir_interp_destroy(machine);
+    *failed_build = 1;
+    stats->malformed++;
+    return 1;
+  }
+
+  RuleVerdict verdict;
+  decode_verdict(machine, verdict_type, (unsigned long long)result.i,
+                 &verdict);
+  report_leaks(reporter, machine, rule);
+  if (!verdict.readable || verdict.outcome < 0 || verdict.outcome > 2) {
+    snprintf(message, sizeof(message),
+             "rule '%s' returned a verdict the compiler could not read; "
+             "answer with verdict_pass(), verdict_fail(site, message) or "
+             "verdict_gap(site, message)",
+             display);
+    report_at_rule(reporter, rule, message, "malformed verdict", 1);
+    if (report) {
+      fprintf(report, "rule %s: malformed verdict, %lld steps\n", display,
+              steps);
+    }
+    ir_interp_destroy(machine);
+    *failed_build = 1;
+    stats->malformed++;
+    return 1;
+  }
+  if (verdict.outcome == 0) {
+    stats->passed++;
+    if (report) {
+      fprintf(report, "rule %s: pass, %lld steps\n", display, steps);
+    }
+    ir_interp_destroy(machine);
+    return 1;
+  }
+
+  const IRRuleSite *site = NULL;
+  int anonymous = verdict.line == 0 && verdict.column == 0 &&
+                  verdict.file[0] == '\0';
+  if (!anonymous) {
+    site = match_site(image, &verdict);
+    if (!site) {
+      snprintf(message, sizeof(message),
+               "rule '%s' named a site that is not in the program: %s:%lld:%lld",
+               display, verdict.file, verdict.line, verdict.column);
+      report_at_rule(reporter, rule, message,
+                     "a verdict's site must come from the Program the rule "
+                     "was given",
+                     1);
+      if (report) {
+        fprintf(report, "rule %s: malformed site, %lld steps\n", display,
+                steps);
+      }
+      ir_interp_destroy(machine);
+      *failed_build = 1;
+      stats->malformed++;
+      return 1;
+    }
+  }
+
+  if (verdict.outcome == 1) {
+    snprintf(message, sizeof(message), "rule '%s' failed: %s", display,
+             verdict.message[0] ? verdict.message : "(no message)");
+  } else {
+    snprintf(message, sizeof(message),
+             "rule '%s' could not decide here: %s", display,
+             verdict.message[0] ? verdict.message : "(no message)");
+  }
+  if (site) {
+    SourceLocation location;
+    location.line = site->line;
+    location.column = site->column;
+    location.filename = site->file;
+    SourceSpan span = source_span_from_location(location, 1);
+    if (verdict.outcome == 1) {
+      error_reporter_add_error_with_span(reporter, ERROR_SEMANTIC, span,
+                                         message);
+    } else {
+      error_reporter_add_warning_with_span(reporter, ERROR_SEMANTIC, span,
+                                           message);
+    }
+    error_reporter_set_last_label(reporter, verdict.outcome == 1
+                                                ? "the rule points here"
+                                                : "unproven here");
+    error_reporter_set_last_code(reporter, verdict.outcome == 1 ? "R0002"
+                                                                : "R0003");
+    SourceSpan declared = source_span_from_location(rule->location, 4);
+    declared = error_reporter_span_snap_to_token(reporter, declared, "rule");
+    error_reporter_add_note_of_span(reporter, declared,
+                                    verdict.outcome == 1
+                                        ? "the rule that failed the build"
+                                        : "the rule that announced the gap");
+  } else {
+    report_at_rule(reporter, rule, message,
+                   verdict.outcome == 1 ? "failed without naming a site"
+                                        : "gap without a site",
+                   verdict.outcome == 1);
+  }
+  if (report) {
+    fprintf(report, "rule %s: %s, %lld steps\n", display,
+            verdict.outcome == 1 ? "fail" : "gap", steps);
+  }
+  if (verdict.outcome == 1) {
+    stats->failed++;
+    *failed_build = 1;
+  } else {
+    stats->gaps++;
+  }
+  ir_interp_destroy(machine);
+  return 1;
+}
+
+int ir_rules_run(IRProgram *program, const IRRuleImage *image,
+                 ErrorReporter *reporter, FILE *report, long long budget,
+                 IRRuleStats *stats) {
+  IRRuleStats local;
+  int failed_build = 0;
+  if (!stats) {
+    stats = &local;
+  }
+  memset(stats, 0, sizeof(*stats));
+  if (!program || !image || !reporter) {
+    return 0;
+  }
+  long long fuel = budget > 0 ? budget : IR_RULE_DEFAULT_FUEL;
+  for (size_t i = 0; i < program->function_count; i++) {
+    IRFunction *rule = program->functions[i];
+    if (!rule || !rule->is_rule) {
+      continue;
+    }
+    if (!run_one_rule(program, rule, image, reporter, report, fuel, stats,
+                      &failed_build)) {
+      return 0;
+    }
+  }
+  if (budget > 0 && stats->steps > budget) {
+    char message[256];
+    snprintf(message, sizeof(message),
+             "rules spent %lld interpreter steps, over the budget of %lld",
+             stats->steps, budget);
+    error_reporter_add_error(reporter, ERROR_SEMANTIC,
+                             source_location_create(0, 0), message);
+    error_reporter_set_last_code(reporter, "R0004");
+    failed_build = 1;
+  }
+  if (report) {
+    fprintf(report, "rules: %zu run, %zu passed, %zu failed, %zu gaps, %lld "
+                    "steps\n",
+            stats->rules, stats->passed, stats->failed, stats->gaps,
+            stats->steps);
+  }
+  return failed_build ? 0 : 1;
+}

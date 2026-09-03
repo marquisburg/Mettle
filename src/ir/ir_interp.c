@@ -1972,6 +1972,35 @@ long long ir_interp_pointee_window(IRInterpMachine *machine,
   return take;
 }
 
+unsigned long long
+ir_interp_next_buffer_address(const IRInterpMachine *machine) {
+  if (!machine) {
+    return 0;
+  }
+  return II_ADDR_BASE +
+         (unsigned long long)machine->buffer_count * II_ADDR_STRIDE;
+}
+
+long long ir_interp_read_bytes(IRInterpMachine *machine,
+                               unsigned long long address, unsigned char *out,
+                               size_t length) {
+  long long offset = 0;
+  IIBuffer *buf = NULL;
+  if (!machine || !out) {
+    return -1;
+  }
+  buf = ii_addr_to_buffer(machine, address, (long long)length, &offset);
+  if (!buf) {
+    return -1;
+  }
+  memcpy(out, buf->data + offset, length);
+  return (long long)length;
+}
+
+long long ir_interp_fuel_remaining(const IRInterpMachine *machine) {
+  return machine ? machine->fuel : 0;
+}
+
 static void ii_trace_extern(IRInterpMachine *machine, const char *name,
                             const IRInterpValue *args, size_t arg_count) {
   if (machine->trace_count >= II_TRACE_CAP) {

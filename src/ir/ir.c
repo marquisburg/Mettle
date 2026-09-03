@@ -1753,6 +1753,38 @@ void ir_program_destroy(IRProgram *program) {
   free(program);
 }
 
+int ir_program_drop_rules(IRProgram *program) {
+  size_t kept = 0;
+  if (!program) {
+    return 0;
+  }
+  for (size_t i = 0; i < program->function_count; i++) {
+    IRFunction *function = program->functions[i];
+    if (!function || !function->is_rule) {
+      program->functions[kept++] = function;
+      continue;
+    }
+    size_t symbols_kept = 0;
+    for (size_t s = 0; s < program->module_symbol_count; s++) {
+      IRModuleSymbol *symbol = &program->module_symbols[s];
+      if (symbol->kind == IR_MODSYM_FUNCTION && symbol->name &&
+          function->name && strcmp(symbol->name, function->name) == 0) {
+        ir_module_symbol_release(symbol);
+        continue;
+      }
+      if (symbols_kept != s) {
+        program->module_symbols[symbols_kept] = *symbol;
+      }
+      symbols_kept++;
+    }
+    program->module_symbol_count = symbols_kept;
+    ir_symbol_index_reset();
+    ir_function_destroy(function);
+  }
+  program->function_count = kept;
+  return 1;
+}
+
 int ir_program_drop_rewrite_rules(IRProgram *program) {
   size_t kept = 0;
   if (!program) {

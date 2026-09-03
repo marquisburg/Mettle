@@ -3820,6 +3820,154 @@ catch {
   Write-CaseResult -Name "swap_runtime_excisable" -Passed $false -Reason $_.Exception.Message
 }
 
+# A @rule is a property the program requires of itself. Enforce: there is an
+# input on which the build actually fails, and the failure names the site the
+# rule pointed at and the rule that pointed there.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "rule_fail.exe"
+  $out = & $CompilerPath --build "tests/test_rule_fail.mettle" -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a failing rule did not stop the build" }
+  if ($out -notmatch "error\[R0002\]: rule 'no_recursion' failed: this module forbids recursion") { throw "the failure does not name the rule and its message: $out" }
+  if ($out -notmatch "test_rule_fail\.mettle:5:1") { throw "the failure does not point at the recursive function: $out" }
+  if ($out -notmatch "the rule that failed the build") { throw "the failure does not note the rule's own site: $out" }
+  if ($out -notmatch "@rule fn no_recursion") { throw "the note does not show the rule: $out" }
+  Write-CaseResult -Name "rule_fails_build" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rule_fails_build" -Passed $false -Reason $_.Exception.Message
+}
+
+# Passing rules cost a ledger line and nothing else: the program builds, runs,
+# and carries no trace of the rule bodies in either build mode.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "rule_pass.exe"
+  $out = & $CompilerPath --build "tests/test_rule_pass.mettle" -o $exe --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "passing rules failed the build: $out" }
+  if ($out -notmatch "rule no_recursion: pass, \d+ steps") { throw "no ledger line for no_recursion: $out" }
+  if ($out -notmatch "rule no_network: pass, \d+ steps") { throw "no ledger line for no_network: $out" }
+  if ($out -notmatch "rules: 3 run, 3 passed, 0 failed, 0 gaps, \d+ steps") { throw "no ledger total: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or $run -notmatch "rules held: 42") { throw "the program did not run: $run" }
+  if (Test-FileContainsText -Path $exe -Text "RULE_ONLY_MARKER_XYZ") { throw "a rule body reached the debug binary" }
+  $release = Join-Path $tmpDir "rule_pass_release.exe"
+  $out = & $CompilerPath --build --release "tests/test_rule_pass.mettle" -o $release 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "release build with rules failed: $out" }
+  if (Test-FileContainsText -Path $release -Text "RULE_ONLY_MARKER_XYZ") { throw "a rule body reached the release binary" }
+  Write-CaseResult -Name "rule_passes_and_is_excised" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rule_passes_and_is_excised" -Passed $false -Reason $_.Exception.Message
+}
+
+# A rule reports what it can prove and announces its gaps: a gap is a warning
+# at the site, and the build goes on.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "rule_gap.exe"
+  $out = & $CompilerPath --build "tests/test_rule_gap.mettle" -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a gap stopped the build: $out" }
+  if ($out -notmatch "warning\[R0003\]: rule 'direct_calls_only' could not decide here") { throw "the gap was not announced: $out" }
+  if ($out -notmatch "the rule that announced the gap") { throw "the gap does not note the rule: $out" }
+  Write-CaseResult -Name "rule_gap_is_announced" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rule_gap_is_announced" -Passed $false -Reason $_.Exception.Message
+}
+
+# The compiler does not trust a rule: a verdict naming a site that is not in
+# the program is refused, a rule with the wrong shape is refused, and the
+# program cannot call a rule.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_rule_bad_site.mettle" -o (Join-Path $tmpDir "rule_bad_site.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $out -notmatch "error\[R0001\]: rule 'invented' named a site that is not in the program: nowhere\.mettle:42:1") { throw "an invented site was accepted: $out" }
+  $out = & $CompilerPath --build "tests/test_rule_signature.mettle" -o (Join-Path $tmpDir "rule_signature.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $out -notmatch "a @rule is declared ``@rule fn wrong\(p: Program\) -> Verdict``") { throw "a wrongly shaped rule was accepted: $out" }
+  if ($out -match "R0001") { throw "a wrongly shaped rule still ran: $out" }
+  $out = & $CompilerPath --build "tests/test_rule_called.mettle" -o (Join-Path $tmpDir "rule_called.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $out -notmatch "'always' is a @rule: it runs while compiling and is not part of the program") { throw "the program was allowed to call a rule: $out" }
+  Write-CaseResult -Name "rule_is_not_trusted" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rule_is_not_trusted" -Passed $false -Reason $_.Exception.Message
+}
+
+# A rule reads declared types with their layout, so a size bound is one loop.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_rule_types.mettle" -o (Join-Path $tmpDir "rule_types.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "an oversized type passed the rule: $out" }
+  if ($out -notmatch "error\[R0002\]: rule 'packets_are_small' failed: Packet must stay under 64 bytes") { throw "the size rule did not fail as written: $out" }
+  if ($out -notmatch "test_rule_types\.mettle:3:1") { throw "the failure does not point at the struct: $out" }
+  Write-CaseResult -Name "rule_reads_type_layout" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rule_reads_type_layout" -Passed $false -Reason $_.Exception.Message
+}
+
+# A rule sees which enum variants each function's match and switch arms name,
+# so "every variant is handled somewhere in this file" is one loop.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_rule_matches.mettle" -o (Join-Path $tmpDir "rule_matches.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "an unhandled variant passed the rule: $out" }
+  if ($out -notmatch "error\[R0002\]: rule 'every_shape_handled' failed: a variant of Shape is handled nowhere in this file") { throw "the coverage rule did not fail as written: $out" }
+  if ($out -notmatch "test_rule_matches\.mettle:3:1") { throw "the failure does not point at the enum: $out" }
+  if ($out -match "leaked") { throw "the rule leaked: $out" }
+  Write-CaseResult -Name "rule_sees_matched_variants" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rule_sees_matched_variants" -Passed $false -Reason $_.Exception.Message
+}
+
+# Rule cost is a ledger and, on request, a contract.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_rule_pass.mettle" -o (Join-Path $tmpDir "rule_budget.exe") --rule-budget=100 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "rules over budget did not fail the build: $out" }
+  if ($out -notmatch "error\[R0004\]: rules spent \d+ interpreter steps, over the budget of 100") { throw "no budget error: $out" }
+  $out = & $CompilerPath --build "tests/test_rule_pass.mettle" -o (Join-Path $tmpDir "rule_budget.exe") --rule-budget=1000000 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "rules under budget failed the build: $out" }
+  Write-CaseResult -Name "rule_budget_is_a_contract" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rule_budget_is_a_contract" -Passed $false -Reason $_.Exception.Message
+}
+
+# Explain: expand prints a rule as the ordinary Mettle it is, decorators
+# included, so the checked program can be read and diffed.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath expand "tests/test_rule_pass.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "expand failed: $out" }
+  if ($out -notmatch "@rule fn no_recursion\(p: Program\) -> Verdict \{") { throw "expand dropped the @rule decorator: $out" }
+  $out = & $CompilerPath expand "tests/test_noalloc.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "expand of a contract failed: $out" }
+  if ($out -notmatch "@noalloc ") { throw "expand dropped @noalloc, so the printed program lost a contract: $out" }
+  Write-CaseResult -Name "rule_expand_keeps_decorators" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rule_expand_keeps_decorators" -Passed $false -Reason $_.Exception.Message
+}
+
 # Runtime excision: each optional component has to be absent from a binary that
 # did not ask for it, and the absence has to be checkable rather than asserted.
 # What is excisable is optional; what is mandatory is a tax, so this is the

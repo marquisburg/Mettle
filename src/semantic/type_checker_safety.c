@@ -574,6 +574,15 @@ int type_checker_eval_layoutof(TypeChecker *checker, CallExpression *call,
   return 1;
 }
 
+long long type_checker_layout_digest(const Type *type) {
+  uint64_t hash = 14695981039346656037ULL;
+  if (!type) {
+    return 0;
+  }
+  layout_digest(type, &hash, 0);
+  return (long long)(hash & 0x7FFFFFFFFFFFFFFFULL);
+}
+
 int type_checker_eval_fieldof(TypeChecker *checker, CallExpression *call,
                               SourceLocation location,
                               ComptimeValue *out_value) {

@@ -1,0 +1,151 @@
+import "std/mem";
+
+export struct Site {
+  file: string;
+  line: int64;
+  column: int64;
+}
+
+export struct FieldInfo {
+  name: string;
+  type_name: string;
+  offset: int64;
+  size: int64;
+}
+
+export struct TypeInfo {
+  name: string;
+  qualified: string;
+  module: string;
+  site: Site;
+  kind: string;
+  size: int64;
+  align: int64;
+  layout: int64;
+  fields: FieldInfo[];
+  variants: string[];
+}
+
+export struct Function {
+  name: string;
+  qualified: string;
+  module: string;
+  site: Site;
+  callees: string[];
+  matches: string[];
+  param_types: string[];
+  return_type: string;
+  is_extern: bool;
+  is_exported: bool;
+  is_recursive: bool;
+  is_address_taken: bool;
+  has_indirect_calls: bool;
+  is_noalloc: bool;
+  is_pure: bool;
+  is_inline: bool;
+  is_swappable: bool;
+  is_kernel: bool;
+}
+
+export struct Program {
+  functions: Function[];
+  types: TypeInfo[];
+  modules: string[];
+  target: string;
+  file: string;
+}
+
+export struct Verdict {
+  outcome: int64;
+  site: Site;
+  message: string;
+}
+
+export fn VERDICT_PASS() -> int64 { return 0; }
+export fn VERDICT_FAIL() -> int64 { return 1; }
+export fn VERDICT_GAP() -> int64 { return 2; }
+
+export fn verdict_pass() -> Verdict {
+  var v: Verdict = { outcome: 0 };
+  return v;
+}
+
+export fn verdict_fail(site: Site, message: string) -> Verdict {
+  var v: Verdict = { outcome: 1, site: site, message: message };
+  return v;
+}
+
+export fn verdict_gap(site: Site, message: string) -> Verdict {
+  var v: Verdict = { outcome: 2, site: site, message: message };
+  return v;
+}
+
+export fn function_calls(f: Function, callee: string) -> bool {
+  for c in f.callees {
+    if (c == callee) { return true; }
+  }
+  return false;
+}
+
+export fn program_function_index(p: Program, qualified: string) -> int64 {
+  for i in 0..p.functions.length {
+    if (p.functions[i].qualified == qualified) { return i; }
+  }
+  return -1;
+}
+
+export fn program_type_index(p: Program, qualified: string) -> int64 {
+  for i in 0..p.types.length {
+    if (p.types[i].qualified == qualified) { return i; }
+  }
+  return -1;
+}
+
+export fn function_reaches(p: Program, from: Function, callee: string) -> bool {
+  var count: int64 = p.functions.length;
+  var visited: bool[] = new bool[count];
+  var stack: int64[] = new int64[count];
+  var top: int64 = 0;
+  var found: bool = false;
+  for c in from.callees {
+    if (c == callee) { found = true; }
+    var index: int64 = program_function_index(p, c);
+    if (index >= 0 && !visited[index]) {
+      visited[index] = true;
+      stack[top] = index;
+      top = top + 1;
+    }
+  }
+  while (top > 0 && !found) {
+    top = top - 1;
+    var current: int64 = stack[top];
+    for c in p.functions[current].callees {
+      if (c == callee) { found = true; }
+      var index: int64 = program_function_index(p, c);
+      if (index >= 0 && !visited[index]) {
+        visited[index] = true;
+        stack[top] = index;
+        top = top + 1;
+      }
+    }
+  }
+  free(visited.data);
+  free(stack.data);
+  return found;
+}
+
+export fn function_matches(f: Function, owner: string, variant: string) -> bool {
+  for m in f.matches {
+    if (m.length != owner.length + 1 + variant.length) { continue; }
+    var same: bool = true;
+    for i in 0..owner.length {
+      if (m[i] != owner[i]) { same = false; }
+    }
+    if (m[owner.length] != '.') { same = false; }
+    for i in 0..variant.length {
+      if (m[owner.length + 1 + i] != variant[i]) { same = false; }
+    }
+    if (same) { return true; }
+  }
+  return false;
+}

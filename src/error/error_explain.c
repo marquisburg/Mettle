@@ -281,6 +281,46 @@ static const ErrorCodeDoc DOCS[] = {
      "from the operating system, a device pointer -- becomes a pointer by\n"
      "cast. A pointer becomes an integer to be printed, hashed or aligned.\n"
      "Only the round trip carries no information.\n"},
+    {"R0001", "A rule gave no usable verdict",
+     "A `@rule fn` ran while compiling and did not answer with a verdict the\n"
+     "compiler could act on: it trapped, ran out of its step budget, used\n"
+     "something the compile-time interpreter cannot run, or returned a site\n"
+     "that is not in the Program it was handed.\n"
+     "\n"
+     "A rule answers with verdict_pass(), verdict_fail(site, message) or\n"
+     "verdict_gap(site, message), and every site it names has to be one it\n"
+     "read from the Program: a function's or a type's `.site`. The compiler\n"
+     "checks that, because a rule is code it does not trust.\n"
+     "\n"
+     "Fix: return one of the three verdicts, take the site from the\n"
+     "Program, and if the rule is expensive raise `--rule-budget=N`.\n"},
+    {"R0002", "A rule failed the build",
+     "A `@rule fn` the program declares returned verdict_fail for the site\n"
+     "the diagnostic points at, with the message it wrote. The build stops\n"
+     "here the way `@noalloc` or `@simd!` stops it: the rule is a property\n"
+     "the program requires of itself, and this site does not have it.\n"
+     "\n"
+     "The note names the rule. Read it as ordinary Mettle: it is one, and\n"
+     "`mettle expand` prints it with the rest of the program.\n"
+     "\n"
+     "Fix: change the code the rule points at, or change the rule.\n"},
+    {"R0003", "A rule could not decide",
+     "A `@rule fn` returned verdict_gap: at this site it could neither\n"
+     "prove nor refute the property it checks, and it says so rather than\n"
+     "guessing. The build goes on. This is a warning so the gap is loud.\n"
+     "\n"
+     "A rule reports what it can prove and announces what it cannot, the\n"
+     "same standard the borrow analyser is held to. Typical gaps are a call\n"
+     "through a function pointer or an extern the rule has no model for.\n"
+     "\n"
+     "Fix: give the rule what it needs to decide (a direct call, a named\n"
+     "function), or accept the gap.\n"},
+    {"R0004", "Rules spent more than their budget",
+     "`--rule-budget=N` makes the cost of running the program's rules a\n"
+     "contract: the interpreter steps they spend together may not exceed\n"
+     "N. They did. `--report-rules` prints what each rule cost.\n"
+     "\n"
+     "Fix: make the rules cheaper, or raise the budget deliberately.\n"},
 };
 
 /* ---- optimizer decision codes ----------------------------------------------

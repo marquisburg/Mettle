@@ -272,6 +272,7 @@ A decorator sits before a declaration and asks the compiler for something.
 | `@simd` | Report whether this loop vectorized |
 | `@unroll(n)` | Unroll this loop n times |
 | `@test` | A compile-time test, run by `mettle test` |
+| `@rule` | A property the program requires of itself, checked on every build; see [Rules](rules.md) |
 | `@naked` | No prologue, no frame, no epilogue; the body is `asm` only |
 | `@interrupt` | Entered by the CPU; the compiler emits the save/restore and the interrupt return |
 
@@ -289,6 +290,10 @@ defeated it. Vectorization contracts are only checked when optimization is on:
 note: 1 `@simd` loop present but not verified; vectorization contracts are
 only checked with -O/--release
 ```
+
+`@rule` is the open end of the contract set. A `@rule fn` takes the checked
+program as data and returns a verdict with a location, and a failing verdict
+stops the build the way `@noalloc` does. [Rules](rules.md) covers it.
 
 `@naked` and `@interrupt` are for code the operating system is not running.
 [Bare metal](bare-metal.md) covers both, along with inline assembly.

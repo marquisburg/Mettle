@@ -659,6 +659,7 @@ Symbol *symbol_create(const char *name, SymbolKind kind, Type *type) {
   symbol->is_address_space_binding = 0;
   symbol->address_space = MTLC_ADDRESS_SPACE_DEFAULT;
   symbol->is_builtin = 0;
+  symbol->is_rule = 0;
   symbol->link_name = NULL;
   symbol->decl_line = 0;
   symbol->decl_column = 0;

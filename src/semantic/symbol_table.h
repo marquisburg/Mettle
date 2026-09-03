@@ -145,6 +145,7 @@ typedef struct Symbol {
   int is_address_space_binding; // Fixed GPU storage binding; elements stay mutable
   MtlcAddressSpace address_space; // Neutral GPU storage provenance when known
   int is_builtin;             // Compiler-provided (assert/assert_eq test builtins)
+  int is_rule;
   /* SYMBOL_FUNCTION declared with `kernel`: a GPU entry point rather than an
    * ordinary function. On the host side an `extern kernel` declaration carries
    * the device signature, so `dispatch` can type-check its arguments and size

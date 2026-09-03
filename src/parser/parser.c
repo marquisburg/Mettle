@@ -768,6 +768,7 @@ typedef struct {
   int is_swappable;       // `@swappable`: may be replaced at a `quiesce` point
   int is_naked;
   int is_interrupt;
+  int is_rule;
   int simd_mode; // SimdAttr from `@simd` / `@simd!` (SIMD_ATTR_NONE if absent)
   int unroll_factor; // `@unroll(n)` on a loop; 0 if absent
 } ParsedDecorators;
@@ -787,6 +788,7 @@ static int parser_parse_decorator_chain(Parser *parser, ParsedDecorators *out) {
   out->is_swappable = 0;
   out->is_naked = 0;
   out->is_interrupt = 0;
+  out->is_rule = 0;
   out->simd_mode = SIMD_ATTR_NONE;
   out->unroll_factor = 0;
 
@@ -859,6 +861,13 @@ static int parser_parse_decorator_chain(Parser *parser, ParsedDecorators *out) {
       }
       out->is_interrupt = 1;
       parser_advance(parser);
+    } else if (strcmp(name, "rule") == 0) {
+      if (out->is_rule) {
+        parser_set_error(parser, "Duplicate '@rule' decorator");
+        return 0;
+      }
+      out->is_rule = 1;
+      parser_advance(parser);
     } else if (strcmp(name, "simd") == 0) {
       if (out->simd_mode != SIMD_ATTR_NONE) {
         parser_set_error(parser, "Duplicate '@simd' decorator");
@@ -899,8 +908,9 @@ static int parser_parse_decorator_chain(Parser *parser, ParsedDecorators *out) {
     } else {
       parser_set_error(parser,
                        "Unknown decorator after '@' (expected 'inline', "
-                       "'noinline', 'pure', 'noalloc', 'test', 'naked', "
-                       "'interrupt', 'simd', or 'unroll')");
+                       "'noinline', 'pure', 'noalloc', 'test', 'rule', "
+                       "'naked', 'interrupt', 'swappable', 'simd', or "
+                       "'unroll')");
       return 0;
     }
   }
@@ -908,6 +918,15 @@ static int parser_parse_decorator_chain(Parser *parser, ParsedDecorators *out) {
   if (out->is_inline && out->is_noinline) {
     parser_set_error(parser,
                      "'@inline' and '@noinline' are mutually exclusive");
+    return 0;
+  }
+  if (out->is_rule &&
+      (out->is_inline || out->is_noinline || out->is_pure || out->is_noalloc ||
+       out->is_test || out->is_swappable || out->is_naked ||
+       out->is_interrupt || out->simd_mode != SIMD_ATTR_NONE)) {
+    parser_set_error(parser,
+                     "'@rule' stands alone: a rule runs while compiling and "
+                     "never becomes code, so no other decorator applies to it");
     return 0;
   }
   /* A swap replaces a function at its call boundary, so the boundary has to
@@ -964,6 +983,7 @@ static ASTNode *parser_parse_decorated_declaration(Parser *parser) {
   fd->is_swappable = decos.is_swappable;
   fd->is_naked = decos.is_naked;
   fd->is_interrupt = decos.is_interrupt;
+  fd->is_rule = decos.is_rule;
   fd->simd_mode = decos.simd_mode;
   if (fd->is_naked && fd->is_interrupt) {
     parser_set_error(parser,
@@ -2101,10 +2121,11 @@ ASTNode *parser_parse_statement(Parser *parser) {
     if (!parser_parse_decorator_chain(parser, &decos))
       return NULL;
     if (decos.is_inline || decos.is_noinline || decos.is_pure ||
-        decos.is_noalloc || decos.is_swappable) {
+        decos.is_noalloc || decos.is_swappable || decos.is_rule) {
       parser_set_error(parser,
-                       "'@inline', '@noinline', '@pure', '@noalloc', and "
-                       "'@swappable' apply to a function, not a loop");
+                       "'@inline', '@noinline', '@pure', '@noalloc', "
+                       "'@swappable', and '@rule' apply to a function, not a "
+                       "loop");
       return NULL;
     }
     if (decos.simd_mode == SIMD_ATTR_NONE && !decos.unroll_factor) {

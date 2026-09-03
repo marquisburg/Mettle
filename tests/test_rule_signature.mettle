@@ -1,0 +1,5 @@
+import "std/rule";
+
+@rule fn wrong(p: Program) -> int32 { return 0; }
+
+fn main() -> int32 { return 0; }

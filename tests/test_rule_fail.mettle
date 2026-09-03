@@ -1,0 +1,21 @@
+import "std/rule";
+
+fn helper(n: int32) -> int32 { return n * 2; }
+
+fn depth(n: int32) -> int32 {
+  if (n <= 0) { return 0; }
+  return 1 + depth(n - 1);
+}
+
+@rule fn no_recursion(p: Program) -> Verdict {
+  for f in p.functions {
+    if (f.module == "" && f.is_recursive) {
+      return verdict_fail(f.site, "this module forbids recursion");
+    }
+  }
+  return verdict_pass();
+}
+
+fn main() -> int32 {
+  return helper(depth(3)) - 6;
+}

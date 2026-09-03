@@ -51,6 +51,7 @@ frontend can drive instead. The documentation is organized the same way.
 - [Translation validation](translation-validation.md): `--verify`, which
   catches the optimizer's own bugs.
 - [Rewrite rules](rewrite-rules.md): `rewrite`, identities from your own code
+- [Rules](rules.md): `@rule`, a property the program requires of itself, checked on every build
   that the compiler proves, applies, and checks.
 - [ML-driven IR optimization](ml-opt.md): `--ml-opt` and its validation gate.
 - [The --explain-json schema](explain-json.md): the machine-readable

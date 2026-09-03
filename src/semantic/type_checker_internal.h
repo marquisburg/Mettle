@@ -110,6 +110,12 @@ Type *type_checker_type_value(TypeChecker *checker, Type *referred,
 Type *type_checker_field_value(TypeChecker *checker, Type *owner,
                                uint32_t field_index, ASTNode *expression);
 
+int type_checker_validate_rule_signature(TypeChecker *checker,
+                                         ASTNode *declaration,
+                                         FunctionDeclaration *func_decl,
+                                         Type **param_types,
+                                         Type *return_type);
+
 int type_checker_validate_static_assert(TypeChecker *checker,
                                                CallExpression *call,
                                                SourceLocation location);

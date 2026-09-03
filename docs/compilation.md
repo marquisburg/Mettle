@@ -104,6 +104,8 @@ divergence. See [ML-driven IR optimization](ml-opt.md).
 | `--annotate-hot[=N]` | The top N codegen hotspots. Default 8. |
 | `--dump-ast` | Write the parsed AST to a `.ast` sidecar. |
 | `--dump-ir` | Write the optimized IR to a `.ir` sidecar. |
+| `--report-rules` | The verdict and interpreter steps of every `@rule`; see [Rules](rules.md). |
+| `--rule-budget=N` | Fail the build when the rules spend more than N interpreter steps together. |
 
 `--explain` needs `-O` or `--release`, because there are no decisions to
 report without the optimizer. A repeat run leads with what changed since the

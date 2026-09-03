@@ -106,6 +106,9 @@ typedef struct {
    * zero, which is a meaningful thing to require. */
   size_t expansion_budget;
   int expansion_budget_set;
+  int report_rules;
+  long long rule_budget;
+  int rule_budget_set;
   int emit_object;
   int generate_debug_symbols;
   int generate_line_mapping;

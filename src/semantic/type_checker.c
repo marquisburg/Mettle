@@ -211,6 +211,38 @@ void type_checker_note_gathered_parameter(FunctionDeclaration *declaration) {
   }
 }
 
+static int type_checker_type_is_named(const Type *type,
+                                      const char *qualified) {
+  return type && ((type->qualified_name &&
+                   strcmp(type->qualified_name, qualified) == 0) ||
+                  (type->name && strcmp(type->name, qualified) == 0));
+}
+
+int type_checker_validate_rule_signature(TypeChecker *checker,
+                                                ASTNode *declaration,
+                                                FunctionDeclaration *func_decl,
+                                                Type **param_types,
+                                                Type *return_type) {
+  int shape_ok = func_decl->parameter_count == 1 && param_types &&
+                 type_checker_type_is_named(param_types[0],
+                                            "std/rule.Program") &&
+                 type_checker_type_is_named(return_type, "std/rule.Verdict");
+  if (shape_ok && !func_decl->is_exported && !func_decl->is_extern &&
+      func_decl->body) {
+    return 1;
+  }
+  type_checker_set_error_at_location(
+      checker, declaration->location,
+      "a @rule is declared `@rule fn %s(p: Program) -> Verdict` with a body, "
+      "taking the Program and returning the Verdict from std/rule",
+      func_decl->name ? func_decl->name : "name");
+  if (checker->error_reporter) {
+    error_reporter_set_last_label(checker->error_reporter,
+                                  "signature is not (Program) -> Verdict");
+  }
+  return 0;
+}
+
 int type_checker_register_function_signature(TypeChecker *checker,
                                                     ASTNode *declaration) {
   if (!checker || !declaration ||
@@ -298,6 +330,7 @@ int type_checker_register_function_signature(TypeChecker *checker,
    * symbol a `dispatch` earlier in the file resolves against, so it has to
    * know the declaration was a `kernel` and what block shape it declared. */
   func_symbol->is_kernel = func_decl->is_kernel;
+  func_symbol->is_rule = func_decl->is_rule;
   func_symbol->kernel_block[0] = func_decl->kernel_block[0];
   func_symbol->kernel_block[1] = func_decl->kernel_block[1];
   func_symbol->kernel_block[2] = func_decl->kernel_block[2];

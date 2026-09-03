@@ -2029,6 +2029,21 @@ static int type_checker_process_function(TypeChecker *checker,
       return 0;
     }
 
+    if (func_decl->is_rule) {
+      Symbol *rule_symbol =
+          symbol_table_lookup(checker->symbol_table, func_decl->name);
+      Type **rule_params = rule_symbol && rule_symbol->kind == SYMBOL_FUNCTION
+                               ? rule_symbol->data.function.parameter_types
+                               : NULL;
+      Type *rule_return = rule_symbol && rule_symbol->kind == SYMBOL_FUNCTION
+                              ? rule_symbol->data.function.return_type
+                              : NULL;
+      if (!type_checker_validate_rule_signature(checker, declaration, func_decl,
+                                                rule_params, rule_return)) {
+        return 0;
+      }
+    }
+
     Scope *current_scope =
         symbol_table_get_current_scope(checker->symbol_table);
     if (func_decl->is_kernel &&

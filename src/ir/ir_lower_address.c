@@ -152,6 +152,19 @@ static int ir_emit_aggregate_runtime_stores(IRLoweringContext *context,
       ir_operand_destroy(&value);
       return 0;
     }
+    if (ir_should_decay_array_to_address(element_type, entry->element) &&
+        !ir_decay_array_operand_to_address(context, function, &value,
+                                           entry->element->location)) {
+      ir_operand_destroy(&value);
+      return 0;
+    }
+    if (ir_should_build_slice_from_array(element_type, entry->element) &&
+        !ir_build_slice_operand_from_array(
+            context, function, &value, entry->element->resolved_type,
+            element_type, entry->element->location)) {
+      ir_operand_destroy(&value);
+      return 0;
+    }
     if (!ir_emit_address_with_offset(context, function, dest_address,
                                      entry->offset, location, &slot)) {
       ir_operand_destroy(&value);

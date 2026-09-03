@@ -115,6 +115,17 @@ Memory and range diagnostics:
 [Memory safety](memory-safety.md) and [Borrow checker](borrow-checker.md)
 cover the M codes in context.
 
+Rule diagnostics:
+
+| Code | Meaning |
+|------|---------|
+| R0001 | A rule gave no usable verdict |
+| R0002 | A rule failed the build |
+| R0003 | A rule could not decide |
+| R0004 | Rules spent more than their budget |
+
+[Rules](rules.md) covers the R codes in context.
+
 ## JSON output
 
 `--error-format=json` writes one JSON object per diagnostic to stderr, for

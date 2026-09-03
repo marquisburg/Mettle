@@ -1,0 +1,17 @@
+import "std/rule";
+
+fn helper(n: int32) -> int32 { return n * 2; }
+
+@rule fn direct_calls_only(p: Program) -> Verdict {
+  for f in p.functions {
+    if (f.module == "" && f.has_indirect_calls) {
+      return verdict_gap(f.site, "a call through a pointer could reach anything");
+    }
+  }
+  return verdict_pass();
+}
+
+fn main() -> int32 {
+  var f: fn(int32) -> int32 = &helper;
+  return f(1) - 2;
+}

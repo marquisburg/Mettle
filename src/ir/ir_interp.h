@@ -116,6 +116,15 @@ unsigned long long ir_interp_function_address(IRInterpMachine *machine,
 
 int ir_interp_buffer_is_literal(const IRInterpMachine *machine, size_t index);
 
+unsigned long long
+ir_interp_next_buffer_address(const IRInterpMachine *machine);
+
+long long ir_interp_read_bytes(IRInterpMachine *machine,
+                               unsigned long long address, unsigned char *out,
+                               size_t length);
+
+long long ir_interp_fuel_remaining(const IRInterpMachine *machine);
+
 /* Human-readable reason for the last non-OK status ("call_indirect",
  * "extern trace overflow", "local type 'string'", ...). */
 const char *ir_interp_status_detail(const IRInterpMachine *machine);

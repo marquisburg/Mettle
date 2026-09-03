@@ -1,0 +1,9 @@
+import "std/rule";
+
+@rule fn always(p: Program) -> Verdict { return verdict_pass(); }
+
+fn main() -> int32 {
+  var p: Program = { };
+  var v: Verdict = always(p);
+  return 0;
+}

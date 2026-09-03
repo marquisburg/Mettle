@@ -321,6 +321,8 @@ int type_checker_check_expansion_budget(TypeChecker *checker, size_t budget);
 int type_checker_eval_offsetof(TypeChecker *checker, CallExpression *call,
                                SourceLocation location, long long *out_offset);
 
+long long type_checker_layout_digest(const Type *type);
+
 /* Fold `layoutof(T)` to a digest of everything a stored value of T depends on:
  * kind, size, alignment, and each field's name, offset, width and own layout.
  * Pinning it with static_assert turns a layout change into a failed build. */

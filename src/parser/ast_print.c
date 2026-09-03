@@ -492,6 +492,38 @@ static void print_declaration(AstPrinter *printer, const ASTNode *node) {
     if (!decl) {
       break;
     }
+    if (decl->is_inline) {
+      fputs(decl->is_inline_contract ? "@inline! " : "@inline ", printer->out);
+    }
+    if (decl->is_noinline) {
+      fputs("@noinline ", printer->out);
+    }
+    if (decl->is_pure) {
+      fputs("@pure ", printer->out);
+    }
+    if (decl->is_noalloc) {
+      fputs("@noalloc ", printer->out);
+    }
+    if (decl->is_test) {
+      fputs("@test ", printer->out);
+    }
+    if (decl->is_rule) {
+      fputs("@rule ", printer->out);
+    }
+    if (decl->is_swappable) {
+      fputs("@swappable ", printer->out);
+    }
+    if (decl->is_naked) {
+      fputs("@naked ", printer->out);
+    }
+    if (decl->is_interrupt) {
+      fputs("@interrupt ", printer->out);
+    }
+    if (decl->simd_mode == SIMD_ATTR_HINT) {
+      fputs("@simd ", printer->out);
+    } else if (decl->simd_mode == SIMD_ATTR_CONTRACT) {
+      fputs("@simd! ", printer->out);
+    }
     if (decl->is_exported) {
       fputs("export ", printer->out);
     }

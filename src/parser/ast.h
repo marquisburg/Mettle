@@ -159,6 +159,7 @@ typedef struct {
   int is_swappable;
   int is_naked;
   int is_interrupt;
+  int is_rule;
   int rewrite_role;
   /* The last parameter was written `T[..]`, so a call gathers whatever follows
    * the fixed parameters into it. Inside the body it is an ordinary `T[]`. */

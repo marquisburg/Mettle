@@ -31,6 +31,8 @@
 #include "ir/ir_profile.h"
 #include "ir/ir_debug_hooks.h"
 #include "semantic/import_resolver.h"
+#include "semantic/rule_reflect.h"
+#include "ir/ir_rules.h"
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -3886,6 +3888,16 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
     options->swap_old_name = argv[++i];
   } else if (strcmp(argv[i], "--new") == 0 && i + 1 < argc) {
     options->swap_new_name = argv[++i];
+  } else if (strcmp(argv[i], "--report-rules") == 0) {
+    options->report_rules = 1;
+  } else if (strncmp(argv[i], "--rule-budget=", 14) == 0) {
+    long long budget = strtoll(argv[i] + 14, NULL, 10);
+    if (budget <= 0) {
+      fprintf(stderr, "--rule-budget must be a positive step count\n");
+      return DRIVER_FLAG_FAILED;
+    }
+    options->rule_budget = budget;
+    options->rule_budget_set = 1;
   } else if (strcmp(argv[i], "--report-expansion") == 0) {
     options->report_expansion = 1;
   } else if (strncmp(argv[i], "--expansion-budget=", 19) == 0) {
@@ -5727,6 +5739,33 @@ int compile_file(const char *input_filename, const char *output_filename,
                              safety_stats.region_calls);
   }
 
+  if (ir_program_has_rules(ir_program) || options->report_rules) {
+    IRRuleImage rule_image;
+    char *rule_error = NULL;
+    IRRuleStats rule_stats;
+    int rules_ok;
+    if (!rule_reflect_build(type_checker, program, input_filename,
+                            mtlc_target()->triple, &rule_image, &rule_error)) {
+      fprintf(stderr, "Error: %s\n",
+              rule_error ? rule_error : "could not reflect the program");
+      free(rule_error);
+      result = 1;
+      goto cleanup;
+    }
+    rules_ok = ir_rules_run(ir_program, &rule_image, error_reporter,
+                            options->report_rules ? stdout : NULL,
+                            options->rule_budget_set ? options->rule_budget
+                                                     : 0,
+                            &rule_stats);
+    ir_rule_image_free(&rule_image);
+    ir_program_drop_rules(ir_program);
+    if (!rules_ok) {
+      error_reporter_print_errors(error_reporter);
+      result = 1;
+      goto cleanup;
+    }
+  }
+
   mettle_compiler_ctx_set_ir_program(ir_program);
   options->main_wants_argc_argv = ir_program->main_wants_argc_argv;
 
@@ -6243,6 +6282,8 @@ void print_usage(const char *program_name) {
   printf("  --dump-ast          Write parsed AST sidecar (.ast)\n");
   printf("  --dump-ir           Write optimized IR sidecar (.ir) without debug metadata\n");
   printf("  --simd-report       Report what each @simd loop became (needs -O/--release)\n");
+  printf("  --report-rules      Print the verdict and interpreter steps of every @rule\n");
+  printf("  --rule-budget=N     Fail the build when the rules spend more than N steps\n");
   printf("  --explain           Report every optimization decision in the input file --\n"
          "                      loop vectorization and call inlining, with the reason\n"
          "                      whenever the optimizer declined (needs -O/--release).\n"

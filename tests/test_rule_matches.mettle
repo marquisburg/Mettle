@@ -1,0 +1,30 @@
+import "std/rule";
+
+enum Shape { Circle, Square, Triangle }
+
+fn area_code(s: Shape) -> int32 {
+  switch (s) {
+    case Shape.Circle: return 1;
+    case Shape.Square: return 2;
+    default: return 0;
+  }
+}
+
+@rule fn every_shape_handled(p: Program) -> Verdict {
+  var index: int64 = program_type_index(p, "Shape");
+  if (index < 0) { return verdict_pass(); }
+  var shape: TypeInfo = p.types[index];
+  for v in shape.variants {
+    var handled: bool = false;
+    for f in p.functions {
+      if (f.module != "") { continue; }
+      if (function_matches(f, "Shape", v)) { handled = true; }
+    }
+    if (!handled) {
+      return verdict_fail(shape.site, "a variant of Shape is handled nowhere in this file");
+    }
+  }
+  return verdict_pass();
+}
+
+fn main() -> int32 { return area_code(Shape.Circle) - 1; }

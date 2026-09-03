@@ -1,0 +1,8 @@
+import "std/rule";
+
+@rule fn invented(p: Program) -> Verdict {
+  var s: Site = { file: "nowhere.mettle", line: 42, column: 1 };
+  return verdict_fail(s, "made up");
+}
+
+fn main() -> int32 { return 0; }

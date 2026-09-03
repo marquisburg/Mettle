@@ -1,0 +1,39 @@
+import "std/rule";
+import "std/io";
+
+struct Job { id: int32; payload: int64; }
+
+fn helper(n: int32) -> int32 { return n * 2; }
+
+@rule fn no_recursion(p: Program) -> Verdict {
+  for f in p.functions {
+    if (f.name == "RULE_ONLY_MARKER_XYZ") { return verdict_pass(); }
+    if (f.module == "" && f.is_recursive) {
+      return verdict_fail(f.site, "this module forbids recursion");
+    }
+  }
+  return verdict_pass();
+}
+
+@rule fn small_jobs(p: Program) -> Verdict {
+  for t in p.types {
+    if (t.qualified == "Job" && t.size > 64) {
+      return verdict_fail(t.site, "Job must stay under 64 bytes");
+    }
+  }
+  return verdict_pass();
+}
+
+@rule fn no_network(p: Program) -> Verdict {
+  var index: int64 = program_function_index(p, "main");
+  if (index < 0) { return verdict_pass(); }
+  if (function_reaches(p, p.functions[index], "std/net.send")) {
+    return verdict_fail(p.functions[index].site, "main may not reach the network");
+  }
+  return verdict_pass();
+}
+
+fn main() -> int32 {
+  println("rules held: {helper(21)}");
+  return 0;
+}

@@ -1,0 +1,14 @@
+import "std/rule";
+
+struct Packet { header: int64; body: int64[16]; }
+
+@rule fn packets_are_small(p: Program) -> Verdict {
+  for t in p.types {
+    if (t.qualified == "Packet" && t.size > 64) {
+      return verdict_fail(t.site, "Packet must stay under 64 bytes on every target");
+    }
+  }
+  return verdict_pass();
+}
+
+fn main() -> int32 { return 0; }

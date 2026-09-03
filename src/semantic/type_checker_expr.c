@@ -2963,6 +2963,33 @@ static Type *type_checker_infer_user_call(TypeChecker *checker,
     return NULL;
   }
 
+  if (func_symbol->is_rule) {
+    FunctionDeclaration *caller =
+        checker->current_function_decl && checker->current_function_decl->data
+            ? (FunctionDeclaration *)checker->current_function_decl->data
+            : NULL;
+    if (!caller || !caller->is_rule) {
+      char error_msg[256];
+      snprintf(error_msg, sizeof(error_msg),
+               "'%s' is a @rule: it runs while compiling and is not part of "
+               "the program, so the program cannot call it",
+               call->function_name);
+      checker->has_error = 1;
+      free(checker->error_message);
+      checker->error_message = strdup(error_msg);
+      if (checker->error_reporter) {
+        SourceSpan span = source_span_from_location(
+            expression->location, strlen(call->function_name));
+        span = error_reporter_span_snap_to_token(checker->error_reporter,
+                                                 span, call->function_name);
+        error_reporter_add_error_with_span_and_suggestion(
+            checker->error_reporter, ERROR_SEMANTIC, span, error_msg,
+            "move the shared logic into an ordinary function both can call");
+      }
+      return NULL;
+    }
+  }
+
   // assert/assert_eq are `mettle test` builtins: they exist only in the
   // compile-time interpreter, so reject them outside @test functions
   // (where they would survive into codegen and fail at link).

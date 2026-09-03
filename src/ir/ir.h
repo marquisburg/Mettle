@@ -667,6 +667,7 @@ typedef struct {
    * saves every general-purpose register, calls the body, restores them and
    * returns with iret. */
   int is_interrupt;
+  int is_rule;
   /* Set the moment a volatile load or store is appended, and never cleared.
    * The optimizer driver uses it to decide whether a function is worth
    * auditing for dropped, duplicated or reordered volatile accesses. */
@@ -916,6 +917,7 @@ int ir_program_add_function(IRProgram *program, IRFunction *function);
 int ir_program_register_type(IRProgram *program, const char *name,
                              MtlcType *type);
 MtlcType *ir_program_lookup_type(const IRProgram *program, const char *name);
+int ir_program_drop_rules(IRProgram *program);
 
 /* Module symbol table. add copies the proto (deep-copying owned strings and the
  * param_types array; MtlcType* stay borrowed) and returns the stored entry, or
