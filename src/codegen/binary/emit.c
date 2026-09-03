@@ -2914,6 +2914,25 @@ int code_generator_binary_emit_load(CodeGenerator *generator,
     }
     return 0;
   }
+  if (size == 2 && instruction->is_float &&
+      (instruction->alias_class == IR_ALIAS_CLASS_F16 ||
+       instruction->alias_class == IR_ALIAS_CLASS_BF16)) {
+    if (instruction->alias_class == IR_ALIAS_CLASS_F16) {
+      if (!binary_emit_movd_xmm_reg(&context->code, BINARY_XMM0, value_register)) {
+        return 0;
+      }
+      if (!wcs_avx_vcvtph2ps_xmm(&context->code, (int)BINARY_XMM0, (int)BINARY_XMM0)) {
+        return 0;
+      }
+      if (!binary_emit_movd_reg_xmm(&context->code, value_register, BINARY_XMM0)) {
+        return 0;
+      }
+    } else {
+      if (!binary_emit_shift_reg_imm8(&context->code, 4, value_register, 16)) {
+        return 0;
+      }
+    }
+  }
   /* x86-64: 32-bit integer loads into the low half zero-extend the register.
    * Signed int32 must sign-extend to int64 when held in a 64-bit slot/register.
    * Skip when dest is int32. A load tagged is_unsigned (uint8/16/32 pointee, set
@@ -3013,6 +3032,44 @@ int code_generator_binary_emit_store(CodeGenerator *generator,
                                "precision in function '%s'",
                                context->function_name);
       return 0;
+    }
+  }
+  if (size == 2 && instruction->is_float &&
+      (instruction->alias_class == IR_ALIAS_CLASS_F16 ||
+       instruction->alias_class == IR_ALIAS_CLASS_BF16)) {
+    if (instruction->alias_class == IR_ALIAS_CLASS_F16) {
+      if (!binary_emit_movd_xmm_reg(&context->code, BINARY_XMM0, value_register)) {
+        return 0;
+      }
+      if (!wcs_avx_vcvtps2ph_xmm(&context->code, (int)BINARY_XMM0, (int)BINARY_XMM0, 0)) {
+        return 0;
+      }
+      if (!binary_emit_movd_reg_xmm(&context->code, value_register, BINARY_XMM0)) {
+        return 0;
+      }
+    } else {
+      BinaryGpRegister tmp = BINARY_GP_R11;
+      if (!binary_emit_mov_reg_reg(&context->code, tmp, value_register)) {
+        return 0;
+      }
+      if (!binary_emit_shift_reg_imm8(&context->code, 5, tmp, 16)) {
+        return 0;
+      }
+      if (!binary_emit_and_reg_imm32(&context->code, tmp, 1)) {
+        return 0;
+      }
+      if (!binary_emit_mov_reg_imm32_zero_extend(&context->code, BINARY_GP_RAX, 0x7FFF)) {
+        return 0;
+      }
+      if (!binary_emit_alu_reg_reg(&context->code, 0x03, BINARY_GP_RAX, tmp)) {
+        return 0;
+      }
+      if (!binary_emit_alu_reg_reg(&context->code, 0x03, value_register, BINARY_GP_RAX)) {
+        return 0;
+      }
+      if (!binary_emit_shift_reg_imm8(&context->code, 5, value_register, 16)) {
+        return 0;
+      }
     }
   }
 

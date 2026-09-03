@@ -1,0 +1,199 @@
+extern fn free(ptr: rawptr) = "free";
+@test fn float16_size() -> int64 {
+  assert_eq((int64)sizeof(float16), 2);
+  assert_eq((int64)sizeof(bfloat16), 2);
+  return 0;
+}
+@test fn float16_widen() -> int64 {
+  var h: float16 = 1.5;
+  var f: float32 = (float32)h;
+  assert_eq((int64)(f * 2.0), 3);
+  var b: bfloat16 = 2.5;
+  var g: float32 = (float32)b;
+  assert_eq((int64)(g * 2.0), 5);
+  return 0;
+}
+@test fn float16_narrow_cast() -> int64 {
+  var x: float32 = 1.5;
+  var h: float16 = (float16)x;
+  var y: float32 = (float32)h;
+  assert_eq((int64)(y * 2.0), 3);
+  var xd: float64 = 2.5;
+  var hb: bfloat16 = (bfloat16)xd;
+  var yd: float32 = (float32)hb;
+  assert_eq((int64)(yd * 2.0), 5);
+  return 0;
+}
+@test fn float16_arith_is_f32() -> int64 {
+  var h: float16 = 1.5;
+  var r: float32 = h * 2.0;
+  var e: float32 = (float32)h * 2.0;
+  assert_eq((int64)r, (int64)e);
+  return 0;
+}
+@test fn float16_arrays() -> int64 {
+  var a: float16[4] = [1.0, 2.0, 3.0, 4.0];
+  var s: float32 = 0.0;
+  for i in 0..4 {
+    s = s + (float32)a[i];
+  }
+  assert_eq((int64)s, 10);
+  return 0;
+}
+@test fn float16_slice() -> int64 {
+  var a: float16[4] = [1.0, 2.0, 3.0, 4.0];
+  var w: float16[] = a;
+  var s: float32 = 0.0;
+  for i in 0..w.length {
+    s = s + (float32)w[i];
+  }
+  assert_eq((int64)s, 10);
+  return 0;
+}
+@test fn float16_view_row() -> int64 {
+  var v: float16[,] = new float16[2, 3];
+  v[0][0] = 1.0;
+  v[0][1] = 2.0;
+  v[0][2] = 3.0;
+  v[1][0] = 4.0;
+  v[1][1] = 5.0;
+  v[1][2] = 6.0;
+  var row: float16[] = v[0];
+  var s: float32 = 0.0;
+  for j in 0..row.length {
+    s = s + (float32)row[j];
+  }
+  assert_eq((int64)s, 6);
+  free(v.data);
+  return 0;
+}
+@test fn float16_sweep() -> int64 {
+  var i: int64 = 0;
+  while (i < 65536) {
+    var u: uint16 = (uint16)i;
+    var ui: int64 = (int64)u;
+    var exp: int64 = (ui >> 10) & 31;
+    var mant: int64 = ui & 1023;
+    var is_nan: int64 = 0;
+    if (exp == 31) {
+      if (mant != 0) {
+        is_nan = 1;
+      }
+    }
+    var pu: uint16* = &u;
+    var pf: float16* = (float16*)pu;
+    var h: float16 = pf[0];
+    var f: float32 = (float32)h;
+    var h2: float16 = (float16)f;
+    var f2: float32 = (float32)h2;
+    if (is_nan == 0) {
+      assert_eq((int64)(f == f2), 1);
+    } else {
+      var fnan: int64 = 0;
+      if (f != f) {
+        fnan = 1;
+      }
+      assert_eq(fnan, 1);
+      var f2nan: int64 = 0;
+      if (f2 != f2) {
+        f2nan = 1;
+      }
+      assert_eq(f2nan, 1);
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+fn checks() -> int32 {
+  if (sizeof(float16) != 2) {
+    return 1;
+  }
+  if (sizeof(bfloat16) != 2) {
+    return 2;
+  }
+  var h: float16 = 1.5;
+  var f: float32 = (float32)h;
+  if ((int32)(f * 2.0) != 3) {
+    return 3;
+  }
+  var x: float32 = 1.5;
+  var hh: float16 = (float16)x;
+  var y: float32 = (float32)hh;
+  if ((int32)(y * 2.0) != 3) {
+    return 4;
+  }
+  var r: float32 = h * 2.0;
+  var e: float32 = (float32)h * 2.0;
+  if ((int32)r != (int32)e) {
+    return 5;
+  }
+  var a: float16[4] = [1.0, 2.0, 3.0, 4.0];
+  var s: float32 = 0.0;
+  for i in 0..4 {
+    s = s + (float32)a[i];
+  }
+  if ((int32)s != 10) {
+    return 6;
+  }
+  var w: float16[] = a;
+  var sw: float32 = 0.0;
+  for i in 0..w.length {
+    sw = sw + (float32)w[i];
+  }
+  if ((int32)sw != 10) {
+    return 7;
+  }
+  var v: float16[,] = new float16[2, 3];
+  v[0][0] = 1.0;
+  v[0][1] = 2.0;
+  v[0][2] = 3.0;
+  v[1][0] = 4.0;
+  v[1][1] = 5.0;
+  v[1][2] = 6.0;
+  var row: float16[] = v[0];
+  var sr: float32 = 0.0;
+  for j in 0..row.length {
+    sr = sr + (float32)row[j];
+  }
+  if ((int32)sr != 6) {
+    free(v.data);
+    return 8;
+  }
+  free(v.data);
+  var k: int64 = 0;
+  while (k < 65536) {
+    var u: uint16 = (uint16)k;
+    var ui: int64 = (int64)u;
+    var exp: int64 = (ui >> 10) & 31;
+    var mant: int64 = ui & 1023;
+    var is_nan: int64 = 0;
+    if (exp == 31) {
+      if (mant != 0) {
+        is_nan = 1;
+      }
+    }
+    var pu: uint16* = &u;
+    var pf: float16* = (float16*)pu;
+    var q: float16 = pf[0];
+    var g: float32 = (float32)q;
+    var q2: float16 = (float16)g;
+    var g2: float32 = (float32)q2;
+    if (is_nan == 0) {
+      if (g != g2) {
+        return 9;
+      }
+    } else {
+      if (g == g) {
+        return 10;
+      }
+      if (g2 == g2) {
+        return 11;
+      }
+    }
+    k = k + 1;
+  }
+  return 0;
+}
+fn main() -> int32 {
+  return checks();
+}

@@ -1000,6 +1000,8 @@ int wcs_mov_reg_imm32(BinaryCodeBuffer *b, int gpr, uint32_t imm);
 int wcs_mov_reg_reg32(BinaryCodeBuffer *b, int dst, int src);
 int wcs_movd_reg_xmm(BinaryCodeBuffer *b, int gpr, int xmm);
 int wcs_movd_xmm_reg(BinaryCodeBuffer *b, int xmm, int gpr);
+int wcs_avx_vcvtph2ps_xmm(BinaryCodeBuffer *b, int dst, int src);
+int wcs_avx_vcvtps2ph_xmm(BinaryCodeBuffer *b, int dst, int src, unsigned char imm);
 int wcs_movdqu_xmm_mem(BinaryCodeBuffer *b, int xmm, int gpr);
 int wcs_movdqu_xmm_rcx(BinaryCodeBuffer *b, int xmm);
 int wcs_movzx_reg_byte_rcx(BinaryCodeBuffer *b, int gpr);
