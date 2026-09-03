@@ -321,6 +321,37 @@ static const ErrorCodeDoc DOCS[] = {
      "N. They did. `--report-rules` prints what each rule cost.\n"
      "\n"
      "Fix: make the rules cheaper, or raise the budget deliberately.\n"},
+    {"P0001", "A declared type's rule could not be proven here",
+     "A value flows into a type declared with `type Name = Base where\n"
+     "predicate;`, and the compiler could not prove the predicate for it.\n"
+     "The message names the conjunct it could not establish, the\n"
+     "expression, and the range it knew for it.\n"
+     "\n"
+     "The proof is the compiler's job and never an annotation. It proves a\n"
+     "conversion from a constant, from the value's own type (a uint8 is\n"
+     "0..255, a Digit is 0..9), from arithmetic it can bound (`x & 63`,\n"
+     "`n % 10`, `a + b` over known ranges), from a loop bound, from a\n"
+     "dominating `if` whose condition implies the predicate, from an early\n"
+     "exit that rules the other case out, and from a guard that repeats the\n"
+     "predicate itself (`if (is_valid(s))` for `where is_valid(value)`).\n"
+     "Past that it refuses to guess, which is this error.\n"
+     "\n"
+     "A declared type with no predicate (`type Meters = float64;`) is a\n"
+     "unit: a plain base value becomes one only by a cast, and two such\n"
+     "types never mix in arithmetic.\n"
+     "\n"
+     "Fix: guard the value where it is converted, or narrow what it is\n"
+     "computed from.\n"},
+    {"P0002", "A bounds check was proven away by a declared type",
+     "Not an error. `--explain` reports it: an index whose declared type\n"
+     "pins its range inside the array it indexes needs no bounds check, so\n"
+     "none was emitted, in debug, release and --safe builds alike. The\n"
+     "proof is the type's predicate; the pass that consumed it is lowering,\n"
+     "which decides check emission per access.\n"
+     "\n"
+     "A property the program declared and the compiler proved earns the\n"
+     "same treatment as one the compiler discovered on its own, and no\n"
+     "more: an index of a plain integer type keeps its check.\n"},
 };
 
 /* ---- optimizer decision codes ----------------------------------------------

@@ -447,11 +447,20 @@ int type_checker_check_if_statement(TypeChecker *checker,
     }
   }
 
-  if (if_stmt->then_branch &&
-      !type_checker_check_statement(checker, if_stmt->then_branch)) {
-    free(joined);
-    free(init_snapshot);
-    return 0;
+  {
+    size_t guard_depth = type_checker_guard_depth(checker);
+    int then_ok = 1;
+    type_checker_push_guard(checker, if_stmt->condition, 0);
+    if (if_stmt->then_branch &&
+        !type_checker_check_statement(checker, if_stmt->then_branch)) {
+      then_ok = 0;
+    }
+    type_checker_pop_guards(checker, guard_depth);
+    if (!then_ok) {
+      free(joined);
+      free(init_snapshot);
+      return 0;
+    }
   }
   type_checker_if_join_arm(checker, joined, init_snapshot_count,
                            if_stmt->then_branch);
@@ -473,9 +482,18 @@ int type_checker_check_if_statement(TypeChecker *checker,
           elif_cond_type->name);
       elif_ok = 0;
     }
-    if (elif_ok && if_stmt->else_ifs[i].body &&
-        !type_checker_check_statement(checker, if_stmt->else_ifs[i].body)) {
-      elif_ok = 0;
+    if (elif_ok && if_stmt->else_ifs[i].body) {
+      size_t guard_depth = type_checker_guard_depth(checker);
+      type_checker_push_guard(checker, if_stmt->condition, 1);
+      for (size_t earlier = 0; earlier < i; earlier++) {
+        type_checker_push_guard(checker, if_stmt->else_ifs[earlier].condition,
+                                1);
+      }
+      type_checker_push_guard(checker, if_stmt->else_ifs[i].condition, 0);
+      if (!type_checker_check_statement(checker, if_stmt->else_ifs[i].body)) {
+        elif_ok = 0;
+      }
+      type_checker_pop_guards(checker, guard_depth);
     }
     if (!elif_ok) {
       free(joined);
@@ -488,11 +506,21 @@ int type_checker_check_if_statement(TypeChecker *checker,
                                       init_snapshot_count);
   }
 
-  if (if_stmt->else_branch &&
-      !type_checker_check_statement(checker, if_stmt->else_branch)) {
-    free(joined);
-    free(init_snapshot);
-    return 0;
+  if (if_stmt->else_branch) {
+    size_t guard_depth = type_checker_guard_depth(checker);
+    int else_ok;
+    type_checker_push_guard(checker, if_stmt->condition, 1);
+    for (size_t earlier = 0; earlier < if_stmt->else_if_count; earlier++) {
+      type_checker_push_guard(checker, if_stmt->else_ifs[earlier].condition,
+                              1);
+    }
+    else_ok = type_checker_check_statement(checker, if_stmt->else_branch);
+    type_checker_pop_guards(checker, guard_depth);
+    if (!else_ok) {
+      free(joined);
+      free(init_snapshot);
+      return 0;
+    }
   }
   type_checker_if_join_arm(checker, joined, init_snapshot_count,
                            if_stmt->else_branch);
@@ -506,6 +534,43 @@ int type_checker_check_if_statement(TypeChecker *checker,
   free(init_snapshot);
 
   return 1;
+}
+
+int type_checker_body_assigns(const ASTNode *node, const char *name) {
+  if (!node || !name) {
+    return 0;
+  }
+  if (node->type == AST_ASSIGNMENT && node->data) {
+    const Assignment *assignment = (const Assignment *)node->data;
+    const ASTNode *target = assignment->target;
+    if (assignment->variable_name &&
+        strcmp(assignment->variable_name, name) == 0) {
+      return 1;
+    }
+    if (target && target->type == AST_IDENTIFIER && target->data) {
+      const Identifier *identifier = (const Identifier *)target->data;
+      if (identifier->name && strcmp(identifier->name, name) == 0) {
+        return 1;
+      }
+    }
+  }
+  if (node->type == AST_UNARY_EXPRESSION && node->data) {
+    const UnaryExpression *unary = (const UnaryExpression *)node->data;
+    if (unary->operator && strcmp(unary->operator, "&") == 0 &&
+        unary->operand && unary->operand->type == AST_IDENTIFIER &&
+        unary->operand->data) {
+      const Identifier *identifier = (const Identifier *)unary->operand->data;
+      if (identifier->name && strcmp(identifier->name, name) == 0) {
+        return 1;
+      }
+    }
+  }
+  for (size_t i = 0; i < node->child_count; i++) {
+    if (type_checker_body_assigns(node->children[i], name)) {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 int type_checker_check_for_statement(TypeChecker *checker,
@@ -634,14 +699,44 @@ int type_checker_check_for_statement(TypeChecker *checker,
 
   checker->loop_depth++;
   type_checker_push_loop_label(checker, for_stmt->label);
-  if (for_stmt->body &&
-      !type_checker_check_statement(checker, for_stmt->body)) {
-    type_checker_pop_loop_label(checker);
-    checker->loop_depth--;
-    free(post_init_snapshot);
-    type_checker_init_tracker_exit_scope(checker);
-    symbol_table_exit_scope(checker->symbol_table);
-    return 0;
+  {
+    size_t guard_depth = type_checker_guard_depth(checker);
+    int body_ok = 1;
+    if (for_stmt->condition) {
+      type_checker_push_guard(checker, for_stmt->condition, 0);
+    }
+    if (for_stmt->initializer &&
+        for_stmt->initializer->type == AST_VAR_DECLARATION &&
+        for_stmt->initializer->data &&
+        ((VarDeclaration *)for_stmt->initializer->data)->structural_type) {
+      VarDeclaration *counter_decl =
+          (VarDeclaration *)for_stmt->initializer->data;
+      int has_min = 0;
+      int has_max = 0;
+      long long min = 0;
+      long long max = 0;
+      if (counter_decl->name && counter_decl->initializer &&
+          !type_checker_body_assigns(for_stmt->body, counter_decl->name) &&
+          type_checker_expression_range(checker, counter_decl->initializer,
+                                        &has_min, &min, &has_max, &max) &&
+          has_min) {
+        type_checker_push_range_guard(checker, counter_decl->name, 1, min, 0,
+                                      0);
+      }
+    }
+    if (for_stmt->body &&
+        !type_checker_check_statement(checker, for_stmt->body)) {
+      body_ok = 0;
+    }
+    type_checker_pop_guards(checker, guard_depth);
+    if (!body_ok) {
+      type_checker_pop_loop_label(checker);
+      checker->loop_depth--;
+      free(post_init_snapshot);
+      type_checker_init_tracker_exit_scope(checker);
+      symbol_table_exit_scope(checker->symbol_table);
+      return 0;
+    }
   }
   type_checker_pop_loop_label(checker);
   checker->loop_depth--;
@@ -1257,12 +1352,21 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
 
     checker->loop_depth++;
     type_checker_push_loop_label(checker, while_stmt->label);
-    if (while_stmt->body &&
-        !type_checker_check_statement(checker, while_stmt->body)) {
-      type_checker_pop_loop_label(checker);
-      checker->loop_depth--;
-      free(init_snapshot);
-      return 0;
+    {
+      size_t guard_depth = type_checker_guard_depth(checker);
+      int body_ok = 1;
+      type_checker_push_guard(checker, while_stmt->condition, 0);
+      if (while_stmt->body &&
+          !type_checker_check_statement(checker, while_stmt->body)) {
+        body_ok = 0;
+      }
+      type_checker_pop_guards(checker, guard_depth);
+      if (!body_ok) {
+        type_checker_pop_loop_label(checker);
+        checker->loop_depth--;
+        free(init_snapshot);
+        return 0;
+      }
     }
     type_checker_pop_loop_label(checker);
     checker->loop_depth--;
@@ -1395,6 +1499,7 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
       int block_ok = expanded_ok &&
                      type_checker_declare_expansion_binding(checker, statement);
       int reached_terminator = 0;
+      size_t block_guard_depth = type_checker_guard_depth(checker);
       for (size_t i = 0; i < statement->child_count; i++) {
         ASTNode *child = statement->children[i];
         /* A directive still standing here is one the expander refused and has
@@ -1415,7 +1520,17 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
         if (type_checker_statement_guarantees_termination(child)) {
           reached_terminator = 1;
         }
+        if (child && child->type == AST_IF_STATEMENT && child->data) {
+          IfStatement *early = (IfStatement *)child->data;
+          if (early->condition && !early->else_branch &&
+              early->else_if_count == 0 && early->then_branch &&
+              type_checker_statement_guarantees_termination(
+                  early->then_branch)) {
+            type_checker_push_guard(checker, early->condition, 1);
+          }
+        }
       }
+      type_checker_pop_guards(checker, block_guard_depth);
 
       if (block_ok)
         type_checker_warn_unused_locals(checker);

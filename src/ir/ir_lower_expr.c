@@ -2461,8 +2461,30 @@ static int ir_lower_cast_expression(IRLoweringContext *context,
                                     ASTNode *expression,
                                     IROperand *out_value);
 
+static int ir_lower_expression_inner(IRLoweringContext *context,
+                                     IRFunction *function,
+                                     ASTNode *expression,
+                                     IROperand *out_value);
+
 int ir_lower_expression(IRLoweringContext *context, IRFunction *function,
-                               ASTNode *expression, IROperand *out_value) {
+                        ASTNode *expression, IROperand *out_value) {
+  if (!ir_lower_expression_inner(context, function, expression, out_value)) {
+    return 0;
+  }
+  if (context && context->emit_refinement_checks && expression &&
+      expression->proven_refinement &&
+      expression->proven_refinement->refine_has_range &&
+      !ir_emit_refinement_check(context, function, expression->location,
+                                out_value, expression->proven_refinement)) {
+    return 0;
+  }
+  return 1;
+}
+
+static int ir_lower_expression_inner(IRLoweringContext *context,
+                                     IRFunction *function,
+                                     ASTNode *expression,
+                                     IROperand *out_value) {
   if (!context || !function || !expression || !out_value) {
     return 0;
   }

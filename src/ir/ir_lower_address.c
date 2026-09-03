@@ -1,5 +1,6 @@
 // AST->IR lowering: lvalue address, symbol assignment, pointer arithmetic.
 #include "ir_lowering_internal.h"
+#include "ir_explain_safety.h"
 #include "frontend/mtlc_frontend.h" // mtlc_type_from_frontend
 
 /* Spell an access the way the source did, for a --safe failure message. The
@@ -1290,6 +1291,18 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
      * base with a better message, and it compares the scaled byte offset
      * without sign, so a negative index fails the same comparison as an
      * oversized one instead of slipping past a signed `index < length`. */
+    int index_proven_by_type =
+        array_type->kind == TYPE_ARRAY && index_expression->index &&
+        type_checker_refined_index_fits(index_expression->index->resolved_type,
+                                        array_type->array_size);
+    if (index_proven_by_type) {
+      const Type *index_type = index_expression->index->resolved_type;
+      ir_explain_safety_typed_note(
+          expression->location.filename, expression->location.line,
+          function ? function->name : NULL, index_type->name,
+          index_type->refine_min, index_type->refine_max,
+          array_type->array_size);
+    }
     if (!context->emit_safety_checks) {
       if (array_type->kind == TYPE_POINTER && !is_address_space_allocation &&
           !ir_emit_null_check(context, function, expression->location, &base)) {
@@ -1297,7 +1310,7 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
         ir_operand_destroy(&index);
         return 0;
       }
-      if (array_type->kind == TYPE_ARRAY &&
+      if (array_type->kind == TYPE_ARRAY && !index_proven_by_type &&
           !ir_emit_bounds_check(context, function, expression->location, &index,
                                 array_type->array_size)) {
         ir_operand_destroy(&base);
@@ -1346,7 +1359,7 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
      * Address-space allocations are workgroup and private GPU storage, whose
      * bounds the device enforces and whose address is not a host pointer the
      * shadow map could describe. */
-    if (!is_address_space_allocation) {
+    if (!is_address_space_allocation && !index_proven_by_type) {
       long long extent = IR_SAFETY_EXTENT_UNKNOWN;
       if (array_type->kind == TYPE_ARRAY && array_type->array_size > 0) {
         extent = (long long)array_type->array_size * element_size;

@@ -62,6 +62,7 @@ ASTNode *ast_create_node(ASTNodeType type, SourceLocation location) {
   node->child_count = 0;
   node->data = NULL;
   node->resolved_type = NULL;
+  node->proven_refinement = NULL;
 
   return node;
 }
@@ -193,6 +194,34 @@ static ASTNode *ast_clone_method_declaration(ASTNode *clone, const ASTNode *node
     ast_add_child(clone, dst->body);
   dst->composed_name =
       src->composed_name ? ast_clone_node(src->composed_name) : NULL;
+  clone->data = dst;
+  return clone;
+}
+
+static ASTNode *ast_clone_type_declaration(ASTNode *clone, const ASTNode *node) {
+  TypeDeclaration *src = (TypeDeclaration *)node->data;
+  TypeDeclaration *dst = malloc(sizeof(TypeDeclaration));
+  if (!dst) {
+    free(clone);
+    return NULL;
+  }
+  dst->name = ast_intern_string(src ? src->name : NULL);
+  dst->base_type = ast_intern_string(src ? src->base_type : NULL);
+  dst->is_exported = src ? src->is_exported : 0;
+  dst->predicate = NULL;
+  dst->composed_name = NULL;
+  if (src && src->predicate) {
+    dst->predicate = ast_clone_node(src->predicate);
+    if (dst->predicate) {
+      ast_add_child(clone, dst->predicate);
+    }
+  }
+  if (src && src->composed_name) {
+    dst->composed_name = ast_clone_node(src->composed_name);
+    if (dst->composed_name) {
+      ast_add_child(clone, dst->composed_name);
+    }
+  }
   clone->data = dst;
   return clone;
 }
@@ -1083,6 +1112,7 @@ static const AstCloneHandler AST_CLONE_HANDLERS[AST_NODE_TYPE_COUNT] = {
     [AST_LAMBDA_EXPRESSION] = ast_clone_method_declaration,
     [AST_FUNCTION_DECLARATION] = ast_clone_method_declaration,
     [AST_STRUCT_DECLARATION] = ast_clone_struct_declaration,
+    [AST_TYPE_DECLARATION] = ast_clone_type_declaration,
     [AST_FUNCTION_CALL] = ast_clone_function_call,
     [AST_TRAIT_DECLARATION] = ast_clone_trait_declaration,
     [AST_IMPL_DECLARATION] = ast_clone_impl_declaration,
@@ -1268,6 +1298,15 @@ void ast_destroy_node(ASTNode *node) {
       free(struct_decl->type_param_traits);
       ast_destroy_node(struct_decl->composed_name);
       free(struct_decl);
+    }
+    break;
+  }
+  case AST_TYPE_DECLARATION: {
+    TypeDeclaration *type_decl = (TypeDeclaration *)node->data;
+    if (type_decl) {
+      ast_free_string(type_decl->name);
+      ast_free_string(type_decl->base_type);
+      free(type_decl);
     }
     break;
   }
@@ -1851,6 +1890,29 @@ ASTNode *ast_create_struct_declaration(const char *name, char **field_names,
 
   node->data = struct_decl;
 
+  return node;
+}
+
+ASTNode *ast_create_type_declaration(const char *name, const char *base_type,
+                                     ASTNode *predicate,
+                                     SourceLocation location) {
+  ASTNode *node = ast_create_node(AST_TYPE_DECLARATION, location);
+  if (!node)
+    return NULL;
+  TypeDeclaration *decl = malloc(sizeof(TypeDeclaration));
+  if (!decl) {
+    free(node);
+    return NULL;
+  }
+  decl->name = ast_intern_string(name);
+  decl->base_type = ast_intern_string(base_type);
+  decl->predicate = predicate;
+  decl->is_exported = 0;
+  decl->composed_name = NULL;
+  if (predicate) {
+    ast_add_child(node, predicate);
+  }
+  node->data = decl;
   return node;
 }
 

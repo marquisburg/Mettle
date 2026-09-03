@@ -5683,6 +5683,11 @@ int compile_file(const char *input_filename, const char *output_filename,
   }
   ir_lowering_set_explain(options->explain && options->optimize &&
                           !options->emit_ptx && !options->emit_spirv);
+  ir_lowering_set_refinement_checks(options->test_mode ||
+                                    options->trace_function != NULL ||
+                                    ir_verify_enabled());
+  ir_explain_safety_set_collect(options->explain && options->optimize,
+                                input_filename);
 
   /* --emit-arm64 keeps the checks: its traps print the message and exit(1)
    * like the x86 backend's, so debug semantics match across targets. (The

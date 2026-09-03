@@ -3771,6 +3771,15 @@ static Type *type_checker_infer_cast(TypeChecker *checker,
     type_checker_warn_pointer_integer_round_trip(checker, expression, cast_expr,
                                                  target_type);
 
+    if (target_type->refined_base &&
+        !type_checker_types_equal(target_type, operand_type) &&
+        !type_checker_prove_refinement(checker, target_type,
+                                       cast_expr->operand)) {
+      type_checker_report_refinement_failure(checker, cast_expr->operand,
+                                             expression->location);
+      return NULL;
+    }
+
     return target_type;
   }
 
@@ -3904,6 +3913,18 @@ Type *type_checker_check_binary_expression(TypeChecker *checker,
   }
 
   const char *op = binop->operator;
+
+  if (left_type->refined_base && right_type->refined_base &&
+      !type_checker_types_equal(left_type, right_type) &&
+      (!left_type->refinement || !right_type->refinement)) {
+    type_checker_set_error_at_location(
+        checker, location,
+        "'%s' and '%s' are different declared types and do not mix; convert "
+        "one of them where the meaning is decided",
+        left_type->name ? left_type->name : "?",
+        right_type->name ? right_type->name : "?");
+    return NULL;
+  }
 
   // String concatenation
   if (strcmp(op, "+") == 0) {

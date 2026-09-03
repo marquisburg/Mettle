@@ -3968,6 +3968,115 @@ catch {
   Write-CaseResult -Name "rule_expand_keeps_decorators" -Passed $false -Reason $_.Exception.Message
 }
 
+# A declared type carries a rule, and the proof that a value satisfies it is
+# the compiler's: a constant, a dominating guard, an early exit, a narrower
+# type, a masked or reduced expression, a loop bound, or a matching predicate
+# call each establish it, and the program then runs on the proven values.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "refine_ok.exe"
+  $out = & $CompilerPath --build "tests/test_refine_ok.mettle" -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "proven conversions failed the build: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or $run -notmatch "50 30 -1 7 45 45 8 3") { throw "wrong output from proven program: $run" }
+  $release = Join-Path $tmpDir "refine_ok_release.exe"
+  $out = & $CompilerPath --build --release "tests/test_refine_ok.mettle" -o $release 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "release build failed: $out" }
+  $run = & $release 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or $run -notmatch "50 30 -1 7 45 45 8 3") { throw "wrong release output: $run" }
+  Write-CaseResult -Name "refine_proofs_hold" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "refine_proofs_hold" -Passed $false -Reason $_.Exception.Message
+}
+
+# What the compiler cannot prove it refuses, naming the conjunct, the value and
+# the range it knew; declared types without a predicate never mix silently.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_refine_bad.mettle" -o (Join-Path $tmpDir "refine_bad.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "unproven conversions were accepted" }
+  $expected = @(
+    "error\[P0001\]: cannot prove ``value >= 0`` for ``n``, which 'Percent' requires \(its range here is -2147483648\.\.2147483647\)",
+    "error\[P0001\]: cannot prove ``value <= 100`` for ``200``, which 'Percent' requires \(its range here is 200\.\.200\)",
+    "error\[P0001\]: cannot prove ``value <= 100`` for ``b``, which 'Percent' requires \(its range here is 0\.\.255\)",
+    "error\[P0001\]: cannot prove ``is_even\(value\)`` for ``n``, which 'Even' requires",
+    "error\[P0001\]: cannot prove ``value <= 100`` for ``n``, which 'Percent' requires \(its range here is 0\.\.2147483647\)",
+    "'Meters' and 'Seconds' are different declared types and do not mix",
+    "'Meters' is a declared type; a plain 'float64' becomes one where the meaning is decided: \(Meters\)value"
+  )
+  foreach ($pattern in $expected) {
+    if ($out -notmatch $pattern) { throw "missing diagnostic /$pattern/ in: $out" }
+  }
+  Write-CaseResult -Name "refine_unproven_is_refused" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "refine_unproven_is_refused" -Passed $false -Reason $_.Exception.Message
+}
+
+# Optimize only where proven: an index whose declared type pins its range
+# inside the array needs no bounds check, and --explain names the proof and
+# the pass that consumed it.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "refine_elide.exe"
+  $out = & $CompilerPath --build "tests/test_refine_elide.mettle" -o $exe --dump-ir 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "build failed: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or $run -notmatch "49 9") { throw "wrong output: $run" }
+  $ir = Get-Content (Join-Path $tmpDir ("refine_elide" + $script:ObjExt + ".ir")) -Raw
+  $getStart = $ir.IndexOf("function get {")
+  $plainStart = $ir.IndexOf("function get_plain {")
+  $mainStart = $ir.IndexOf("function main {")
+  if ($getStart -lt 0 -or $plainStart -lt 0 -or $mainStart -lt 0) { throw "the IR sidecar does not list the three functions" }
+  $getBody = $ir.Substring($getStart, $plainStart - $getStart)
+  if ($getBody -match "Array index out of bounds") { throw "the refined index still carries a bounds check: $getBody" }
+  $plainBody = $ir.Substring($plainStart, $mainStart - $plainStart)
+  if ($plainBody -notmatch "Array index out of bounds") { throw "the plain int32 index lost its bounds check: $plainBody" }
+  $out = & $CompilerPath --build "tests/test_refine_elide.mettle" -o (Join-Path $tmpDir "refine_elide_x.exe") --release --explain 2>&1 | Out-String
+  if ($out -notmatch "proven by type") { throw "--explain does not report the proof: $out" }
+  if ($out -notmatch "'Digit' holds 0\.\.9, inside an array of 10\s+\[P0002\]") { throw "--explain does not name the range and the array: $out" }
+  $out = & $CompilerPath --build "tests/test_refine_elide.mettle" -o (Join-Path $tmpDir "refine_elide_s.exe") --safe --release --explain 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0 -or $out -notmatch "proven by type") { throw "--safe does not honour the proof: $out" }
+  Write-CaseResult -Name "refine_range_elides_bounds_check" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "refine_range_elides_bounds_check" -Passed $false -Reason $_.Exception.Message
+}
+
+# Verify: the interpreter checks every proven conversion under mettle test,
+# and it does not trust the prover. With the prover told to believe
+# everything, the honest build refuses the program and the interpreter traps
+# the value the prover let through.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath test "tests/test_refine_verify.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0 -or $out -notmatch "error\[P0001\]: cannot prove ``value >= 0`` for ``x``") { throw "the honest prover accepted the lie: $out" }
+  $env:METTLE_TRUST_REFINEMENTS = "1"
+  try {
+    $out = & $CompilerPath test "tests/test_refine_verify.mettle" 2>&1 | Out-String
+  }
+  finally {
+    Remove-Item Env:\METTLE_TRUST_REFINEMENTS -ErrorAction SilentlyContinue
+  }
+  if ($out -notmatch "test proven_holds \.\.\. ok") { throw "a true proof failed under the interpreter: $out" }
+  if ($out -notmatch "test trusted_lie \.\.\. FAILED \(crashed: Fatal error: a value the compiler proved to be 'Digit' is not one\)") { throw "the interpreter did not catch the lie: $out" }
+  $out = & $CompilerPath expand "tests/test_refine_elide.mettle" 2>&1 | Out-String
+  if ($out -notmatch "type Digit = int32 where \(\(value >= 0\) && \(value < 10\)\);") { throw "expand does not print the declared type: $out" }
+  Write-CaseResult -Name "refine_interpreter_checks_the_prover" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "refine_interpreter_checks_the_prover" -Passed $false -Reason $_.Exception.Message
+}
+
 # Runtime excision: each optional component has to be absent from a binary that
 # did not ask for it, and the absence has to be checkable rather than asserted.
 # What is excisable is optional; what is mandatory is a tax, so this is the

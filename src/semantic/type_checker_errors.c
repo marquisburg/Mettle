@@ -204,6 +204,10 @@ void type_checker_report_assign_mismatch(TypeChecker *checker,
                                          const ASTNode *src_expr,
                                          SourceLocation location,
                                          Type *dest_type, Type *src_type) {
+  if (checker && checker->refine_failure) {
+    type_checker_report_refinement_failure(checker, src_expr, location);
+    return;
+  }
   const char *expected = dest_type && dest_type->name ? dest_type->name : "?";
   const char *actual = src_type && src_type->name ? src_type->name : "?";
   size_t span_length = src_expr ? type_checker_node_span_length(src_expr) : 1;

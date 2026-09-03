@@ -154,6 +154,8 @@ void type_checker_register_test_builtin(TypeChecker *checker, const char *name,
 
 void type_checker_destroy(TypeChecker *checker) {
   if (checker) {
+    free(checker->guards);
+    free(checker->refine_failure);
     // Clean up built-in types
     type_destroy(checker->builtin_int8);
     type_destroy(checker->builtin_int16);
@@ -370,6 +372,10 @@ static const char *type_decl_name(const ASTNode *decl) {
     const EnumDeclaration *en = (const EnumDeclaration *)decl->data;
     return en ? en->name : NULL;
   }
+  if (decl->type == AST_TYPE_DECLARATION) {
+    const TypeDeclaration *td = (const TypeDeclaration *)decl->data;
+    return td ? td->name : NULL;
+  }
   return NULL;
 }
 
@@ -478,6 +484,10 @@ static int type_decl_refers_to(const ASTNode *decl, const char *name) {
   if (!decl || !name) {
     return 0;
   }
+  if (decl->type == AST_TYPE_DECLARATION) {
+    const TypeDeclaration *td = (const TypeDeclaration *)decl->data;
+    return td && type_text_names(td->base_type, name);
+  }
   if (decl->type == AST_STRUCT_DECLARATION) {
     const StructDeclaration *s = (const StructDeclaration *)decl->data;
     if (!s) {
@@ -582,7 +592,8 @@ static int type_checker_register_types(TypeChecker *checker, Program *prog,
     ASTNode *decl = prog->declarations[i];
     ComptimeDeclScope expansion;
     if (!decl || (decl->type != AST_STRUCT_DECLARATION &&
-                  decl->type != AST_ENUM_DECLARATION)) {
+                  decl->type != AST_ENUM_DECLARATION &&
+                  decl->type != AST_TYPE_DECLARATION)) {
       continue;
     }
     type_checker_enter_expansion_decl(checker, decl, &expansion);
@@ -627,9 +638,11 @@ static int type_checker_register_types(TypeChecker *checker, Program *prog,
       remaining--;
       settled++;
       type_checker_enter_expansion_decl(checker, decl, &expansion);
-      if (decl->type == AST_STRUCT_DECLARATION
-              ? !type_checker_process_struct_declaration(checker, decl)
-              : !type_checker_process_enum_declaration(checker, decl)) {
+      if (decl->type == AST_TYPE_DECLARATION
+              ? !type_checker_process_type_declaration(checker, decl)
+              : decl->type == AST_STRUCT_DECLARATION
+                    ? !type_checker_process_struct_declaration(checker, decl)
+                    : !type_checker_process_enum_declaration(checker, decl)) {
         ok = 0;
       }
       type_checker_leave_expansion_decl(checker, &expansion);
@@ -720,6 +733,20 @@ int type_checker_check_program(TypeChecker *checker, ASTNode *program) {
     }
   }
 
+  for (size_t i = 0; i < prog->declaration_count; i++) {
+    ASTNode *decl = prog->declarations[i];
+    if (decl && decl->type == AST_TYPE_DECLARATION) {
+      ComptimeDeclScope expansion;
+      type_checker_enter_expansion_decl(checker, decl, &expansion);
+      if (!type_checker_check_type_predicate(checker, decl)) {
+        ok = 0;
+      }
+      type_checker_leave_expansion_decl(checker, &expansion);
+    }
+  }
+  if (!ok)
+    return 0;
+
   /* Pass 3: process the remaining declarations, globals before function
    * bodies. A function may call one declared below it, and a type may name one
    * declared below it; a global was the odd one out, so a function reading a
@@ -732,7 +759,8 @@ int type_checker_check_program(TypeChecker *checker, ASTNode *program) {
       ASTNode *decl = prog->declarations[i];
       ComptimeDeclScope expansion;
       if (!decl || decl->type == AST_STRUCT_DECLARATION ||
-          decl->type == AST_ENUM_DECLARATION) {
+          decl->type == AST_ENUM_DECLARATION ||
+          decl->type == AST_TYPE_DECLARATION) {
         continue;
       }
       if ((decl->type == AST_FUNCTION_DECLARATION) != functions_now) {

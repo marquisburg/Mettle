@@ -618,6 +618,10 @@ static const char *declaration_name(const ASTNode *node) {
     const EnumDeclaration *decl = (const EnumDeclaration *)node->data;
     return decl ? decl->name : NULL;
   }
+  case AST_TYPE_DECLARATION: {
+    const TypeDeclaration *decl = (const TypeDeclaration *)node->data;
+    return decl ? decl->name : NULL;
+  }
   default:
     return NULL;
   }
@@ -1008,6 +1012,14 @@ static int resolve_composed_names(TypeChecker *checker, ASTNode *node) {
     }
     break;
   }
+  case AST_TYPE_DECLARATION: {
+    TypeDeclaration *decl = (TypeDeclaration *)node->data;
+    if (decl) {
+      slot = &decl->composed_name;
+      name_slot = &decl->name;
+    }
+    break;
+  }
   case AST_VAR_DECLARATION: {
     VarDeclaration *decl = (VarDeclaration *)node->data;
     if (decl) {
@@ -1061,6 +1073,11 @@ int type_checker_check_composed_names(TypeChecker *checker, ASTNode *node) {
   }
   case AST_STRUCT_DECLARATION: {
     const StructDeclaration *decl = (const StructDeclaration *)node->data;
+    composed = decl ? decl->composed_name : NULL;
+    break;
+  }
+  case AST_TYPE_DECLARATION: {
+    const TypeDeclaration *decl = (const TypeDeclaration *)node->data;
     composed = decl ? decl->composed_name : NULL;
     break;
   }

@@ -473,6 +473,23 @@ static void print_declaration(AstPrinter *printer, const ASTNode *node) {
     break;
   }
 
+  case AST_TYPE_DECLARATION: {
+    const TypeDeclaration *decl = (const TypeDeclaration *)node->data;
+    if (!decl) {
+      break;
+    }
+    if (decl->is_exported) {
+      fputs("export ", printer->out);
+    }
+    fprintf(printer->out, "type %s = %s", decl->name ? decl->name : "<name>",
+            decl->base_type ? decl->base_type : "<base>");
+    if (decl->predicate) {
+      fputs(" where ", printer->out);
+      print_expression(printer, decl->predicate);
+    }
+    fputs(";\n\n", printer->out);
+    break;
+  }
   case AST_ENUM_DECLARATION: {
     const EnumDeclaration *decl = (const EnumDeclaration *)node->data;
     if (!decl) {

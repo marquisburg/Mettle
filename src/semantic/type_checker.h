@@ -19,6 +19,7 @@ typedef struct ComptimeSequenceArena ComptimeSequenceArena;
 /* One `comptime for` binding in effect outside any scope; see
    comptime_bindings below. Defined in comptime_expand.c. */
 struct ComptimeBindingSlot;
+struct TypeCheckerGuard;
 
 #include "symbol_table.h"
 
@@ -27,6 +28,10 @@ typedef struct {
   int has_error;
   char *error_message;
   ErrorReporter *error_reporter;
+  struct TypeCheckerGuard *guards;
+  size_t guard_count;
+  size_t guard_capacity;
+  char *refine_failure;
   // Built-in type instances
   Type *builtin_int8;
   Type *builtin_int16;
@@ -160,6 +165,27 @@ int type_checker_is_floating_type(Type *type);
 int type_checker_is_numeric_type(Type *type);
 
 // Type inference and promotion functions
+int type_checker_body_assigns(const ASTNode *node, const char *name);
+int type_checker_push_guard(TypeChecker *checker, ASTNode *condition,
+                            int negated);
+int type_checker_push_range_guard(TypeChecker *checker, const char *name,
+                                  int has_min, long long min, int has_max,
+                                  long long max);
+size_t type_checker_guard_depth(const TypeChecker *checker);
+void type_checker_pop_guards(TypeChecker *checker, size_t depth);
+int type_checker_expression_range(TypeChecker *checker, ASTNode *expr,
+                                  int *has_min, long long *min, int *has_max,
+                                  long long *max);
+int type_checker_prove_refinement(TypeChecker *checker, Type *refined,
+                                  ASTNode *expr);
+void type_checker_compute_refinement_range(TypeChecker *checker,
+                                           Type *refined);
+int type_checker_refined_index_fits(const Type *index_type, size_t length);
+void type_checker_report_refinement_failure(TypeChecker *checker,
+                                            const ASTNode *expr,
+                                            SourceLocation location);
+Type *type_checker_refinement_base(Type *type);
+
 Type *type_checker_promote_types(TypeChecker *checker, Type *left, Type *right,
                                  const char *operator);
 Type *type_checker_get_larger_type(TypeChecker *checker, Type *type1,
@@ -407,6 +433,10 @@ int type_checker_process_struct_declaration(TypeChecker *checker,
                                             ASTNode *struct_decl);
 int type_checker_process_enum_declaration(TypeChecker *checker,
                                           ASTNode *enum_decl);
+int type_checker_process_type_declaration(TypeChecker *checker,
+                                          ASTNode *type_decl);
+int type_checker_check_type_predicate(TypeChecker *checker,
+                                      ASTNode *type_decl);
 int type_checker_process_declaration(TypeChecker *checker,
                                      ASTNode *declaration);
 

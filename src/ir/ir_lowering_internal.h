@@ -67,6 +67,7 @@ typedef struct {
    * level, because the proving happens in ir_safety_resolve_program() rather
    * than by dropping the checks. */
   int emit_safety_checks;
+  int emit_refinement_checks;
   /* Declared return type name of the function currently being lowered. Used
    * to give a width-less float literal in `return <lit>;` the correct
    * single/double precision (literals always infer to float64 otherwise). */
@@ -306,6 +307,10 @@ char *ir_new_label_name(IRLoweringContext *context, const char *prefix);
 int ir_emit(IRLoweringContext *context, IRFunction *function,
                    const IRInstruction *instruction);
 
+extern int g_ir_lowering_refinement_checks;
+int ir_emit_refinement_check(IRLoweringContext *context, IRFunction *function,
+                             SourceLocation location, const IROperand *value,
+                             const Type *refined);
 int ir_emit_runtime_trap_ex(IRLoweringContext *context,
                                    IRFunction *function,
                                    SourceLocation location, uint32_t kind,

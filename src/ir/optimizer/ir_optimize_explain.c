@@ -423,6 +423,53 @@ void ir_explain_safety_note(const char *file, size_t line,
   note->kind = (int)kind;
 }
 
+typedef struct {
+  size_t line;
+  char *function_name;
+  char *type_name;
+  long long min;
+  long long max;
+  size_t length;
+} IRExplainTypedNote;
+
+static MTLC_THREAD_LOCAL IRExplainTypedNote *g_typed = NULL;
+static MTLC_THREAD_LOCAL size_t g_typed_count = 0;
+static MTLC_THREAD_LOCAL size_t g_typed_capacity = 0;
+static MTLC_THREAD_LOCAL size_t g_typed_total = 0;
+
+void ir_explain_safety_typed_note(const char *file, size_t line,
+                                  const char *function_name,
+                                  const char *type_name, long long min,
+                                  long long max, size_t length) {
+  if (!g_safety_collect) {
+    return;
+  }
+  if (g_safety_focus && file &&
+      strcmp(ir_explain_path_basename(file), g_safety_focus) != 0) {
+    return;
+  }
+  g_typed_total++;
+  if (g_typed_count >= IR_EXPLAIN_SAFETY_MAX_NOTES) {
+    return;
+  }
+  if (g_typed_count >= g_typed_capacity) {
+    size_t new_cap = g_typed_capacity ? g_typed_capacity * 2 : 16;
+    IRExplainTypedNote *grown = realloc(g_typed, new_cap * sizeof(*grown));
+    if (!grown) {
+      return;
+    }
+    g_typed = grown;
+    g_typed_capacity = new_cap;
+  }
+  IRExplainTypedNote *note = &g_typed[g_typed_count++];
+  note->line = line;
+  note->function_name = function_name ? strdup(function_name) : NULL;
+  note->type_name = type_name ? strdup(type_name) : NULL;
+  note->min = min;
+  note->max = max;
+  note->length = length;
+}
+
 void ir_explain_safety_totals(size_t emitted, size_t proved, size_t hoisted,
                               size_t spanned, size_t exempt,
                               size_t extent_tests, size_t region_calls) {
@@ -2195,6 +2242,44 @@ static void ir_explain_json_remark(const IRExplainRemark *r, const char *kind,
  * usually actionable: a constant-extent comparison is a couple of
  * instructions, while a runtime call means the compiler could not see how
  * large the object was, which is often a loop bound it could have been told. */
+static void ir_explain_typed_flush(void) {
+  if (g_explain_json) {
+    ir_explain_json_raw("\"proven_by_type\":[");
+    for (size_t i = 0; i < g_typed_count; i++) {
+      const IRExplainTypedNote *n = &g_typed[i];
+      ir_explain_json_raw("%s{\"line\":%zu,\"type\":", i ? "," : "",
+                          n->line);
+      ir_explain_json_str(n->type_name);
+      ir_explain_json_raw(",\"min\":%lld,\"max\":%lld,\"length\":%zu}",
+                          n->min, n->max, n->length);
+    }
+    ir_explain_json_raw("],");
+  }
+  if (!g_explain || g_typed_total == 0) {
+    return;
+  }
+  ir_explain_print_header("proven by type");
+  ir_explain_emit("  %zu bounds check%s not emitted: the index's declared "
+                  "type already proves it in range\n",
+                  g_typed_total, g_typed_total == 1 ? "" : "s");
+  for (size_t i = 0; i < g_typed_count; i++) {
+    const IRExplainTypedNote *n = &g_typed[i];
+    ir_explain_emit("  %sline %zu%s%s%s: '%s' holds %lld..%lld, inside an "
+                    "array of %zu  %s[P0002]%s\n",
+                    clr(EXPLAIN_BOLD), n->line, clr(EXPLAIN_RESET),
+                    n->function_name ? " in " : "",
+                    n->function_name ? n->function_name : "",
+                    n->type_name ? n->type_name : "?", n->min, n->max,
+                    n->length, clr(EXPLAIN_DIM), clr(EXPLAIN_RESET));
+    ir_explain_echo_source(n->line);
+  }
+  if (g_typed_total > g_typed_count) {
+    ir_explain_emit("  %s(%zu more not listed)%s\n", clr(EXPLAIN_DIM),
+                    g_typed_total - g_typed_count, clr(EXPLAIN_RESET));
+  }
+  ir_explain_emit("\n");
+}
+
 static void ir_explain_safety_flush(void) {
   if (g_explain_json) {
     ir_explain_json_raw("\"safety\":{\"enabled\":%s",
@@ -2221,6 +2306,7 @@ static void ir_explain_safety_flush(void) {
     ir_explain_json_raw("]},");
   }
 
+  ir_explain_typed_flush();
   if (!g_explain || !g_safety_have_totals) {
     return;
   }

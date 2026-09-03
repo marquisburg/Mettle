@@ -2851,6 +2851,20 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
 
   /* Runtime guard traps (null-check, bounds) abort the program. */
   if (strncmp(name, "mettle_crash_trap", 17) == 0) {
+    const unsigned char *message = NULL;
+    size_t message_length = 0;
+    if (strcmp(name, "mettle_crash_trap_ex") == 0 && arg_count >= 2 &&
+        ii_read_string(machine, (unsigned long long)ii_as_int(&args[1]),
+                       &message, &message_length) &&
+        message && message_length > 0) {
+      char detail[160];
+      size_t take = message_length < sizeof(detail) - 1 ? message_length
+                                                        : sizeof(detail) - 1;
+      memcpy(detail, message, take);
+      detail[take] = '\0';
+      ii_fail(machine, IR_INTERP_GUARD_TRAP, detail);
+      return -1;
+    }
     ii_fail(machine, IR_INTERP_GUARD_TRAP, name);
     return -1;
   }

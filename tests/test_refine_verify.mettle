@@ -1,0 +1,4 @@
+type Digit = int32 where value >= 0 && value < 10;
+fn take(d: Digit) -> int32 { return d; }
+@test fn proven_holds() -> int32 { var d: Digit = 5; assert_eq(take(d), 5); return 0; }
+@test fn trusted_lie() -> int32 { var x: int32 = 50; var d: Digit = x; assert_eq(take(d), 50); return 0; }

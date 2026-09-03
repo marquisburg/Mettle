@@ -943,6 +943,8 @@ static int parser_parse_decorator_chain(Parser *parser, ParsedDecorators *out) {
 }
 
 static ASTNode *parser_parse_comptime_for(Parser *parser, int declarations);
+static ASTNode *parser_parse_type_declaration(Parser *parser);
+static char *parser_parse_type_annotation(Parser *parser);
 
 /* Function decorators: `@inline` / `@noinline` / `@pure` / `@simd` may
  * prefix a (possibly `export`-qualified) function declaration. Parse the
@@ -1033,10 +1035,63 @@ static ASTNode *parser_parse_extern_declaration(Parser *parser) {
   return NULL;
 }
 
+static ASTNode *parser_parse_type_declaration(Parser *parser) {
+  SourceLocation location = parser_current_location(parser);
+  parser_advance(parser);
+  if (!parser_is_identifier_like(parser->current_token.type)) {
+    parser_set_error(parser, "Expected a type name after 'type'");
+    return NULL;
+  }
+  char *name = strdup(parser->current_token.value);
+  parser_advance(parser);
+  if (parser->current_token.type != TOKEN_EQUALS) {
+    parser_set_error(parser,
+                     "Expected '=' after the type name: a type is declared "
+                     "as 'type Name = Base where predicate;'");
+    free(name);
+    return NULL;
+  }
+  parser_advance(parser);
+  char *base = parser_parse_type_annotation(parser);
+  if (!base) {
+    free(name);
+    return NULL;
+  }
+  ASTNode *predicate = NULL;
+  if (parser->current_token.type == TOKEN_WHERE) {
+    parser_advance(parser);
+    predicate = parser_parse_expression(parser);
+    if (!predicate) {
+      free(name);
+      free(base);
+      return NULL;
+    }
+  }
+  if (parser->current_token.type != TOKEN_SEMICOLON) {
+    parser_set_error(parser, "Expected ';' after the type declaration");
+    free(name);
+    free(base);
+    if (predicate) {
+      ast_destroy_node(predicate);
+    }
+    return NULL;
+  }
+  parser_advance(parser);
+  ASTNode *decl = ast_create_type_declaration(name, base, predicate, location);
+  free(name);
+  free(base);
+  return decl;
+}
+
 static ASTNode *parser_parse_exported_declaration(Parser *parser) {
   parser_advance(parser); // consume 'export'
   ASTNode *decl = NULL;
-  if (parser->current_token.type == TOKEN_FUNCTION ||
+  if (parser_at_contextual_keyword(parser, "type", TOKEN_IDENTIFIER)) {
+    decl = parser_parse_type_declaration(parser);
+    if (decl && decl->data) {
+      ((TypeDeclaration *)decl->data)->is_exported = 1;
+    }
+  } else if (parser->current_token.type == TOKEN_FUNCTION ||
       parser->current_token.type == TOKEN_FN) {
     decl = parser_parse_function_declaration(parser);
     if (decl && decl->data) {
@@ -1381,6 +1436,9 @@ ASTNode *parser_parse_declaration(Parser *parser) {
   }
   if (parser_at_contextual_keyword(parser, "rewrite", TOKEN_IDENTIFIER)) {
     return parser_parse_rewrite_declaration(parser);
+  }
+  if (parser_at_contextual_keyword(parser, "type", TOKEN_IDENTIFIER)) {
+    return parser_parse_type_declaration(parser);
   }
 
   if (parser->current_token.type == TOKEN_AT) {

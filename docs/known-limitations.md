@@ -82,6 +82,25 @@ expansion runs after those are registered and before the generated ones are, so
 The binding cannot appear where a type goes. `f.type` answers `f.type.size` and
 `f.type.kind`, and cannot be written as a parameter, return, or field type.
 
+## Declared types
+
+The prover behind `type Name = Base where predicate;` is deliberately cheap.
+It follows integer ranges through constants, narrower types, `+`, `-`, `*`,
+`/` and `%` by a positive constant, `&` with a non-negative mask, `>>` by a
+constant, `for` ranges, and the comparisons in dominating `if` and `while`
+conditions, including the negated condition after an `if` that returns. A
+predicate that is not a comparison, such as `is_valid(value)`, is proven only
+by a guard that repeats it on the same expression. Float predicates are proven
+by constants and by guards, never by arithmetic. Nothing is proven across a
+call: a function that checks its argument does not make the caller's value
+proven.
+
+A declared type refines a number, a bool, a char, a string, a pointer or a
+slice. A struct, an enum or an array cannot be the base.
+
+`mettle test` checks the range conjuncts of a proven conversion as it runs.
+A conjunct that calls a function is not re-evaluated there.
+
 ## Closures
 
 A plain function value already sitting in a variable is not adapted to a

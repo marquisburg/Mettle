@@ -1,0 +1,33 @@
+type Percent = int32 where value >= 0 && value <= 100;
+type Meters = float64;
+type Seconds = float64;
+fn is_even(n: int32) -> bool { return n % 2 == 0; }
+type Even = int32 where is_even(value);
+
+fn takes(p: Percent) -> int32 { return p; }
+
+fn unproven(n: int32, b: uint8) -> int32 {
+  var a: Percent = n;
+  var c: Percent = 200;
+  var d: Percent = b;
+  var e: Percent = (Percent)n;
+  var f: Even = n;
+  return takes(n) + a + c + d + e + f;
+}
+
+fn half_guard(n: int32) -> int32 {
+  if (n >= 0) {
+    var p: Percent = n;
+    return p;
+  }
+  return 0;
+}
+
+fn mixed(m: Meters, s: Seconds, x: float64) -> float64 {
+  var bad: float64 = m + s;
+  var m2: Meters = x;
+  var s2: Seconds = m;
+  return bad + m2 + s2;
+}
+
+fn main() -> int32 { return unproven(5, 7) + half_guard(3) + (int32)mixed(1.0, 2.0, 3.0); }

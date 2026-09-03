@@ -472,6 +472,97 @@ Several bounds join with `+`, as in `<T: Addable + SignedNumber>`.
 Each set of type arguments produces its own copy of the function at compile
 time.
 
+## Declared types
+
+A type can carry a rule of its own. `type Name = Base where predicate;`
+declares a type whose every value is a `Base` that satisfies the predicate,
+written over `value`:
+
+```mettle
+type Percent = int32 where value >= 0 && value <= 100;
+type Digit = int32 where value >= 0 && value < 10;
+type Meters = float64;
+type Seconds = float64;
+```
+
+A `Percent` is an `int32` everywhere one is read: it adds, compares, indexes
+and prints as one, and it flows into an `int32` binding without ceremony. The
+other direction is the point. An `int32` becomes a `Percent` only where the
+compiler can prove the predicate, and the proof is never written down:
+
+```mettle
+fn report(p: Percent) -> int32 { return p; }
+
+fn from_guard(n: int32) -> int32 {
+  if (n >= 0 && n <= 100) {
+    var p: Percent = n;
+    return report(p);
+  }
+  return -1;
+}
+
+fn from_early_exit(n: int32) -> int32 {
+  if (n > 100) { return -1; }
+  if (n < 0) { return -1; }
+  var p: Percent = n;
+  return p;
+}
+
+fn from_arithmetic(n: int32, b: uint8) -> int32 {
+  var masked: Percent = n & 63;
+  var small: Digit = (int32)b % 10;
+  return masked + small;
+}
+```
+
+The compiler proves what is cheap: a constant, the value's own type (a `uint8`
+is 0..255, a `Digit` is 0..9), arithmetic it can bound (`&` with a constant
+mask, `%`, `+`, `-`, `*`, `/` over known ranges), a `for` range, a dominating
+`if` whose condition implies the predicate, an `if` that returns and so rules
+the other case out, and a guard that repeats the predicate itself:
+
+```mettle
+fn is_even(n: int32) -> bool { return n % 2 == 0; }
+type Even = int32 where is_even(value);
+
+fn halve(n: int32) -> int32 {
+  if (is_even(n)) {
+    var e: Even = n;
+    return e / 2;
+  }
+  return 0;
+}
+```
+
+Past that it refuses to guess, and it says what it could not prove:
+
+```text
+error[P0001]: cannot prove `value <= 100` for `b`, which 'Percent' requires
+(its range here is 0..255)
+```
+
+A cast, `(Percent)n`, is the same conversion spelled out, and it needs the
+same proof. There is no way to assert a value into a declared type.
+
+A declared type without a predicate is a unit. `Meters` and `Seconds` never
+mix: `m + s` is an error, `m + m` is a `Meters`, `m * 2.0` is a `Meters`, and
+`plain / s` is a `float64`. A plain `float64` becomes a `Meters` only by a
+cast, so the place the meaning is decided is written where it is decided.
+
+The rule pays back in the optimizer. An index whose declared type pins its
+range inside the array needs no bounds check, so none is emitted, in debug,
+release and `--safe` builds alike, and `--explain` says so under "proven by
+type" with the range and the array it was checked against:
+
+```mettle
+fn get(a: int32[10], d: Digit) -> int32 { return a[d]; }
+```
+
+`mettle test`, `mettle trace` and `--verify` do not take the prover's word for
+it: every proven conversion is checked as the interpreter runs, and a value
+that violates its type stops the run naming the type. The prover is code, and
+code is not trusted on its own authority.
+
 ## Conversions
 
 Widening happens on its own. Assigning an `int32` to an `int64`, or a

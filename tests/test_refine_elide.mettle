@@ -1,0 +1,11 @@
+import "std/io";
+type Digit = int32 where value >= 0 && value < 10;
+fn get(a: int32[10], d: Digit) -> int32 { return a[d]; }
+fn get_plain(a: int32[10], i: int32) -> int32 { return a[i]; }
+fn main() -> int32 {
+  var a: int32[10];
+  for i in 0..10 { a[i] = i * i; }
+  var d: Digit = 7;
+  println("{get(a, d)} {get_plain(a, 3)}");
+  return 0;
+}

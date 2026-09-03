@@ -773,12 +773,26 @@ Type *type_checker_parse_function_pointer_type(TypeChecker *checker,
 }
 
 
+Type *type_checker_refinement_base(Type *type) {
+  while (type && type->refined_base) {
+    type = type->refined_base;
+  }
+  return type;
+}
+
 int type_checker_types_equal(const Type *lhs, const Type *rhs) {
   if (lhs == rhs) {
     return 1;
   }
   if (!lhs || !rhs) {
     return 0;
+  }
+  if (lhs->refined_base || rhs->refined_base) {
+    return lhs->refined_base && rhs->refined_base && lhs->name && rhs->name &&
+           strcmp(lhs->name, rhs->name) == 0 &&
+           (lhs->qualified_name == rhs->qualified_name ||
+            (lhs->qualified_name && rhs->qualified_name &&
+             strcmp(lhs->qualified_name, rhs->qualified_name) == 0));
   }
   if (lhs->kind != rhs->kind) {
     return 0;
@@ -1283,8 +1297,54 @@ int type_checker_is_numeric_type(Type *type) {
 
 // Type inference and promotion functions implementation
 
+static Type *type_checker_promote_base_types(TypeChecker *checker, Type *left,
+                                             Type *right,
+                                             const char *operator);
+
 Type *type_checker_promote_types(TypeChecker *checker, Type *left, Type *right,
                                  const char *operator) {
+  Type *result;
+  Type *unit = NULL;
+  if (!checker || !left || !right || !operator)
+    return NULL;
+  if (left->refined_base || right->refined_base) {
+    int left_refined = left->refined_base != NULL;
+    int right_refined = right->refined_base != NULL;
+    if (left_refined && right_refined &&
+        !type_checker_types_equal(left, right) &&
+        (!left->refinement || !right->refinement)) {
+      return NULL;
+    }
+    if (left_refined && !left->refinement) {
+      unit = left;
+    } else if (right_refined && !right->refinement) {
+      unit = right;
+    }
+    result = type_checker_promote_base_types(
+        checker, type_checker_refinement_base(left),
+        type_checker_refinement_base(right), operator);
+    if (unit && result &&
+        type_checker_types_equal(result, type_checker_refinement_base(unit)) &&
+        (strcmp(operator, "+") == 0 || strcmp(operator, "-") == 0 ||
+         strcmp(operator, "*") == 0 || strcmp(operator, "/") == 0)) {
+      if (left_refined && right_refined) {
+        return strcmp(operator, "+") == 0 || strcmp(operator, "-") == 0
+                   ? unit
+                   : result;
+      }
+      if (strcmp(operator, "/") == 0 && unit == right) {
+        return result;
+      }
+      return unit;
+    }
+    return result;
+  }
+  return type_checker_promote_base_types(checker, left, right, operator);
+}
+
+static Type *type_checker_promote_base_types(TypeChecker *checker, Type *left,
+                                             Type *right,
+                                             const char *operator) {
   if (!checker || !left || !right || !operator)
     return NULL;
 
@@ -1393,6 +1453,13 @@ int type_checker_get_type_rank(Type *type) {
 int type_checker_is_cast_valid(Type *from, Type *to) {
   if (!from || !to)
     return 0;
+  if (from->refined_base || to->refined_base) {
+    if (type_checker_types_equal(from, to)) {
+      return 1;
+    }
+    return type_checker_is_cast_valid(type_checker_refinement_base(from),
+                                      type_checker_refinement_base(to));
+  }
 
   /* Reflection types have no runtime representation, so they cannot be
    * cast to or from anything, including each other. */
@@ -1529,6 +1596,12 @@ int type_checker_is_assignable(TypeChecker *checker, Type *dest_type,
   }
   if (!checker || !dest_type || !src_type)
     return 0;
+  if (dest_type->refined_base) {
+    return type_checker_types_equal(dest_type, src_type);
+  }
+  if (src_type->refined_base) {
+    src_type = type_checker_refinement_base(src_type);
+  }
 
   /* A closure (function-pointer type carrying an environment) and a thin
    * function pointer are not interchangeable: a thin call site dispatches
@@ -1665,6 +1738,57 @@ int type_checker_is_assignable_from(TypeChecker *checker, Type *dest_type,
 
   if (type_checker_is_assignable(checker, dest_type, src_type)) {
     return 1;
+  }
+  if (checker && dest_type && src_type && dest_type->refined_base) {
+    Type *dest_base = type_checker_refinement_base(dest_type);
+    char message[320];
+    if (!type_checker_is_assignable_from(checker, dest_base, src_type,
+                                         src_expr)) {
+      return 0;
+    }
+    if (!src_expr) {
+      return 0;
+    }
+    if (!dest_type->refinement) {
+      int literal = src_expr->type == AST_NUMBER_LITERAL ||
+                    src_expr->type == AST_STRING_LITERAL ||
+                    (src_expr->type == AST_UNARY_EXPRESSION &&
+                     ((UnaryExpression *)src_expr->data)->operand &&
+                     ((UnaryExpression *)src_expr->data)->operand->type ==
+                         AST_NUMBER_LITERAL);
+      if (src_type->refined_base) {
+        snprintf(message, sizeof(message),
+                 "'%s' and '%s' are different declared types and do not "
+                 "mix; convert one of them where the meaning is decided: "
+                 "(%s)value",
+                 src_type->name ? src_type->name : "?",
+                 dest_type->name ? dest_type->name : "?",
+                 dest_type->name ? dest_type->name : "?");
+        free(checker->refine_failure);
+        checker->refine_failure = strdup(message);
+        return 0;
+      }
+      if (!literal) {
+        snprintf(message, sizeof(message),
+                 "'%s' is a declared type; a plain '%s' becomes one where "
+                 "the meaning is decided: (%s)value",
+                 dest_type->name ? dest_type->name : "?",
+                 src_type->name ? src_type->name : "?",
+                 dest_type->name ? dest_type->name : "?");
+        free(checker->refine_failure);
+        checker->refine_failure = strdup(message);
+        return 0;
+      }
+      src_expr->proven_refinement = dest_type;
+      return 1;
+    }
+    return type_checker_prove_refinement(checker, dest_type, src_expr);
+  }
+  if (src_type && src_type->refined_base) {
+    src_type = type_checker_refinement_base(src_type);
+    if (type_checker_is_assignable(checker, dest_type, src_type)) {
+      return 1;
+    }
   }
   if (src_expr && checker && dest_type && src_type &&
       (dest_type->kind == TYPE_FLOAT16 || dest_type->kind == TYPE_BFLOAT16) &&

@@ -794,6 +794,124 @@ Type *type_checker_instantiate_generic_enum(TypeChecker *checker,
   return te;
 }
 
+int type_checker_process_type_declaration(TypeChecker *checker,
+                                          ASTNode *type_decl_node) {
+  TypeDeclaration *decl =
+      type_decl_node ? (TypeDeclaration *)type_decl_node->data : NULL;
+  Type *base;
+  Type *refined;
+  Symbol *symbol;
+  if (!checker || !decl || !decl->name || !decl->base_type) {
+    return 0;
+  }
+  if (type_checker_get_type_by_name(checker, decl->name)) {
+    type_checker_set_error_at_location(checker, type_decl_node->location,
+                                       "Type '%s' already declared",
+                                       decl->name);
+    return 0;
+  }
+  base = type_checker_get_type_by_name(checker, decl->base_type);
+  if (!base) {
+    type_checker_set_error_at_location(checker, type_decl_node->location,
+                                       "Unknown base type '%s' for type '%s'",
+                                       decl->base_type, decl->name);
+    return 0;
+  }
+  if (base->kind == TYPE_VOID || base->kind == TYPE_ARRAY ||
+      base->kind == TYPE_STRUCT || base->kind == TYPE_ENUM ||
+      base->kind == TYPE_TAGGED_ENUM || base->kind == TYPE_FUNCTION_POINTER ||
+      type_is_comptime_only(base)) {
+    type_checker_set_error_at_location(
+        checker, type_decl_node->location,
+        "a declared type refines a number, a bool, a char, a string, a "
+        "pointer or a slice; '%s' is none of those",
+        decl->base_type);
+    return 0;
+  }
+  refined = type_create(base->kind, decl->name);
+  if (!refined) {
+    type_checker_set_error_at_location(checker, type_decl_node->location,
+                                       "Failed to create type '%s'",
+                                       decl->name);
+    return 0;
+  }
+  refined->size = base->size;
+  refined->alignment = base->alignment;
+  refined->base_type = base->base_type;
+  refined->array_size = base->array_size;
+  refined->view_rank = base->view_rank;
+  refined->is_volatile = base->is_volatile;
+  refined->refined_base = base;
+  refined->refinement = decl->predicate;
+  type_checker_intern_type(checker, refined);
+  type_checker_set_qualified_name(checker, refined,
+                                  type_decl_node->location.filename);
+  symbol = symbol_create(decl->name, SYMBOL_STRUCT, refined);
+  if (!symbol) {
+    return 0;
+  }
+  symbol->decl_line = type_decl_node->location.line;
+  symbol->decl_column = type_decl_node->location.column;
+  symbol->decl_file = type_decl_node->location.filename;
+  if (!symbol_table_declare(checker->symbol_table, symbol)) {
+    symbol_destroy(symbol);
+    type_checker_set_error_at_location(checker, type_decl_node->location,
+                                       "Type '%s' already declared",
+                                       decl->name);
+    return 0;
+  }
+  return 1;
+}
+
+int type_checker_check_type_predicate(TypeChecker *checker,
+                                      ASTNode *type_decl_node) {
+  TypeDeclaration *decl =
+      type_decl_node ? (TypeDeclaration *)type_decl_node->data : NULL;
+  Type *refined;
+  Type *base;
+  if (!checker || !decl || !decl->name) {
+    return 0;
+  }
+  refined = type_checker_get_type_by_name(checker, decl->name);
+  if (!refined || !refined->refined_base) {
+    return 1;
+  }
+  base = refined->refined_base;
+  if (decl->predicate) {
+    Type *predicate_type;
+    Symbol *value_symbol;
+    if (!symbol_table_enter_scope(checker->symbol_table, SCOPE_BLOCK)) {
+      return 0;
+    }
+    value_symbol = symbol_create("value", SYMBOL_PARAMETER, base);
+    if (!value_symbol ||
+        !symbol_table_declare(checker->symbol_table, value_symbol)) {
+      if (value_symbol) {
+        symbol_destroy(value_symbol);
+      }
+      symbol_table_exit_scope(checker->symbol_table);
+      return 0;
+    }
+    value_symbol->is_initialized = 1;
+    value_symbol->is_used = 1;
+    predicate_type = type_checker_infer_type(checker, decl->predicate);
+    symbol_table_exit_scope(checker->symbol_table);
+    if (!predicate_type) {
+      return 0;
+    }
+    if (!type_checker_is_numeric_type(predicate_type)) {
+      type_checker_set_error_at_location(
+          checker, decl->predicate->location,
+          "the predicate of type '%s' must be a condition over `value`, "
+          "and this one is a '%s'",
+          decl->name, predicate_type->name ? predicate_type->name : "?");
+      return 0;
+    }
+  }
+  type_checker_compute_refinement_range(checker, refined);
+  return 1;
+}
+
 int type_checker_process_enum_declaration(TypeChecker *checker,
                                           ASTNode *enum_decl_node) {
   if (!checker || !enum_decl_node ||

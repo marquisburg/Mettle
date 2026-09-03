@@ -285,6 +285,91 @@ int ir_emit_null_check(IRLoweringContext *context, IRFunction *function,
   return 1;
 }
 
+static int ir_emit_refinement_side(IRLoweringContext *context,
+                                   IRFunction *function,
+                                   SourceLocation location,
+                                   const IROperand *value, const char *op,
+                                   long long bound, const char *message) {
+  IROperand holds = ir_operand_none();
+  IRInstruction compare = {0};
+  IRInstruction branch = {0};
+  IRInstruction jump = {0};
+  IRInstruction trap = {0};
+  IRInstruction ok = {0};
+  char *trap_label;
+  char *ok_label;
+  if (!ir_make_temp_operand(context, &holds)) {
+    return 0;
+  }
+  compare.op = IR_OP_BINARY;
+  compare.location = location;
+  compare.dest = holds;
+  compare.lhs = ir_operand_copy(value);
+  compare.rhs = ir_operand_int(bound);
+  compare.text = (char *)op;
+  if (!ir_emit(context, function, &compare)) {
+    ir_operand_destroy(&holds);
+    return 0;
+  }
+  trap_label = ir_new_label_name(context, "trap_refine");
+  ok_label = ir_new_label_name(context, "refined");
+  if (!trap_label || !ok_label) {
+    free(trap_label);
+    free(ok_label);
+    ir_operand_destroy(&holds);
+    ir_set_error(context, "Out of memory while lowering refinement check");
+    return 0;
+  }
+  branch.op = IR_OP_BRANCH_ZERO;
+  branch.location = location;
+  branch.lhs = holds;
+  branch.text = trap_label;
+  jump.op = IR_OP_JUMP;
+  jump.location = location;
+  jump.text = ok_label;
+  trap.op = IR_OP_LABEL;
+  trap.location = location;
+  trap.text = trap_label;
+  ok.op = IR_OP_LABEL;
+  ok.location = location;
+  ok.text = ok_label;
+  if (!ir_emit(context, function, &branch) ||
+      !ir_emit(context, function, &jump) ||
+      !ir_emit(context, function, &trap) ||
+      !ir_emit_runtime_trap_ex(context, function, location, 2u, message,
+                               value, &compare.rhs) ||
+      !ir_emit(context, function, &ok)) {
+    free(trap_label);
+    free(ok_label);
+    ir_operand_destroy(&holds);
+    return 0;
+  }
+  free(trap_label);
+  free(ok_label);
+  ir_operand_destroy(&holds);
+  return 1;
+}
+
+int ir_emit_refinement_check(IRLoweringContext *context, IRFunction *function,
+                             SourceLocation location, const IROperand *value,
+                             const Type *refined) {
+  char message[160];
+  if (!context || !function || !value || !refined ||
+      !refined->refine_has_range) {
+    return 1;
+  }
+  snprintf(message, sizeof(message),
+           "Fatal error: a value the compiler proved to be '%s' is not one",
+           refined->name ? refined->name : "?");
+  if (!ir_emit_refinement_side(context, function, location, value, ">=",
+                               refined->refine_min, message) ||
+      !ir_emit_refinement_side(context, function, location, value, "<=",
+                               refined->refine_max, message)) {
+    return 0;
+  }
+  return 1;
+}
+
 int ir_emit_bounds_check(IRLoweringContext *context,
                                 IRFunction *function, SourceLocation location,
                                 const IROperand *index, size_t array_size) {

@@ -102,6 +102,11 @@ typedef struct Type {
    * builtins and for structural types (pointers, arrays), whose `name` is
    * already unambiguous. */
   char *qualified_name;
+  struct Type *refined_base;
+  struct ASTNode *refinement;
+  int refine_has_range;
+  long long refine_min;
+  long long refine_max;
 } Type;
 
 typedef enum { SCOPE_GLOBAL, SCOPE_FUNCTION, SCOPE_BLOCK } ScopeType;

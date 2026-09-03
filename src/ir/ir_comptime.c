@@ -217,12 +217,19 @@ int ir_comptime_run_tests(IRProgram *program, ErrorReporter *reporter,
       ict_report_assert_failure(reporter, machine, fn->name);
       totals.failed++;
       break;
-    case IR_INTERP_GUARD_TRAP:
-      printf("test %s ... %sFAILED%s (crashed: runtime guard trap - null "
-             "dereference or out-of-bounds)\n",
-             display, red, reset);
+    case IR_INTERP_GUARD_TRAP: {
+      const char *detail = ir_interp_status_detail(machine);
+      if (detail && strncmp(detail, "Fatal error", 11) == 0) {
+        printf("test %s ... %sFAILED%s (crashed: %s)\n", display, red, reset,
+               detail);
+      } else {
+        printf("test %s ... %sFAILED%s (crashed: runtime guard trap - null "
+               "dereference or out-of-bounds)\n",
+               display, red, reset);
+      }
       totals.failed++;
       break;
+    }
     case IR_INTERP_TRAP:
       printf("test %s ... %sFAILED%s (trapped: %s)\n", display, red, reset,
              ir_interp_status_detail(machine));
@@ -645,11 +652,17 @@ int ir_comptime_trace(IRProgram *program, ErrorReporter *reporter,
     ir_interp_destroy(machine);
     return 0;
   }
-  case IR_INTERP_GUARD_TRAP:
-    printf("%scrashed%s: runtime guard trap (null dereference or "
-           "out-of-bounds)\n",
-           bold, reset);
+  case IR_INTERP_GUARD_TRAP: {
+    const char *detail = ir_interp_status_detail(machine);
+    if (detail && strncmp(detail, "Fatal error", 11) == 0) {
+      printf("%scrashed%s: %s\n", bold, reset, detail);
+    } else {
+      printf("%scrashed%s: runtime guard trap (null dereference or "
+             "out-of-bounds)\n",
+             bold, reset);
+    }
     break;
+  }
   case IR_INTERP_FUEL:
     printf("%sstopped%s: exceeded %lld steps (infinite loop?)\n", bold, reset,
            ICT_TRACE_FUEL);

@@ -126,6 +126,15 @@ Rule diagnostics:
 
 [Rules](rules.md) covers the R codes in context.
 
+Proof diagnostics:
+
+| Code | Meaning |
+|------|---------|
+| P0001 | A declared type's rule could not be proven here |
+| P0002 | A bounds check was proven away by a declared type (reported by `--explain`) |
+
+[Types](types.md) covers declared types and what the compiler proves.
+
 ## JSON output
 
 `--error-format=json` writes one JSON object per diagnostic to stderr, for

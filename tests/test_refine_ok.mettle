@@ -1,0 +1,66 @@
+import "std/io";
+
+type Percent = int32 where value >= 0 && value <= 100;
+type Digit = int32 where value >= 0 && value < 10;
+type Meters = float64;
+type Seconds = float64;
+
+fn is_even(n: int32) -> bool { return n % 2 == 0; }
+type Even = int32 where is_even(value);
+
+fn clamp_report(p: Percent) -> int32 { return p; }
+
+fn from_guard(n: int32) -> int32 {
+  if (n >= 0 && n <= 100) {
+    var p: Percent = n;
+    return clamp_report(p);
+  }
+  return -1;
+}
+
+fn from_early_exit(n: int32) -> int32 {
+  if (n > 100) { return -1; }
+  if (n < 0) { return -1; }
+  var p: Percent = n;
+  return p;
+}
+
+fn from_interval(n: int32, b: uint8) -> int32 {
+  var masked: Percent = n & 63;
+  var small: Digit = (int32)b % 10;
+  var sum: int32 = masked + small;
+  return sum;
+}
+
+fn from_loop() -> int32 {
+  var total: int32 = 0;
+  for i in 0..10 {
+    var d: Digit = i;
+    total = total + d;
+  }
+  return total;
+}
+
+fn from_predicate_call(n: int32) -> int32 {
+  if (is_even(n)) {
+    var e: Even = n;
+    return e;
+  }
+  return 1;
+}
+
+fn units() -> float64 {
+  var m: Meters = 3.0;
+  var more: Meters = m + m;
+  var scaled: Meters = more * 2.0;
+  var s: Seconds = 4.0;
+  var plain: float64 = scaled;
+  var ratio: float64 = plain / s;
+  return ratio;
+}
+
+fn main() -> int32 {
+  var constant: Percent = 50;
+  println("{clamp_report(constant)} {from_guard(30)} {from_guard(300)} {from_early_exit(7)} {from_interval(1000, 255)} {from_loop()} {from_predicate_call(8)} {units()}");
+  return 0;
+}

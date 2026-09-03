@@ -456,6 +456,11 @@ Type *type_create(TypeKind kind, const char *name) {
   type->generic_template_name = NULL;
   type->type_table_index = UINT32_MAX;
   type->qualified_name = NULL;
+  type->refined_base = NULL;
+  type->refinement = NULL;
+  type->refine_has_range = 0;
+  type->refine_min = 0;
+  type->refine_max = 0;
 
   // Set default sizes
   switch (kind) {

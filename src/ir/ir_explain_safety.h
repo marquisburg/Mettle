@@ -44,4 +44,9 @@ void ir_explain_safety_totals(size_t emitted, size_t proved, size_t hoisted,
                               size_t spanned, size_t exempt,
                               size_t extent_tests, size_t region_calls);
 
+void ir_explain_safety_typed_note(const char *file, size_t line,
+                                  const char *function_name,
+                                  const char *type_name, long long min,
+                                  long long max, size_t length);
+
 #endif /* IR_EXPLAIN_SAFETY_H */

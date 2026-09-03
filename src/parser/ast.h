@@ -21,6 +21,7 @@ typedef enum {
   AST_FUNCTION_DECLARATION,
   AST_STRUCT_DECLARATION,
   AST_ENUM_DECLARATION,
+  AST_TYPE_DECLARATION,
   AST_TRAIT_DECLARATION,
   AST_IMPL_DECLARATION,
   AST_METHOD_DECLARATION,
@@ -76,6 +77,7 @@ typedef struct ASTNode {
   size_t child_count;
   void *data;                 // Node-specific data
   struct Type *resolved_type; // Cached type from semantic analysis
+  struct Type *proven_refinement;
 } ASTNode;
 
 typedef struct {
@@ -212,6 +214,14 @@ typedef struct {
   char *payload_type;   // Associated data type name, e.g. "T" or "int32"
                         // NULL means this variant carries no payload
 } EnumVariant;
+
+typedef struct {
+  char *name;
+  char *base_type;
+  ASTNode *predicate;
+  int is_exported;
+  ASTNode *composed_name;
+} TypeDeclaration;
 
 typedef struct {
   char *name;
@@ -594,6 +604,8 @@ ASTNode *ast_create_struct_declaration(const char *name, char **field_names,
                                        char **field_types, size_t field_count,
                                        ASTNode **methods, size_t method_count,
                                        SourceLocation location);
+ASTNode *ast_create_type_declaration(const char *name, const char *base_type,
+                                     ASTNode *predicate, SourceLocation location);
 ASTNode *ast_create_enum_declaration(const char *name, EnumVariant *variants,
                                      size_t variant_count,
                                      SourceLocation location);
