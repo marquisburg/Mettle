@@ -1,0 +1,46 @@
+import "std/io";
+fn main() -> int32 {
+  var h: float16 = 1.5;
+  var f: float32 = (float32)h;
+  println("{(int64)(f * 2.0)}");
+  var a: float16[4] = [1.0, 2.0, 3.0, 4.0];
+  var s: float32 = 0.0;
+  for i in 0..4 { s = s + (float32)a[i]; }
+  println("{(int64)s}");
+  var bad: int64 = 0;
+  var k: int64 = 0;
+  while (k < 65536) {
+    var u: uint16 = (uint16)k;
+    var ui: int64 = (int64)u;
+    var exp: int64 = (ui >> 10) & 31;
+    var mant: int64 = ui & 1023;
+    var pu: uint16* = &u;
+    var pf: float16* = (float16*)pu;
+    var q: float16 = pf[0];
+    var g: float32 = (float32)q;
+    var q2: float16 = (float16)g;
+    var pq2: uint16* = (uint16*)(&q2);
+    var back: int64 = (int64)pq2[0];
+    if (exp == 31 && mant != 0) {
+      if (back != ((ui & 33279) | 32256)) { bad = bad + 1; }
+    } else {
+      if (back != ui) { bad = bad + 1; }
+    }
+    var pb: bfloat16* = (bfloat16*)pu;
+    var bq: bfloat16 = pb[0];
+    var bg: float32 = (float32)bq;
+    var bq2: bfloat16 = (bfloat16)bg;
+    var pbq2: uint16* = (uint16*)(&bq2);
+    var bback: int64 = (int64)pbq2[0];
+    var bexp: int64 = (ui >> 7) & 255;
+    var bmant: int64 = ui & 127;
+    if (bexp == 255 && bmant != 0) {
+      if (bback != ((ui & 65408) | 64)) { bad = bad + 1; }
+    } else {
+      if (bback != ui) { bad = bad + 1; }
+    }
+    k = k + 1;
+  }
+  println("{bad}");
+  return 0;
+}

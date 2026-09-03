@@ -756,6 +756,15 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
                                               local_name, &value,
                                               decl_type, statement->location)) {
         ir_operand_destroy(&value);
+      } else if (ir_small_float_local(context, function, declaration->name,
+                                      local_name, decl_type)) {
+        int stored = ir_emit_small_float_home_store(
+            context, function, local_name, decl_type, &value,
+            statement->location);
+        ir_operand_destroy(&value);
+        if (!stored) {
+          return 0;
+        }
       } else {
         IRInstruction assign = {0};
         assign.op = IR_OP_ASSIGN;
@@ -876,6 +885,14 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
               assign_type, statement->location)) {
         ir_operand_destroy(&value);
         return 1;
+      }
+      if (ir_small_float_local(context, function, assignment->variable_name,
+                               target_name, assign_type)) {
+        int stored = ir_emit_small_float_home_store(
+            context, function, target_name, assign_type, &value,
+            statement->location);
+        ir_operand_destroy(&value);
+        return stored;
       }
 
       {

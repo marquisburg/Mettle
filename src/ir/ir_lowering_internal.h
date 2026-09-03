@@ -316,6 +316,17 @@ int ir_emit_null_check(IRLoweringContext *context, IRFunction *function,
                               SourceLocation location, const IROperand *value);
 
 /* Bounds-check an index against the length a slice carries. */
+int ir_small_float_local(IRLoweringContext *context, IRFunction *function,
+                         const char *source_name, const char *ir_name,
+                         Type *type);
+int ir_emit_small_float_home_store(IRLoweringContext *context,
+                                   IRFunction *function, const char *ir_name,
+                                   Type *type, const IROperand *value,
+                                   SourceLocation location);
+int ir_emit_small_float_home_load(IRLoweringContext *context,
+                                  IRFunction *function, const char *ir_name,
+                                  Type *type, SourceLocation location,
+                                  IROperand *out_value);
 int ir_emit_load_word(IRLoweringContext *context, IRFunction *function,
                       const IROperand *base_address, size_t offset,
                       SourceLocation location, IROperand *out_value);

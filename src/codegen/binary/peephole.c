@@ -1603,6 +1603,11 @@ int code_generator_binary_try_emit_address_add_store(
   if (size <= 0) {
     return 0;
   }
+  if (size == 2 && store->is_float &&
+      (store->alias_class == IR_ALIAS_CLASS_F16 ||
+       store->alias_class == IR_ALIAS_CLASS_BF16)) {
+    return 0;
+  }
 
   if (!code_generator_binary_emit_operand_load(generator, context, &store->lhs,
                                                BINARY_GP_STORE_VALUE)) {
@@ -2129,6 +2134,11 @@ int code_generator_binary_try_emit_offset_scaled_address_store(
   if (size <= 0) {
     return 0;
   }
+  if (size == 2 && store->is_float &&
+      (store->alias_class == IR_ALIAS_CLASS_F16 ||
+       store->alias_class == IR_ALIAS_CLASS_BF16)) {
+    return 0;
+  }
 
   if (!code_generator_binary_emit_operand_load(generator, context, &store->lhs,
                                                BINARY_GP_STORE_VALUE)) {
@@ -2263,6 +2273,11 @@ int code_generator_binary_try_emit_scaled_address_store(
 
   size = code_generator_binary_get_access_size(generator, context, &store->rhs);
   if (size <= 0) {
+    return 0;
+  }
+  if (size == 2 && store->is_float &&
+      (store->alias_class == IR_ALIAS_CLASS_F16 ||
+       store->alias_class == IR_ALIAS_CLASS_BF16)) {
     return 0;
   }
 

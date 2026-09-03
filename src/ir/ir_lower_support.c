@@ -379,6 +379,86 @@ int ir_emit_bounds_check(IRLoweringContext *context,
 /* The bounds check a pointer could never have. A slice carries its length
  * beside its data, so the extent is loaded from the value itself, and a
  * negative index fails the same check as an oversized one. */
+int ir_small_float_local(IRLoweringContext *context, IRFunction *function,
+                         const char *source_name, const char *ir_name,
+                         Type *type) {
+  Symbol *symbol = NULL;
+  if (!context || !function || !ir_name || !type ||
+      (type->kind != TYPE_FLOAT16 && type->kind != TYPE_BFLOAT16)) {
+    return 0;
+  }
+  if (function->parameter_names) {
+    for (size_t i = 0; i < function->parameter_count; i++) {
+      if (function->parameter_names[i] &&
+          strcmp(function->parameter_names[i], ir_name) == 0) {
+        return 0;
+      }
+    }
+  }
+  symbol = context->symbol_table && source_name
+               ? symbol_table_lookup(context->symbol_table, source_name)
+               : NULL;
+  if (symbol && symbol->scope && symbol->scope->type == SCOPE_GLOBAL &&
+      strcmp(source_name, ir_name) == 0) {
+    return 0;
+  }
+  return 1;
+}
+
+int ir_emit_small_float_home_store(IRLoweringContext *context,
+                                   IRFunction *function, const char *ir_name,
+                                   Type *type, const IROperand *value,
+                                   SourceLocation location) {
+  IROperand address = ir_operand_none();
+  IRInstruction store = {0};
+  int ok = 0;
+  if (!ir_emit_address_of_symbol(context, function, ir_name, location,
+                                 &address)) {
+    return 0;
+  }
+  store.op = IR_OP_STORE;
+  store.location = location;
+  store.dest = address;
+  store.lhs = *value;
+  store.rhs = ir_operand_int(2);
+  store.is_float = 1;
+  store.float_bits = 32;
+  ir_access_apply_alias_class(&store, type);
+  ok = ir_emit(context, function, &store);
+  ir_operand_destroy(&address);
+  return ok;
+}
+
+int ir_emit_small_float_home_load(IRLoweringContext *context,
+                                  IRFunction *function, const char *ir_name,
+                                  Type *type, SourceLocation location,
+                                  IROperand *out_value) {
+  IROperand address = ir_operand_none();
+  IRInstruction load = {0};
+  int ok = 0;
+  *out_value = ir_operand_none();
+  if (!ir_emit_address_of_symbol(context, function, ir_name, location,
+                                 &address) ||
+      !ir_make_temp_operand(context, out_value)) {
+    ir_operand_destroy(&address);
+    return 0;
+  }
+  load.op = IR_OP_LOAD;
+  load.location = location;
+  load.dest = *out_value;
+  load.lhs = address;
+  load.rhs = ir_operand_int(2);
+  ir_load_apply_float_type(&load, type);
+  ir_access_apply_alias_class(&load, type);
+  ok = ir_emit(context, function, &load);
+  out_value->float_bits = load.dest.float_bits;
+  ir_operand_destroy(&address);
+  if (!ok) {
+    ir_operand_destroy(out_value);
+  }
+  return ok;
+}
+
 int ir_emit_load_word(IRLoweringContext *context, IRFunction *function,
                       const IROperand *base_address, size_t offset,
                       SourceLocation location, IROperand *out_value) {

@@ -1684,6 +1684,19 @@ $cases = @(
   # A view is a record at the launch boundary, and a row inside a kernel is a
   # 16-byte local copied whole through the emitter's widened aggregate store.
   @{ Name = "gpu_view_param"; Path = "tests/test_gpu_view_param.mettle"; ShouldSucceed = $true; Args = @("--emit-ptx") },
+  # float16 and bfloat16 storage: two-byte floats whose arithmetic is
+  # float32. The 65536-pattern sweep asserts exact bits on the round trip for
+  # both types, NaN quieting included, natively under both backends and both
+  # modes and under the interpreter, which runs the scalar reference.
+  @{ Name = "float16_storage"; Path = "tests/test_float16_storage.mettle"; ShouldSucceed = $true },
+  @{ Name = "float16_storage_release"; Path = "tests/test_float16_storage.mettle"; ShouldSucceed = $true; Args = @("--release") },
+  @{ Name = "float16_storage_fallback"; Path = "tests/test_float16_storage.mettle"; ShouldSucceed = $true; Args = @("--release")
+     Env = @{ METTLE_MIR = "0" } },
+  @{ Name = "float16_storage_interp"; Path = "tests/test_float16_storage.mettle"; ShouldSucceed = $true
+     Args = @("test")
+     SkipBinaryCheck = $true
+     OutputMustMatch = @("8 passed")
+     OutputMustNotMatch = @("failed") },
   # The optimizer promise: a slice or view row is unit stride by construction,
   # so `@simd!` over one must hold. Sweeps lengths 1..40 so no tail hides.
   @{ Name = "views_simd"; Path = "tests/test_view_simd.mettle"; ShouldSucceed = $true; Args = @("--release") },

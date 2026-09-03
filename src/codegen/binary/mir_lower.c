@@ -2665,6 +2665,50 @@ static int mir_emit1(MirFunction *fn, MirOpcode op, MirOperand dst,
   return mir_emit(fn, &in);
 }
 
+static int mir_emit_bf16_narrow(MirFunction *fn, MirVregId gbits,
+                                MirVregId gdst) {
+  MirVregId glsb = mir_new_vreg(fn, MIR_RC_GP, 8);
+  MirVregId gbias = mir_new_vreg(fn, MIR_RC_GP, 8);
+  MirVregId gtmp = mir_new_vreg(fn, MIR_RC_GP, 8);
+  MirVregId gnan = mir_new_vreg(fn, MIR_RC_GP, 8);
+  MirVregId gabs = mir_new_vreg(fn, MIR_RC_GP, 8);
+  MirVregId gcond = mir_new_vreg(fn, MIR_RC_GP, 8);
+  unsigned char cc = 0;
+  if (glsb == MIR_VREG_NONE || gbias == MIR_VREG_NONE ||
+      gtmp == MIR_VREG_NONE || gnan == MIR_VREG_NONE ||
+      gabs == MIR_VREG_NONE || gcond == MIR_VREG_NONE ||
+      !mir_setcc_opcode(">", 1, &cc)) {
+    fn->has_error = 1;
+    return 0;
+  }
+  return mir_emit1(fn, MIR_SHR, mir_op_vreg(glsb), mir_op_vreg(gbits),
+                   mir_op_imm(16), 8, 1, 0) &&
+         mir_emit1(fn, MIR_AND, mir_op_vreg(glsb), mir_op_vreg(glsb),
+                   mir_op_imm(1), 8, 0, 0) &&
+         mir_emit1(fn, MIR_MOV, mir_op_vreg(gbias), mir_op_imm(0x7FFF),
+                   mir_op_none(), 8, 0, 0) &&
+         mir_emit1(fn, MIR_ADD, mir_op_vreg(gbias), mir_op_vreg(gbias),
+                   mir_op_vreg(glsb), 8, 0, 0) &&
+         mir_emit1(fn, MIR_ADD, mir_op_vreg(gtmp), mir_op_vreg(gbits),
+                   mir_op_vreg(gbias), 8, 0, 0) &&
+         mir_emit1(fn, MIR_SHR, mir_op_vreg(gtmp), mir_op_vreg(gtmp),
+                   mir_op_imm(16), 8, 1, 0) &&
+         mir_emit1(fn, MIR_SHR, mir_op_vreg(gnan), mir_op_vreg(gbits),
+                   mir_op_imm(16), 8, 1, 0) &&
+         mir_emit1(fn, MIR_AND, mir_op_vreg(gnan), mir_op_vreg(gnan),
+                   mir_op_imm(0xFF80), 8, 0, 0) &&
+         mir_emit1(fn, MIR_OR, mir_op_vreg(gnan), mir_op_vreg(gnan),
+                   mir_op_imm(0x40), 8, 0, 0) &&
+         mir_emit1(fn, MIR_AND, mir_op_vreg(gabs), mir_op_vreg(gbits),
+                   mir_op_imm(0x7FFFFFFF), 8, 0, 0) &&
+         mir_emit1(fn, MIR_SETCC, mir_op_vreg(gcond), mir_op_vreg(gabs),
+                   mir_op_imm(0x7F800000), 8, 1, cc) &&
+         mir_emit1(fn, MIR_MOV, mir_op_vreg(gdst), mir_op_vreg(gtmp),
+                   mir_op_none(), 8, 0, 0) &&
+         mir_emit1(fn, MIR_CMOV, mir_op_vreg(gdst), mir_op_vreg(gcond),
+                   mir_op_vreg(gnan), 8, 0, 0);
+}
+
 /* ---- constant-divisor strength reduction (magic multiply) --------------- */
 
 /* The pooled GP vreg for a loop-invariant 64-bit integer constant, or NONE. */
@@ -4321,40 +4365,16 @@ static int mir_lower_cast_across_banks(MirFunction *fn, CodeGenerator *g,
         return mir_emit1(fn, MIR_CVTPH2PS, dst, mir_op_vreg(xh), mir_op_none(), 4, 0, 0);
       }
       MirVregId gbits = mir_new_vreg(fn, MIR_RC_GP, 8);
-      MirVregId glsb = mir_new_vreg(fn, MIR_RC_GP, 8);
-      MirVregId gbias = mir_new_vreg(fn, MIR_RC_GP, 8);
-      MirVregId gtmp = mir_new_vreg(fn, MIR_RC_GP, 8);
       MirVregId gdst = mir_new_vreg(fn, MIR_RC_GP, 8);
       MirVregId xdst = mir_new_vreg(fn, MIR_RC_XMM, 4);
-      if (gbits == MIR_VREG_NONE || glsb == MIR_VREG_NONE || gbias == MIR_VREG_NONE || gtmp == MIR_VREG_NONE || gdst == MIR_VREG_NONE || xdst == MIR_VREG_NONE) {
+      if (gbits == MIR_VREG_NONE || gdst == MIR_VREG_NONE || xdst == MIR_VREG_NONE) {
         fn->has_error = 1;
         return 0;
       }
-      if (!mir_emit1(fn, MIR_MOVD_TO_GP, mir_op_vreg(gbits), mir_op_vreg(xsrc), mir_op_none(), 4, 0, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_SHR, mir_op_vreg(glsb), mir_op_vreg(gbits), mir_op_imm(16), 8, 1, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_AND, mir_op_vreg(glsb), mir_op_vreg(glsb), mir_op_imm(1), 8, 0, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_MOV, mir_op_vreg(gbias), mir_op_imm(0x7FFF), mir_op_none(), 8, 0, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_ADD, mir_op_vreg(gbias), mir_op_vreg(gbias), mir_op_vreg(glsb), 8, 0, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_ADD, mir_op_vreg(gtmp), mir_op_vreg(gbits), mir_op_vreg(gbias), 8, 0, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_SHR, mir_op_vreg(gtmp), mir_op_vreg(gtmp), mir_op_imm(16), 8, 1, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_SHL, mir_op_vreg(gdst), mir_op_vreg(gtmp), mir_op_imm(16), 8, 0, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_MOVD_TO_XMM, mir_op_vreg(xdst), mir_op_vreg(gdst), mir_op_none(), 4, 0, 0)) {
+      if (!mir_emit1(fn, MIR_MOVD_TO_GP, mir_op_vreg(gbits), mir_op_vreg(xsrc), mir_op_none(), 4, 0, 0) ||
+          !mir_emit_bf16_narrow(fn, gbits, gdst) ||
+          !mir_emit1(fn, MIR_SHL, mir_op_vreg(gdst), mir_op_vreg(gdst), mir_op_imm(16), 8, 0, 0) ||
+          !mir_emit1(fn, MIR_MOVD_TO_XMM, mir_op_vreg(xdst), mir_op_vreg(gdst), mir_op_none(), 4, 0, 0)) {
         return 0;
       }
       return mir_emit_fmov(fn, dst, mir_op_vreg(xdst), 4);
@@ -4616,33 +4636,13 @@ static int mir_lower_store(MirFunction *fn, CodeGenerator *g,
         return mir_emit1(fn, MIR_MOV, mem, mir_op_vreg(gdst), mir_op_none(), 2, 0, 0);
       }
       MirVregId gbits = mir_new_vreg(fn, MIR_RC_GP, 8);
-      MirVregId glsb = mir_new_vreg(fn, MIR_RC_GP, 8);
-      MirVregId gbias = mir_new_vreg(fn, MIR_RC_GP, 8);
-      MirVregId gtmp = mir_new_vreg(fn, MIR_RC_GP, 8);
       MirVregId gdst = mir_new_vreg(fn, MIR_RC_GP, 8);
-      if (gbits == MIR_VREG_NONE || glsb == MIR_VREG_NONE || gbias == MIR_VREG_NONE || gtmp == MIR_VREG_NONE || gdst == MIR_VREG_NONE) {
+      if (gbits == MIR_VREG_NONE || gdst == MIR_VREG_NONE) {
         fn->has_error = 1;
         return 0;
       }
-      if (!mir_emit1(fn, MIR_MOVD_TO_GP, mir_op_vreg(gbits), mir_op_vreg(xsrc), mir_op_none(), 4, 0, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_SHR, mir_op_vreg(glsb), mir_op_vreg(gbits), mir_op_imm(16), 8, 1, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_AND, mir_op_vreg(glsb), mir_op_vreg(glsb), mir_op_imm(1), 8, 0, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_MOV, mir_op_vreg(gbias), mir_op_imm(0x7FFF), mir_op_none(), 8, 0, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_ADD, mir_op_vreg(gbias), mir_op_vreg(gbias), mir_op_vreg(glsb), 8, 0, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_ADD, mir_op_vreg(gtmp), mir_op_vreg(gbits), mir_op_vreg(gbias), 8, 0, 0)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_SHR, mir_op_vreg(gdst), mir_op_vreg(gtmp), mir_op_imm(16), 8, 1, 0)) {
+      if (!mir_emit1(fn, MIR_MOVD_TO_GP, mir_op_vreg(gbits), mir_op_vreg(xsrc), mir_op_none(), 4, 0, 0) ||
+          !mir_emit_bf16_narrow(fn, gbits, gdst)) {
         return 0;
       }
       return mir_emit1(fn, MIR_MOV, mem, mir_op_vreg(gdst), mir_op_none(), 2, 0, 0);

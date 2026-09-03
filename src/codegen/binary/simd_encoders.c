@@ -846,10 +846,10 @@ int wcs_avx_vcvtph2ps_xmm(BinaryCodeBuffer *b, int dst, int src) {
 
 int wcs_avx_vcvtps2ph_xmm(BinaryCodeBuffer *b, int dst, int src,
                            unsigned char imm) {
-  return wcs_vex3(b, 3, 1, 0, 0, dst, src, 0) &&
+  return wcs_vex3(b, 3, 1, 0, 0, src, dst, 0) &&
          binary_code_buffer_append_u8(b, 0x1D) &&
          binary_code_buffer_append_u8(
-             b, (unsigned char)(0xC0 | ((dst & 7) << 3) | (src & 7))) &&
+             b, (unsigned char)(0xC0 | ((src & 7) << 3) | (dst & 7))) &&
          binary_code_buffer_append_u8(b, imm);
 }
 

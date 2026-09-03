@@ -112,7 +112,9 @@ uint32_t arm64_scvtf(int is_double, int fd, Arm64Reg xn);      /* int64 -> fp */
 uint32_t arm64_fcvtzs(int is_double, Arm64Reg xd, int fn);     /* fp -> int64 trunc */
 uint32_t arm64_ucvtf(int is_double, int fd, Arm64Reg xn);     /* uint64 -> fp */
 uint32_t arm64_fcvtzu(int is_double, Arm64Reg xd, int fn);    /* fp -> uint64 trunc */
-uint32_t arm64_fcvt(int to_double, int fd, int fn);            /* single<->double */
+uint32_t arm64_fcvt(int to_double, int fd, int fn);
+uint32_t arm64_fcvt_h2s(int sd, int hn);
+uint32_t arm64_fcvt_s2h(int hd, int sn);            /* single<->double */
 uint32_t arm64_fmov_gp(int is_double, int fd, Arm64Reg xn);    /* bits GP -> FP */
 uint32_t arm64_fmov_to_gp(int is_double, Arm64Reg xd, int fn); /* bits FP -> GP */
 uint32_t arm64_fmov_reg(int is_double, int fd, int fn);        /* FP -> FP copy */

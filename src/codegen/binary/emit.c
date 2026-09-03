@@ -2817,12 +2817,46 @@ int code_generator_binary_load_needs_sign_extend(
  * an unsigned one is tagged at lowering and stays zero-extended. Every scalar
  * load path calls this, so the fused and folded address forms read a narrow
  * integer the way the plain form does. */
+static int binary_emit_bf16_narrow(BinaryFunctionContext *context,
+                                   BinaryGpRegister value,
+                                   BinaryGpRegister s1, BinaryGpRegister s2) {
+  BinaryCodeBuffer *code = &context->code;
+  return binary_emit_mov_reg_reg(code, s1, value) &&
+         binary_emit_shift_reg_imm8(code, 5, s1, 16) &&
+         binary_emit_and_reg_imm32(code, s1, 1) &&
+         binary_emit_mov_reg_imm32_zero_extend(code, s2, 0x7FFF) &&
+         binary_emit_alu_reg_reg(code, 0x03, s1, s2) &&
+         binary_emit_alu_reg_reg(code, 0x03, value, s2) &&
+         binary_emit_shift_reg_imm8(code, 5, s2, 16) &&
+         binary_emit_mov_reg_reg(code, s1, value) &&
+         binary_emit_shift_reg_imm8(code, 5, s1, 16) &&
+         binary_emit_and_reg_imm32(code, s1, 0xFF80) &&
+         binary_emit_or_reg_imm32(code, s1, 0x40) &&
+         binary_emit_and_reg_imm32(code, value, 0x7FFFFFFF) &&
+         binary_emit_cmp_reg_imm32(code, value, 0x7F800000) &&
+         binary_emit_cmovcc_reg_reg(code, 0x47, s2, s1) &&
+         binary_emit_mov_reg_reg(code, value, s2);
+}
+
 int code_generator_binary_widen_narrow_load(CodeGenerator *generator,
                                             BinaryFunctionContext *context,
                                             const IRInstruction *load, int size,
                                             BinaryGpRegister value_register) {
   if (!generator || !context || !load) {
     return 0;
+  }
+  if (size == 2 && load->is_float &&
+      (load->alias_class == IR_ALIAS_CLASS_F16 ||
+       load->alias_class == IR_ALIAS_CLASS_BF16)) {
+    if (load->alias_class == IR_ALIAS_CLASS_F16) {
+      return binary_emit_movd_xmm_reg(&context->code, BINARY_XMM0,
+                                      value_register) &&
+             wcs_avx_vcvtph2ps_xmm(&context->code, (int)BINARY_XMM0,
+                                   (int)BINARY_XMM0) &&
+             binary_emit_movd_reg_xmm(&context->code, value_register,
+                                      BINARY_XMM0);
+    }
+    return binary_emit_shift_reg_imm8(&context->code, 4, value_register, 16);
   }
   if ((size != 1 && size != 2) || load->is_float || load->is_unsigned) {
     return 1;
@@ -2913,25 +2947,6 @@ int code_generator_binary_emit_load(CodeGenerator *generator,
                                context->function_name);
     }
     return 0;
-  }
-  if (size == 2 && instruction->is_float &&
-      (instruction->alias_class == IR_ALIAS_CLASS_F16 ||
-       instruction->alias_class == IR_ALIAS_CLASS_BF16)) {
-    if (instruction->alias_class == IR_ALIAS_CLASS_F16) {
-      if (!binary_emit_movd_xmm_reg(&context->code, BINARY_XMM0, value_register)) {
-        return 0;
-      }
-      if (!wcs_avx_vcvtph2ps_xmm(&context->code, (int)BINARY_XMM0, (int)BINARY_XMM0)) {
-        return 0;
-      }
-      if (!binary_emit_movd_reg_xmm(&context->code, value_register, BINARY_XMM0)) {
-        return 0;
-      }
-    } else {
-      if (!binary_emit_shift_reg_imm8(&context->code, 4, value_register, 16)) {
-        return 0;
-      }
-    }
   }
   /* x86-64: 32-bit integer loads into the low half zero-extend the register.
    * Signed int32 must sign-extend to int64 when held in a 64-bit slot/register.
@@ -3048,26 +3063,8 @@ int code_generator_binary_emit_store(CodeGenerator *generator,
         return 0;
       }
     } else {
-      BinaryGpRegister tmp = BINARY_GP_R11;
-      if (!binary_emit_mov_reg_reg(&context->code, tmp, value_register)) {
-        return 0;
-      }
-      if (!binary_emit_shift_reg_imm8(&context->code, 5, tmp, 16)) {
-        return 0;
-      }
-      if (!binary_emit_and_reg_imm32(&context->code, tmp, 1)) {
-        return 0;
-      }
-      if (!binary_emit_mov_reg_imm32_zero_extend(&context->code, BINARY_GP_RAX, 0x7FFF)) {
-        return 0;
-      }
-      if (!binary_emit_alu_reg_reg(&context->code, 0x03, BINARY_GP_RAX, tmp)) {
-        return 0;
-      }
-      if (!binary_emit_alu_reg_reg(&context->code, 0x03, value_register, BINARY_GP_RAX)) {
-        return 0;
-      }
-      if (!binary_emit_shift_reg_imm8(&context->code, 5, value_register, 16)) {
+      if (!binary_emit_bf16_narrow(context, value_register, BINARY_GP_R11,
+                                   BINARY_GP_RAX)) {
         return 0;
       }
     }
@@ -3403,7 +3400,10 @@ int code_generator_binary_emit_cast(CodeGenerator *generator,
                                                     instruction->text)
                     : NULL;
   target_is_float =
-      target_type ? code_generator_is_floating_point_type(target_type) : 0;
+      target_type ? (code_generator_is_floating_point_type(target_type) ||
+                     target_type->kind == MTLC_TYPE_FLOAT16 ||
+                     target_type->kind == MTLC_TYPE_BFLOAT16)
+                  : 0;
   if (target_type) {
     target_is_unsigned = target_type->kind == MTLC_TYPE_UINT8 ||
                          target_type->kind == MTLC_TYPE_UINT16 ||
@@ -3468,29 +3468,9 @@ int code_generator_binary_emit_cast(CodeGenerator *generator,
           }
         }
         {
-          BinaryGpRegister tmp = BINARY_GP_R10;
-          if (!binary_emit_mov_reg_reg(&context->code, tmp, BINARY_GP_RAX)) {
-            goto emit_failure;
-          }
-          if (!binary_emit_shift_reg_imm8(&context->code, 5, tmp, 16)) {
-            goto emit_failure;
-          }
-          if (!binary_emit_and_reg_imm32(&context->code, tmp, 1)) {
-            goto emit_failure;
-          }
-          if (!binary_emit_mov_reg_imm32_zero_extend(&context->code, BINARY_GP_R11, 0x7FFF)) {
-            goto emit_failure;
-          }
-          if (!binary_emit_alu_reg_reg(&context->code, 0x03, BINARY_GP_R11, tmp)) {
-            goto emit_failure;
-          }
-          if (!binary_emit_alu_reg_reg(&context->code, 0x03, BINARY_GP_RAX, BINARY_GP_R11)) {
-            goto emit_failure;
-          }
-          if (!binary_emit_shift_reg_imm8(&context->code, 5, BINARY_GP_RAX, 16)) {
-            goto emit_failure;
-          }
-          if (!binary_emit_shift_reg_imm8(&context->code, 4, BINARY_GP_RAX, 16)) {
+          if (!binary_emit_bf16_narrow(context, BINARY_GP_RAX, BINARY_GP_R10,
+                                       BINARY_GP_R11) ||
+              !binary_emit_shift_reg_imm8(&context->code, 4, BINARY_GP_RAX, 16)) {
             goto emit_failure;
           }
         }

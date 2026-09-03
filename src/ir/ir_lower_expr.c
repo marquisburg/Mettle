@@ -2572,6 +2572,13 @@ int ir_lower_expression(IRLoweringContext *context, IRFunction *function,
           expression->location, out_value);
     }
 
+    if (ir_small_float_local(context, function, identifier->name,
+                             ir_local_ir_name(context, identifier->name),
+                             expression->resolved_type)) {
+      return ir_emit_small_float_home_load(
+          context, function, ir_local_ir_name(context, identifier->name),
+          expression->resolved_type, expression->location, out_value);
+    }
     *out_value =
         ir_operand_symbol(ir_local_ir_name(context, identifier->name));
     if (!out_value->name) {

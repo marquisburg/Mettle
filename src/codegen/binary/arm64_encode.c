@@ -287,6 +287,12 @@ uint32_t arm64_fcvt(int to_double, int fd, int fn) {
   uint32_t base = to_double ? 0x1E22C000u : 0x1E624000u;
   return base | (R5(fn) << 5) | R5(fd);
 }
+uint32_t arm64_fcvt_h2s(int sd, int hn) {
+  return 0x1EE24000u | (R5(hn) << 5) | R5(sd);
+}
+uint32_t arm64_fcvt_s2h(int hd, int sn) {
+  return 0x1E23C000u | (R5(sn) << 5) | R5(hd);
+}
 /* FMOV between GP and FP register bit patterns (no conversion). */
 uint32_t arm64_fmov_gp(int is_double, int fd, Arm64Reg xn) {
   uint32_t base = is_double ? 0x9E670000u : 0x1E270000u; /* GP -> FP */

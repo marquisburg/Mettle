@@ -270,6 +270,52 @@ static void emit_store_sized(Arm64Emit *e, Arm64Reg source,
   }
 }
 
+static void emit_f16_widen(Arm64Emit *e, Arm64Reg v) {
+  arm64_emit_word(e, arm64_fmov_gp(0, 0, v));
+  arm64_emit_word(e, arm64_fcvt_h2s(0, 0));
+  arm64_emit_word(e, arm64_fmov_to_gp(0, v, 0));
+}
+
+static void emit_f16_narrow(Arm64Emit *e, Arm64Reg v) {
+  arm64_emit_word(e, arm64_fmov_gp(0, 0, v));
+  arm64_emit_word(e, arm64_fcvt_s2h(0, 0));
+  arm64_emit_word(e, arm64_fmov_to_gp(0, v, 0));
+}
+
+static void emit_bf16_widen(Arm64Emit *e, Arm64Reg v) {
+  arm64_emit_word(e, arm64_lsl_imm(0, v, v, 16));
+}
+
+static void emit_bf16_narrow(Arm64Emit *e, Arm64Reg v, Arm64Reg t1,
+                             Arm64Reg t2) {
+  arm64_emit_word(e, arm64_lsl_imm(0, t2, v, 1));
+  arm64_emit_word(e, arm64_movz(0, t1, 0xFF00, 1));
+  arm64_emit_word(e, arm64_cmp_reg(0, t2, t1));
+  arm64_emit_word(e, arm64_lsl_imm(0, t1, v, 15));
+  arm64_emit_word(e, arm64_lsr_imm(0, t1, t1, 31));
+  arm64_emit_word(e, arm64_movz(0, t2, 0x7FFF, 0));
+  arm64_emit_word(e, arm64_add_reg(0, t1, t1, t2));
+  arm64_emit_word(e, arm64_add_reg(0, t1, t1, v));
+  arm64_emit_word(e, arm64_lsr_imm(0, t1, t1, 16));
+  arm64_emit_word(e, arm64_lsr_imm(0, t2, v, 23));
+  arm64_emit_word(e, arm64_lsl_imm(0, t2, t2, 7));
+  arm64_emit_word(e, arm64_add_imm(0, t2, t2, 64, 0));
+  arm64_emit_word(e, arm64_csel(0, v, t2, t1, ARM64_HI));
+}
+
+static int small_float_class(const IRInstruction *in) {
+  if (in->alias_class == IR_ALIAS_CLASS_F16) return 16;
+  if (in->alias_class == IR_ALIAS_CLASS_BF16) return 8;
+  return 0;
+}
+
+static int cast_small_float_target(const IRInstruction *in) {
+  if (!in->text) return 0;
+  if (strcmp(in->text, "float16") == 0) return 16;
+  if (strcmp(in->text, "bfloat16") == 0) return 8;
+  return 0;
+}
+
 /* The base type name inside a declared type text: "int32[4]" and "int32*" both
  * name int32. Every predicate below reads this rather than searching the text,
  * because a monomorphized name carries its type argument: "Pair__float64"
@@ -2095,6 +2141,19 @@ static int encode_cast_instruction(const Arm64Scope *scope,
                                          : arm64_scvtf(d, 0, src));
       arm64_emit_word(e, arm64_fmov_to_gp(d, R_RES, 0));
       store_dest(e, slots, &in->dest, R_RES);
+    } else if (srcf && dstf && cast_small_float_target(in) != 0) {
+      int sd = operand_float_bits(fs, &in->lhs) != 32;
+      load_float_operand(e, slots, fs, &in->lhs, 0, 0, R_RHS);
+      (void)sd;
+      arm64_emit_word(e, arm64_fmov_to_gp(0, R_RHS, 0));
+      if (cast_small_float_target(in) == 16) {
+        emit_f16_narrow(e, R_RHS);
+        emit_f16_widen(e, R_RHS);
+      } else {
+        emit_bf16_narrow(e, R_RHS, R_RES, R_AUX);
+        emit_bf16_widen(e, R_RHS);
+      }
+      store_dest(e, slots, &in->dest, R_RHS);
     } else if (srcf && dstf) { /* float -> float */
       int sd = operand_float_bits(fs, &in->lhs) != 32;
       int dd = in->dest.float_bits != 32;
@@ -2221,6 +2280,11 @@ static int encode_memory_instruction(const Arm64Scope *scope,
     }
     emit_load_sized(e, R_RES, addr, size,
                     !in->is_unsigned && !in->is_float);
+    if (size == 2 && in->is_float && small_float_class(in) == 16) {
+      emit_f16_widen(e, R_RES);
+    } else if (size == 2 && in->is_float && small_float_class(in) == 8) {
+      emit_bf16_widen(e, R_RES);
+    }
     store_dest(e, slots, &in->dest, R_RES);
     break;
   }
@@ -2238,6 +2302,17 @@ static int encode_memory_instruction(const Arm64Scope *scope,
         src = load_into(e, slots, &in->lhs, R_RHS); /* record address */
       }
       emit_fixed_copy(e, addr, src, size);
+      break;
+    }
+    if (size == 2 && in->is_float && small_float_class(in) != 0) {
+      load_float_operand(e, slots, fs, &in->lhs, 0, 0, R_RHS);
+      arm64_emit_word(e, arm64_fmov_to_gp(0, R_RHS, 0));
+      if (small_float_class(in) == 16) {
+        emit_f16_narrow(e, R_RHS);
+      } else {
+        emit_bf16_narrow(e, R_RHS, R_RES, R_AUX);
+      }
+      emit_store_sized(e, R_RHS, addr, 2);
       break;
     }
     if ((size == 4 || size == 8) && operand_is_float(fs, &in->lhs)) {
