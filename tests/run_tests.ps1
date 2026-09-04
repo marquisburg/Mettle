@@ -4476,6 +4476,79 @@ catch {
   Write-CaseResult -Name "abstraction_examples" -Passed $false -Reason $_.Exception.Message
 }
 
+# A frame written down as data, with the dispatcher generated from it and a
+# quiesce at every phase boundary. Enforce: the generated program runs, expand
+# prints the dispatcher as ordinary Mettle, it does what the hand-written one
+# does, a call across a phase boundary fails the build with the chain landing
+# on the schedule's own rows, a schedule the program got wrong fails the build
+# under its own code, the ledger says what was generated and says so when
+# nothing was, and the run-time effect checks catch the crossing when the
+# analysis is told to trust the program.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "schedule.exe"
+  $out = & $CompilerPath --build "tests/test_schedule.mettle" -o $exe --report-expansion 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a schedule was refused: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "schedules: 1 read as data, 3 phases, 5 functions generated") { throw "the schedule ledger is wrong: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "input 1 world 2 drawn 4") { throw "the generated dispatcher did not run the phases: $run" }
+
+  $manual = Join-Path $tmpDir "schedule_manual.exe"
+  $out = & $CompilerPath --build "tests/test_schedule_manual.mettle" -o $manual --report-expansion 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the hand-written dispatcher failed to build: $out" }
+  if ($out -notmatch "schedules: none; nothing generated") { throw "a program with no schedule was not said to have none: $out" }
+  $hand = & $manual 2>&1 | Out-String
+  if ($hand -ne $run) { throw "the generated dispatcher and the hand-written one disagree: $run vs $hand" }
+
+  $ex = & $CompilerPath expand "tests/test_schedule.mettle" 2>&1 | Out-String
+  if ($ex -notmatch "fn FRAME_phase_input\(\) provides Input") { throw "expand does not print the phase wrapper: $ex" }
+  if ($ex -notmatch "fn FRAME_thread_1") { throw "expand does not print the second thread's dispatcher: $ex" }
+  if ($ex -notmatch "quiesce;") { throw "expand does not print the phase boundaries: $ex" }
+
+  $out = & $CompilerPath --build "tests/test_schedule_cross.mettle" -o (Join-Path $tmpDir "schedule_cross.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a call across a phase boundary built" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "error\[F0002\]") { throw "the crossing was not refused: $out" }
+  if ($flat -notmatch "FRAME_thread_0 -> FRAME_phase_input -> read_input -> touch_world") { throw "the chain does not run through the phase: $out" }
+  if ($out -notmatch "const FRAME: Schedule") { throw "the chain does not land on the schedule the program wrote: $out" }
+
+  $env:METTLE_TRUST_EFFECTS = "1"
+  $trusted = Join-Path $tmpDir "schedule_trusted.exe"
+  $out = & $CompilerPath --build "tests/test_schedule_cross.mettle" -o $trusted --check-effects 2>&1 | Out-String
+  Remove-Item Env:METTLE_TRUST_EFFECTS
+  if ($LASTEXITCODE -ne 0) { throw "the trusted build failed: $out" }
+  $run = & $trusted 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a crossing the compiler was told to trust ran to completion" }
+  if ($run -notmatch "effect violation") { throw "the run-time check did not catch the crossing: $run" }
+
+  $broken = Join-Path $tmpDir "schedule_broken.mettle"
+  $source = Get-Content "tests/test_schedule.mettle" -Raw
+  $source = $source -replace 'effect: "Render"', 'effect: "Sim"'
+  Set-Content -Path $broken -Value $source -Encoding UTF8
+  $out = & $CompilerPath --build $broken -o (Join-Path $tmpDir "schedule_broken.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "two phases sharing an effect built" }
+  if ($out -notmatch "error\[H0002\]") { throw "a repeated phase effect was not refused: $out" }
+
+  $missing = Join-Path $tmpDir "schedule_missing.mettle"
+  $source = Get-Content "tests/test_schedule.mettle" -Raw
+  $source = $source -replace 'entry: "draw_world"', 'entry: "draw_wolrd"'
+  Set-Content -Path $missing -Value $source -Encoding UTF8
+  $out = & $CompilerPath --build $missing -o (Join-Path $tmpDir "schedule_missing.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a phase naming no function built" }
+  if ($out -notmatch "error\[H0004\]") { throw "a missing entry was not refused: $out" }
+
+  $out = & $CompilerPath explain H0002 2>&1 | Out-String
+  if ($out -notmatch "One effect per phase") { throw "explain H0002 says nothing: $out" }
+  Write-CaseResult -Name "schedule_is_data_the_compiler_reads" -Passed $true
+}
+catch {
+  $failed++
+  if (Test-Path Env:METTLE_TRUST_EFFECTS) { Remove-Item Env:METTLE_TRUST_EFFECTS }
+  Write-CaseResult -Name "schedule_is_data_the_compiler_reads" -Passed $false -Reason $_.Exception.Message
+}
+
 # Where code runs is already in the program, in the effects it needs, so a
 # global two threads write is a fact rather than a guess. Enforce: two writers
 # whose requirements are disjoint fail the build naming both and both effects,

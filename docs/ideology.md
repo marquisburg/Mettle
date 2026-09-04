@@ -908,7 +908,11 @@ only where proven.
   them, so a lock becomes a requirement the compiler carries rather than a
   convention. The borrow analyser closed the other half, following a pointer
   handed to a task (M0121, M0122) and re-asking the question at run time
-  under `--check-tasks`.
+  under `--check-tasks`. A frame is data the compiler reads: a `const` of
+  `std/schedule`'s `Schedule` names each phase, its effect, its entry and its
+  thread, and the compiler generates the dispatchers and the `quiesce` at
+  every phase boundary. That is not an injected yield: the program wrote the
+  order, and `mettle expand` prints what came out as ordinary Mettle.
 - ~~A machine concept, the reachable half.~~ *(III.3)* Landed. A target's
   description is a Mettle `const` the compiler reads: `mettle target
   <triple>` prints every built-in one, `--target desc.mettle` builds for a

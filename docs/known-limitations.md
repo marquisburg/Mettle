@@ -53,6 +53,25 @@ mismatch against `fn(...)`.
 Omitted struct fields and short array literals leave the rest zero. Extra
 elements, unknown field names, and repeated field names are errors.
 
+## Schedules
+
+A schedule's rows are literals, read before the program runs, so nothing in
+one can be computed: no constant folded from another constant, no phase count
+that depends on the target. A phase's entry is named as a string and has to be
+a function of the same module; a function reached through an import is not
+found by that name.
+
+The generated dispatcher runs a thread's phases in the order the schedule
+lists them and returns. It does not loop, and it does not start the other
+threads: the program writes the loop it wants around `FRAME_thread_0(0)` and
+hands `&FRAME_thread_1` to whatever spawns threads, because a loop the
+compiler wrote would be control flow at a point nobody named.
+
+`quiesce` lands between phases on the thread that reaches it. There is no
+barrier across threads: two dispatchers running at once reach their own phase
+boundaries independently, and a program that needs them to meet writes the
+join itself.
+
 ## Compile-time expansion
 
 `comptime for` iterates two sequences: `typeof(T).fields`, and `TABLE.rows` for

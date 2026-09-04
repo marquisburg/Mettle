@@ -217,6 +217,93 @@ type says nothing about its effects.
 file: a queue on `std/thread`, a priority function swapped at `quiesce`, a
 `Slot` type, a `Worker` effect, and three rules the build stops on.
 
+## A schedule is data the compiler reads
+
+A frame is an order, and an order is data. `std/schedule` gives it a type, and
+a `const` of that type is the whole frame written down:
+
+```mettle
+import "std/schedule";
+
+effect Input;
+effect Sim;
+effect Render;
+
+const FRAME: Schedule[3] = [
+  { phase: "input", effect: "Input", entry: "read_input", thread: 0 },
+  { phase: "sim", effect: "Sim", entry: "step_world", thread: 1 },
+  { phase: "render", effect: "Render", entry: "draw_world", thread: 0 },
+];
+```
+
+Each row is a phase: what it is called, the effect that holds while it runs,
+the function it runs, and the thread it runs on. From that the compiler
+generates one wrapper per phase and one dispatcher per thread, with a
+`quiesce` at every phase boundary:
+
+```mettle
+fn FRAME_phase_input() provides Input { read_input(); }
+fn FRAME_phase_sim() provides Sim { step_world(); }
+fn FRAME_phase_render() provides Render { draw_world(); }
+
+fn FRAME_thread_0(arg: cstring) -> uint32 {
+  FRAME_phase_input();
+  quiesce;
+  FRAME_phase_render();
+  quiesce;
+  return 0;
+}
+
+fn FRAME_thread_1(arg: cstring) -> uint32 {
+  FRAME_phase_sim();
+  quiesce;
+  return 0;
+}
+```
+
+That is what `mettle expand` prints, and it is ordinary Mettle: the type
+checker, the borrow analyser and every contract meet it exactly as they meet
+hand-written code. The dispatcher is not control flow at a point nobody wrote.
+The program wrote the schedule, and the schedule is the order; every `quiesce`
+sits at a phase boundary the program named, which is where a staged swap lands
+and where a frame is allowed to end.
+
+A thread's dispatcher takes the `cstring` and returns the `uint32` a thread
+entry point takes, so the program starts the others itself and keeps the
+handles:
+
+```mettle
+var worker: int64 = CreateThread(0, 0, &FRAME_thread_1, 0, 0, 0);
+FRAME_thread_0(0);
+thread_join_infinite(worker);
+```
+
+Because each wrapper provides its own phase's effect and no other, a call that
+crosses a phase boundary arrives somewhere its requirement is not provided,
+and the ordinary effect pass refuses it with the chain, landing on the row of
+the schedule that took it there:
+
+```text
+error[F0002]: 'main' reaches a function that requires 'Sim', and nothing on
+the way provides it: main -> FRAME_thread_0 -> FRAME_phase_input ->
+read_input -> touch_world
+```
+
+The schedule itself is checked before anything is generated: a phase names
+itself, an effect and an entry (`H0001`); no two phases share a name or an
+effect, since one effect per phase is what makes the boundary visible
+(`H0002`); the effect is declared where the schedule can see it (`H0003`); and
+the entry is a function of the module (`H0004`). A schedule is read while
+compiling, so it is a `const` (`H0005`).
+
+`--report-expansion` says what a schedule cost, and says so when there was
+none:
+
+```text
+schedules: 1 read as data, 3 phases, 5 functions generated
+schedules: none; nothing generated
+```
+
 What a program cannot get is the other kind of model: `async`/`await` with a
 yield the compiler inserts, or a work-stealing pool that runs code at a point
 the program did not name. A yield point the compiler inserts is unauthored

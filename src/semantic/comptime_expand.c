@@ -223,6 +223,15 @@ void type_checker_report_expansion(const TypeChecker *checker, FILE *out) {
     return;
   }
   size_t sites = type_checker_expansion_site_count(checker);
+  if (checker->schedule_stats.schedules > 0) {
+    fprintf(out,
+            "schedules: %zu read as data, %zu phases, %zu functions "
+            "generated\n",
+            checker->schedule_stats.schedules, checker->schedule_stats.phases,
+            checker->schedule_stats.generated);
+  } else {
+    fprintf(out, "schedules: none; nothing generated\n");
+  }
   if (checker->comptime_text_bytes > 0) {
     fprintf(out, "comptime text: %zu bytes built while compiling\n",
             checker->comptime_text_bytes);

@@ -1,0 +1,44 @@
+// A frame written down as data. Each row is a phase: what it is called, the
+// effect that holds while it runs, the function it runs, and the thread it
+// runs on. The compiler reads the const and generates one dispatcher per
+// thread, with a quiesce at every phase boundary, so the order the program
+// wrote is the order that runs and the points where a swap may land are the
+// points between phases.
+import "std/io";
+import "std/schedule";
+import "std/thread";
+
+effect Input;
+effect Sim;
+effect Render;
+
+var g_input: int32 = 0;
+var g_world: int32 = 0;
+var g_drawn: int32 = 0;
+
+const FRAME: Schedule[3] = [
+  { phase: "input", effect: "Input", entry: "read_input", thread: 0 },
+  { phase: "sim", effect: "Sim", entry: "step_world", thread: 1 },
+  { phase: "render", effect: "Render", entry: "draw_world", thread: 0 },
+];
+
+fn read_input() {
+  g_input = g_input + 1;
+}
+
+fn step_world() {
+  g_world = g_world + 2;
+}
+
+fn draw_world() {
+  g_drawn = g_drawn + 4;
+}
+
+fn main() -> int32 {
+  var worker: int64 = CreateThread(0, 0, &FRAME_thread_1, 0, 0, 0);
+  FRAME_thread_0(0);
+  thread_join_infinite(worker);
+  thread_close(worker);
+  println("input {g_input} world {g_world} drawn {g_drawn}");
+  return 0;
+}

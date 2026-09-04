@@ -1,0 +1,27 @@
+// Mettle standard library: a schedule the compiler reads as data.
+//
+// One row is one phase: what it is called, the effect that holds while it
+// runs, the function it runs, and the thread it runs on. A `const` of these
+// rows is a whole frame written down, and the compiler generates the
+// dispatcher for each thread from it, with a `quiesce` at every phase
+// boundary. Because each phase's wrapper provides only that phase's effect,
+// a call reaching across a phase is refused by the ordinary effect pass.
+//
+//   import "std/schedule";
+//
+//   effect Input;
+//   effect Sim;
+//
+//   const FRAME: Schedule[2] = [
+//     { phase: "input", effect: "Input", entry: "read_input", thread: 0 },
+//     { phase: "sim", effect: "Sim", entry: "step_world", thread: 1 },
+//   ];
+//
+// `mettle expand` prints what was generated, as ordinary Mettle.
+
+export struct Schedule {
+  phase: string;
+  effect: string;
+  entry: string;
+  thread: int32;
+}

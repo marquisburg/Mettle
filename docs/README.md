@@ -40,7 +40,7 @@ frontend can drive instead. The documentation is organized the same way.
 - [Compile-time execution](testing.md): `mettle test` and `mettle trace`.
 - [Linker and build pipelines](linker-build-pipelines.md): which linker runs
   when.
-- [Runtime model](runtime-model.md): what an emitted program assumes of the OS.
+- [Runtime model](runtime-model.md): what an emitted program assumes of the OS, and a frame written down as data.
 - [Bare metal](bare-metal.md): inline assembly, `volatile`, `@naked` and
   `@interrupt`, cross-compilation, a chosen link address, and 16-bit code.
 - [C interoperability](c-interop.md): calling out, being called, the struct

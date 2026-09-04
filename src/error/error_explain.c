@@ -436,6 +436,48 @@ static const ErrorCodeDoc DOCS[] = {
      "\n"
      "Fix: widen the type's `with` clause, remove the effect from the\n"
      "function, or pass the function by name.\n"},
+    {"H0001", "A schedule is not written as phases",
+     "A `const` of `std/schedule`'s `Schedule` is read while compiling, so it\n"
+     "has to be there to read: an array literal of rows, each naming the\n"
+     "phase, the effect that holds while it runs, the function it runs, and\n"
+     "the thread it runs on.\n"
+     "\n"
+     "Example:\n"
+     "    const FRAME: Schedule[2] = [\n"
+     "      { phase: \"input\", effect: \"Input\", entry: \"read\", thread: 0 },\n"
+     "      { phase: \"sim\", effect: \"Sim\", entry: \"step\", thread: 1 },\n"
+     "    ];\n"
+     "\n"
+     "Every field is a literal. Nothing here can be computed at run time,\n"
+     "because the dispatcher is generated before the program runs.\n"},
+    {"H0002", "A schedule names a phase or an effect twice",
+     "Each phase has its own name and its own effect. One effect per phase is\n"
+     "what makes a call across a phase boundary something the compiler can\n"
+     "refuse: the wrapper for a phase provides that phase's effect and no\n"
+     "other, so reaching code that requires a different phase's effect lands\n"
+     "somewhere nothing provides it.\n"
+     "\n"
+     "Two phases sharing an effect would make that boundary invisible.\n"},
+    {"H0003", "A schedule names an effect nothing declares",
+     "A phase runs under an effect, and the effect has to be declared where\n"
+     "the schedule can see it. The compiler does not invent one, because an\n"
+     "effect a program never wrote is one it cannot say anything about.\n"
+     "\n"
+     "Fix: `effect <name>;` beside the schedule.\n"},
+    {"H0004", "A schedule names an entry nothing declares",
+     "A phase runs a function of this module, named as it was written. The\n"
+     "name is a string in the schedule, so a typo is a name that resolves to\n"
+     "nothing rather than a call that does not compile; this is the check\n"
+     "that turns the first into the second.\n"},
+    {"H0005", "A schedule is a `var`",
+     "A schedule is read while compiling, so it has to be a `const`. A `var`\n"
+     "can change while the program runs, and the dispatcher was generated\n"
+     "before it started.\n"},
+    {"H0006", "The dispatcher generated from a schedule did not parse",
+     "This is a compiler fault rather than a program's. The generated\n"
+     "dispatcher is ordinary Mettle and `mettle expand` prints it; if that\n"
+     "text is not valid, the generator produced something wrong. Please\n"
+     "report it with the schedule that caused it.\n"},
     {"F0006", "Two threads write the same global and nothing orders them",
      "Two functions write one global, and the effects each needs place them\n"
      "somewhere different: one runs where an effect it requires is provided,\n"

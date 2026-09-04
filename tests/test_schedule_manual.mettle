@@ -1,0 +1,53 @@
+// The same frame with the dispatcher written out by hand, in the order and
+// under the names the schedule generates. It is here to be compiled beside
+// `test_schedule.mettle` and compared byte for byte: what a schedule
+// generates is what a person would have written, and nothing else.
+import "std/io";
+import "std/thread";
+
+effect Input;
+effect Sim;
+effect Render;
+
+var g_input: int32 = 0;
+var g_world: int32 = 0;
+var g_drawn: int32 = 0;
+
+fn read_input() {
+  g_input = g_input + 1;
+}
+
+fn step_world() {
+  g_world = g_world + 2;
+}
+
+fn draw_world() {
+  g_drawn = g_drawn + 4;
+}
+
+fn main() -> int32 {
+  var worker: int64 = CreateThread(0, 0, &FRAME_thread_1, 0, 0, 0);
+  FRAME_thread_0(0);
+  thread_join_infinite(worker);
+  thread_close(worker);
+  println("input {g_input} world {g_world} drawn {g_drawn}");
+  return 0;
+}
+
+fn FRAME_phase_input() provides Input { read_input(); }
+fn FRAME_phase_sim() provides Sim { step_world(); }
+fn FRAME_phase_render() provides Render { draw_world(); }
+
+fn FRAME_thread_0(arg: cstring) -> uint32 {
+  FRAME_phase_input();
+  quiesce;
+  FRAME_phase_render();
+  quiesce;
+  return 0;
+}
+
+fn FRAME_thread_1(arg: cstring) -> uint32 {
+  FRAME_phase_sim();
+  quiesce;
+  return 0;
+}

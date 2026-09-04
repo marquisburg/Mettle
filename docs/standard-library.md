@@ -291,6 +291,16 @@ Spin locks on an `int32*`: `spin_try_lock`, `spin_lock`, `spin_unlock`.
 Wait results come back as `WAIT_OBJECT_0()`, `WAIT_TIMEOUT()`, or
 `WAIT_FAILED()`, and `INFINITE()` is the timeout that never expires.
 
+## std/schedule
+
+One type, `Schedule`, and a `const` of it is a frame written down: `phase`,
+`effect`, `entry` and `thread` per row. The compiler reads the const, checks
+it, and generates one wrapper per phase and one dispatcher per thread with a
+`quiesce` at every phase boundary. Because a wrapper provides only its own
+phase's effect, a call across a phase boundary is refused by the effect pass.
+[The runtime model](runtime-model.md) covers it, and `mettle expand` prints
+what was generated.
+
 ## std/rule
 
 The records a `@rule fn` reads and returns: `Program`, `Function`, `TypeInfo`,

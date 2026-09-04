@@ -744,6 +744,10 @@ int type_checker_check_program(TypeChecker *checker, ASTNode *program) {
   // Pass 1: Register struct and enum types. On failure keep going so every
   // bad declaration is reported in one compile, not one per rebuild.
   int ok = 1;
+  if (!schedule_expand(program, checker->error_reporter,
+                       &checker->schedule_stats)) {
+    ok = 0;
+  }
   if (!type_checker_register_effects(checker, program)) {
     ok = 0;
   }

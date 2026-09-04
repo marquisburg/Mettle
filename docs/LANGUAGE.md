@@ -32,7 +32,7 @@ frontend, see [Writing a frontend](embedding.md).
 13. [Diagnostics](diagnostics.md)
 14. [Compile-time execution](testing.md)
 15. [C interoperability](c-interop.md)
-16. [Runtime model](runtime-model.md)
+16. [Runtime model](runtime-model.md), including schedules as data
 17. [Rewrite rules](rewrite-rules.md)
 18. [Rules](rules.md)
 19. [Effects](effects.md), including which globals two threads share

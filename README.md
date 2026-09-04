@@ -157,7 +157,10 @@ the compiler proves it. `effect Render;` declares what a function may do or
 need: `fn mix() forbids Render`, `fn job() requires Worker`, inferred through
 the whole call graph and refused with the chain that broke it. Saying where
 code runs is enough to say which globals two threads share, so one written
-from two threads with nothing ordering them is refused too. A target is a
+from two threads with nothing ordering them is refused too. A frame is data:
+a `const` of `std/schedule`'s `Schedule` names its phases, and the compiler
+generates the dispatcher for each thread from it, with a `quiesce` at every
+phase boundary and a call across one refused. A target is a
 Mettle `const` the compiler reads, so `mettle target x86_64-none` prints one
 and `--target mine.mettle` builds for it. [Rules](docs/rules.md),
 [Effects](docs/effects.md), [Types](docs/types.md) and

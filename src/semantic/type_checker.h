@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include "error/error_reporter.h"
 #include "parser/ast.h"
+#include "semantic/schedule_expand.h"
 
 // Forward declarations
 struct SymbolTable;
@@ -185,6 +186,7 @@ typedef struct {
   /* How many rounds module-scope expansion took to settle. Each round retires
      one directive and registers the types it generated. */
   size_t expansion_rounds;
+  ScheduleStats schedule_stats;
   /* Bytes of text the compile-time evaluator built, on the expansion ledger
      because that is where the budget is. */
   size_t comptime_text_bytes;

@@ -149,6 +149,19 @@ Effect diagnostics:
 | F0005 | The effect pass spent more than its budget |
 | F0006 | Two threads write one global and nothing orders them |
 
+Schedules:
+
+| Code | Meaning |
+|------|---------|
+| H0001 | A schedule is not written as phases |
+| H0002 | A schedule names a phase or an effect twice |
+| H0003 | A schedule names an effect nothing declares |
+| H0004 | A schedule names an entry nothing declares |
+| H0005 | A schedule is a `var` |
+| H0006 | The dispatcher generated from a schedule did not parse |
+
+[The runtime model](runtime-model.md) covers the H codes in context.
+
 [Effects](effects.md) covers the F codes in context.
 
 Reference twins:

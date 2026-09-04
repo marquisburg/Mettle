@@ -1,0 +1,36 @@
+// The same frame, with the input phase reaching into the simulation. Each
+// phase's wrapper provides only that phase's effect, so a call that crosses a
+// phase boundary arrives somewhere its requirement is not provided and the
+// build stops with the chain that got there.
+import "std/io";
+import "std/schedule";
+
+effect Input;
+effect Sim;
+
+var g_input: int32 = 0;
+var g_world: int32 = 0;
+
+const FRAME: Schedule[2] = [
+  { phase: "input", effect: "Input", entry: "read_input", thread: 0 },
+  { phase: "sim", effect: "Sim", entry: "step_world", thread: 0 },
+];
+
+fn touch_world() requires Sim {
+  g_world = g_world + 1;
+}
+
+fn read_input() {
+  g_input = g_input + 1;
+  touch_world();
+}
+
+fn step_world() {
+  touch_world();
+}
+
+fn main() -> int32 {
+  FRAME_thread_0(0);
+  println("input {g_input} world {g_world}");
+  return 0;
+}
