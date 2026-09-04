@@ -873,7 +873,11 @@ the checker and the interpreter, enforced by a build that fails, explained as
 ordinary Mettle, verified by a machine that does not trust it, and optimized
 only where proven.
 
-- ~~An abstraction.~~ Part III, landed above.
+- ~~An abstraction.~~ Part III, landed above. Proven by
+  `abstraction_examples`, which builds and runs a generated table, a generated
+  wire format and a generated set of variants, reads what each generated back
+  as ordinary Mettle, and fails the build on a variant nobody decided. Nothing
+  in it is gapped.
 - ~~A rule.~~ *(I.2, VII.3)* Landed. `@rule fn f(p: Program) -> Verdict` is
   an ordinary function the compiler runs in its own interpreter after type
   checking, on the checked program as data: every function with its direct
@@ -883,7 +887,11 @@ only where proven.
   out is refused, because a rule is code the compiler does not trust. Rules
   never link, cannot be called, and their cost is a ledger
   (`--report-rules`) and a contract (`--rule-budget=N`). Not a plugin, not
-  a predicate language.
+  a predicate language. Proven by `rule_fails_build`, `rules_read_the_machine`,
+  `rules_read_traces`, `rule_explains_itself_and_is_cross_checked` and
+  `rules_propose_rewrites`. Gapped: a rule sees the checked program, the
+  compiled machine and a run's trace, and never a pass or the allocator, which
+  is III.3 and the next mountain.
 - ~~A type.~~ *(I.4)* Landed. `type Percent = int32 where value >= 0 &&
   value <= 100;` declares a type that carries a rule. A value of the base
   becomes one only where the compiler proves the predicate, and the proof
@@ -896,6 +904,12 @@ only where proven.
   interpreter re-checks every proven conversion under `mettle test`, so a
   wrong proof is caught by a machine that does not trust the prover.
   `--check-proofs` extends that check into a compiled program.
+  Proven by `refine_unproven_is_refused`, `proofs_cross_calls`,
+  `proofs_carry_around_loops`, `declared_types_relate_values`,
+  `float_predicates_bound_reassociation` and `declared_types_refine_structs`.
+  Gapped, and written into known-limitations.md: no integer-overflow check, no
+  way to declare two pointers disjoint, and a float accumulator carries a
+  bound only where the loop's trip count is constant.
 - ~~An execution model.~~ *(V.6)* Landed as a position and a worked shape:
   the model is the program's, `quiesce` is its point, and its properties are
   a contract, a declared type, effects and rules that hold on every build.
@@ -919,7 +933,14 @@ only where proven.
   `where cycles < N` is costed from a model of the target, refused when the
   path costs more (D0001) and refused again when the path cannot be bounded
   at all (D0002), with `--check-deadlines` counting what a path really cost
-  while the program ran.
+  while the program ran. Proven by `execution_model_is_the_programs`,
+  `engine_example`, `two_threads_writing_one_global`,
+  `task_ownership_crosses_the_handover`, `schedule_is_data_the_compiler_reads`
+  and `deadlines_are_proven_from_a_cost_model`. Gapped, and written into
+  known-limitations.md: F0006 speaks about globals and not heap objects, a
+  spawn whose entry point comes out of a struct field is not recognised as
+  one, and a deadline's cost model is the compiler's because a target
+  description says what a machine has and not what an instruction costs.
 - ~~A machine concept, the reachable half.~~ *(III.3)* Landed. A target's
   description is a Mettle `const` the compiler reads: `mettle target
   <triple>` prints every built-in one, a whole instruction set can be a
@@ -933,7 +954,14 @@ only where proven.
   on an emulated CPU; a hosted one cannot rewrite the platform's, and a
   description that claims what the emitter cannot honour is refused and told
   which fact it contradicted. Whether a description is enough for a genuinely
-  new machine remains unproven, and is said to be.
+  new machine remains unproven, and is said to be: bare-metal.md carries one
+  table of every machine claim, what actually ran it, and where the evidence
+  stops. Proven by `target_description_round_trips`,
+  `arm64_convention_described_in_data` and `machine_described_as_data`.
+  Gapped, in one sentence: the register allocator does not schedule around a
+  described instruction and a rewrite rule cannot map IR onto one, because
+  both mean handing out the allocator and the emitters, and that is III.3's
+  wall rather than an omission.
 
 ---
 
