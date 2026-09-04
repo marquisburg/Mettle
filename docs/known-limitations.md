@@ -53,6 +53,32 @@ mismatch against `fn(...)`.
 Omitted struct fields and short array literals leave the rest zero. Extra
 elements, unknown field names, and repeated field names are errors.
 
+## Deadlines
+
+The cost model is the compiler's. A target description says what registers and
+widths a machine has; it does not say what an instruction costs, so a program
+cannot supply a cost model of its own and a new machine's deadlines are costed
+with the model the compiler already has. That is the same wall the emitters
+sit behind.
+
+Costs are taken over the IR as lowered, before the optimizer runs. The number
+is an upper bound on the work the program asked for, not a prediction of one
+machine's cycles: no cache model, no branch predictor, no out-of-order
+overlap. A deadline is a comparison against work, and it is exact about what
+it compares.
+
+A loop's trip count is read from its own bound: an induction variable with a
+constant entry value, a constant step, and a constant it is tested against. A
+loop bounded by anything else, including a global the compiler could fold, is
+unbounded here and is refused unless `--pgo` supplies a measured count. A
+recursive call is unbounded. A call through a pointer, a call with no body in
+this program, and an `asm` block are unbounded.
+
+Nested loops are costed innermost first, and each loop's extra cost is folded
+into its header before an enclosing loop is measured. A loop whose body's
+longest path depends on which iteration it is on is costed at its worst
+iteration for every iteration.
+
 ## Schedules
 
 A schedule's rows are literals, read before the program runs, so nothing in

@@ -159,6 +159,17 @@ void mettle_safety_reset(void);
 void mettle_safety_task_capture_check(const void *pointer, const char *task,
                                const char *sender, uint32_t line);
 
+/* The run-time half of a `where cycles < N` deadline, emitted under
+ * --check-deadlines. Every basic block adds its own model cost to the frame
+ * on top, and leaving compares what the path actually spent against the
+ * longest path the compiler proved. The model is the same one the proof used;
+ * what is re-checked is the claim that no path costs more, which is the half
+ * an analysis can get wrong. */
+void mettle_safety_deadline_enter(const char *name, int64_t limit,
+                                  int64_t proven);
+void mettle_safety_deadline_step(int64_t cost);
+void mettle_safety_deadline_leave(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -912,7 +912,12 @@ only where proven.
   `std/schedule`'s `Schedule` names each phase, its effect, its entry and its
   thread, and the compiler generates the dispatchers and the `quiesce` at
   every phase boundary. That is not an injected yield: the program wrote the
-  order, and `mettle expand` prints what came out as ordinary Mettle.
+  order, and `mettle expand` prints what came out as ordinary Mettle. Time
+  joined the list of things a program can declare and the compiler proves:
+  `where cycles < N` is costed from a model of the target, refused when the
+  path costs more (D0001) and refused again when the path cannot be bounded
+  at all (D0002), with `--check-deadlines` counting what a path really cost
+  while the program ran.
 - ~~A machine concept, the reachable half.~~ *(III.3)* Landed. A target's
   description is a Mettle `const` the compiler reads: `mettle target
   <triple>` prints every built-in one, `--target desc.mettle` builds for a

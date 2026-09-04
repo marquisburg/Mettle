@@ -12,7 +12,7 @@ frontend, see [Writing a frontend](embedding.md).
 ## The language
 
 1. [Lexical structure](lexical-structure.md)
-2. [Types](types.md)
+2. [Types](types.md), including declared types and deadlines
 3. [Declarations](declarations.md)
 4. [Expressions](expressions.md)
 5. [Control flow](control-flow.md)

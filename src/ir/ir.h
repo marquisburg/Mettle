@@ -655,6 +655,9 @@ typedef struct {
   int is_readonly_inferred;
   int is_speculatable_inferred;
   const char *reference_twin;
+  long long deadline_cycles;
+  int has_deadline;
+  int deadline_inclusive;
   const char *explain_code;
   const char *explain_text;
   int is_noalloc;         // `@noalloc` : proven allocation-free or error

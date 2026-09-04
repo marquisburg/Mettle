@@ -34,6 +34,7 @@
 #include "semantic/rule_reflect.h"
 #include "semantic/target_desc.h"
 #include "ir/ir_rules.h"
+#include "ir/ir_deadline.h"
 #include "ir/ir_effects.h"
 #include "ir/ir_purity.h"
 #include "ir/ir_twins.h"
@@ -3955,6 +3956,10 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
     options->report_rules = 1;
   } else if (strcmp(argv[i], "--check-proofs") == 0) {
     options->check_proofs = 1;
+  } else if (strcmp(argv[i], "--check-deadlines") == 0) {
+    options->check_deadlines = 1;
+  } else if (strcmp(argv[i], "--report-deadlines") == 0) {
+    options->report_deadlines = 1;
   } else if (strcmp(argv[i], "--check-tasks") == 0) {
     options->check_tasks = 1;
   } else if (strcmp(argv[i], "--check-effects") == 0) {
@@ -6308,6 +6313,23 @@ int compile_file(const char *input_filename, const char *output_filename,
     ir_pgo_print_summary();
   }
 
+  {
+    IRDeadlineStats deadline_stats;
+    if (!ir_deadline_run(ir_program, error_reporter,
+                         options->target_triple ? options->target_triple
+                                                : "x86_64",
+                         options->check_deadlines && !options->test_mode,
+                         options->report_deadlines ? stdout : NULL,
+                         &deadline_stats)) {
+      if (error_reporter_has_errors(error_reporter)) {
+        error_reporter_print_errors(error_reporter);
+      }
+      result = 1;
+      goto cleanup;
+    }
+  }
+
+
   if (options->test_mode || options->trace_function) {
     options->trace_rule_checker = type_checker;
     result = compile_run_comptime(ir_program, program, options, error_reporter,
@@ -6888,6 +6910,10 @@ void print_usage(const char *program_name) {
          "                      declared type is not one (survives --release)\n");
   printf("  --check-tasks       Trap at run time when a pointer handed to a task lies in\n"
          "                      the stack of the thread that spawned it\n");
+  printf("  --report-deadlines  Print each `where cycles < N` deadline, what its longest\n"
+         "                      path costs, and whether it was proven or measured\n");
+  printf("  --check-deadlines   Count what a path actually costs while the program runs and\n"
+         "                      trap when it passes the longest path the compiler proved\n");
   printf("  --check-effects     Trap at run time when an effect the compiler proved absent\n"
          "                      is performed, or one it proved provided is not (survives\n"
          "                      --release)\n");

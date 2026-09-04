@@ -149,6 +149,15 @@ Effect diagnostics:
 | F0005 | The effect pass spent more than its budget |
 | F0006 | Two threads write one global and nothing orders them |
 
+Deadlines:
+
+| Code | Meaning |
+|------|---------|
+| D0001 | A function's longest path costs more than its deadline |
+| D0002 | A function's longest path cannot be bounded |
+
+[Types](types.md) covers the D codes in context.
+
 Schedules:
 
 | Code | Meaning |

@@ -4476,6 +4476,82 @@ catch {
   Write-CaseResult -Name "abstraction_examples" -Passed $false -Reason $_.Exception.Message
 }
 
+# A deadline is a claim about a function's longest path, and the compiler
+# proves it from a cost model or stops the build. Enforce: a path that fits
+# builds and the report prints it block by block, a path that does not fails
+# under its own code, a path that cannot be bounded fails under another,
+# --pgo lets a measured trip count stand in and the report calls that
+# evidence, and --check-deadlines catches an analysis that under-counted.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "deadline.exe"
+  $out = & $CompilerPath --build "tests/test_deadline.mettle" -o $exe --report-deadlines 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a deadline the path meets was refused: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "longest path through tick") { throw "the report does not print the path: $out" }
+  if ($flat -notmatch "costs \d+") { throw "the report does not cost the path: $out" }
+  if ($flat -notmatch "proven from the cost model") { throw "the report does not say how it held: $out" }
+  if ($flat -notmatch "deadlines: 1 declared, 1 proven, 0 held on evidence") { throw "the deadline ledger is wrong: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "total 9841") { throw "the program did not run: $run" }
+
+  $out = & $CompilerPath --build "tests/test_deadline_over.mettle" -o (Join-Path $tmpDir "deadline_over.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a deadline the path cannot meet built" }
+  if ($out -notmatch "error\[D0001\]") { throw "the missed deadline was not refused: $out" }
+
+  $out = & $CompilerPath --build "tests/test_deadline_unbounded.mettle" -o (Join-Path $tmpDir "deadline_unbounded.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a deadline on an unbounded path built" }
+  if ($out -notmatch "error\[D0002\]") { throw "the unbounded path was not refused: $out" }
+
+  $measured = Join-Path $tmpDir "deadline_pgo.exe"
+  $out = & $CompilerPath --build "tests/test_deadline_unbounded.mettle" -o $measured --pgo --report-deadlines 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a measured trip count did not close the gap: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "held on a measured trip count") { throw "the report does not call evidence evidence: $out" }
+  if ($flat -notmatch "1 held on evidence") { throw "the ledger does not count what rests on evidence: $out" }
+
+  $env:METTLE_TRUST_DEADLINES = "1"
+  $trusted = Join-Path $tmpDir "deadline_trusted.exe"
+  $out = & $CompilerPath --build "tests/test_deadline.mettle" -o $trusted --check-deadlines 2>&1 | Out-String
+  Remove-Item Env:METTLE_TRUST_DEADLINES
+  if ($LASTEXITCODE -ne 0) { throw "the trusted build failed: $out" }
+  $run = & $trusted 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a path that outran the proof ran to completion" }
+  $flat = $run -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "more than the longest path the compiler proved") { throw "the run-time check did not catch it: $run" }
+
+  $checked = Join-Path $tmpDir "deadline_checked.exe"
+  $out = & $CompilerPath --build "tests/test_deadline.mettle" -o $checked --check-deadlines 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the checked build failed: $out" }
+  $run = & $checked 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a proven deadline trapped at run time: $run" }
+  if ($run -notmatch "total 9841") { throw "the checked program did not run: $run" }
+
+  $plain = Join-Path $tmpDir "deadline_free_plain.exe"
+  $flagged = Join-Path $tmpDir "deadline_free_flagged.exe"
+  $out = & $CompilerPath --build "tests/test_pure_inferred.mettle" -o $plain 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the deadline-free build failed: $out" }
+  $out = & $CompilerPath --build "tests/test_pure_inferred.mettle" -o $flagged --check-deadlines --report-deadlines 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the deadline-free build under the flags failed: $out" }
+  if ($out -notmatch "deadlines: none declared") { throw "a program with no deadline was not said to have none: $out" }
+  $a = [System.IO.File]::ReadAllBytes($plain)
+  $b = [System.IO.File]::ReadAllBytes($flagged)
+  if ($a.Length -ne $b.Length) { throw "a program with no deadline changed size under --check-deadlines" }
+  for ($i = 0; $i -lt $a.Length; $i++) {
+    if ($a[$i] -ne $b[$i]) { throw "a program with no deadline changed at byte $i under --check-deadlines" }
+  }
+
+  $out = & $CompilerPath explain D0002 2>&1 | Out-String
+  if ($out -notmatch "holds on evidence") { throw "explain D0002 says nothing: $out" }
+  Write-CaseResult -Name "deadlines_are_proven_from_a_cost_model" -Passed $true
+}
+catch {
+  $failed++
+  if (Test-Path Env:METTLE_TRUST_DEADLINES) { Remove-Item Env:METTLE_TRUST_DEADLINES }
+  Write-CaseResult -Name "deadlines_are_proven_from_a_cost_model" -Passed $false -Reason $_.Exception.Message
+}
+
 # A frame written down as data, with the dispatcher generated from it and a
 # quiesce at every phase boundary. Enforce: the generated program runs, expand
 # prints the dispatcher as ordinary Mettle, it does what the hand-written one

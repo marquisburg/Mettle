@@ -166,6 +166,9 @@ static ASTNode *ast_clone_method_declaration(ASTNode *clone, const ASTNode *node
   dst->is_inline_contract = src->is_inline_contract;
   dst->is_noinline = src->is_noinline;
   dst->is_pure = src->is_pure;
+  dst->deadline_cycles = src->deadline_cycles;
+  dst->has_deadline = src->has_deadline;
+  dst->deadline_inclusive = src->deadline_inclusive;
   dst->reference_twin =
       src->reference_twin ? ast_copy_string(src->reference_twin) : NULL;
   dst->explain_code =
@@ -1853,6 +1856,9 @@ ASTNode *ast_create_function_declaration(const char *name, char **param_names,
   func_decl->is_inline_contract = 0;
   func_decl->is_noinline = 0;
   func_decl->is_pure = 0;
+  func_decl->deadline_cycles = 0;
+  func_decl->has_deadline = 0;
+  func_decl->deadline_inclusive = 0;
   func_decl->reference_twin = NULL;
   func_decl->explain_code = NULL;
   func_decl->explain_text = NULL;

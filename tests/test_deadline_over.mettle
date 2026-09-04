@@ -1,0 +1,26 @@
+// The same loop with a deadline the longest path cannot meet. The bound is a
+// contract, so this is a build that stops rather than a program that misses
+// its frame in the field.
+import "std/io";
+
+var g_total: int32 = 0;
+
+fn mix(seed: int32) -> int32 {
+  return seed * 3 + 1;
+}
+
+fn tick(seed: int32) -> int32 where cycles < 60 {
+  var acc: int32 = seed;
+  var i: int32 = 0;
+  while (i < 8) {
+    acc = mix(acc);
+    i = i + 1;
+  }
+  return acc;
+}
+
+fn main() -> int32 {
+  g_total = tick(1);
+  println("total {g_total}");
+  return 0;
+}

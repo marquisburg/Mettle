@@ -153,7 +153,9 @@ and a failing verdict stops the build at the site it names: no function in
 this module recurses, this struct stays under 64 bytes, every variant is
 handled in this file. `type Percent = int32 where value >= 0 && value <=
 100;` declares a type that carries a rule, and a value becomes one only where
-the compiler proves it. `effect Render;` declares what a function may do or
+the compiler proves it. `fn tick() where cycles < 400` says the same kind of
+thing about a function's longest path, and the compiler costs that path from a
+model of the target or stops the build. `effect Render;` declares what a function may do or
 need: `fn mix() forbids Render`, `fn job() requires Worker`, inferred through
 the whole call graph and refused with the chain that broke it. Saying where
 code runs is enough to say which globals two threads share, so one written

@@ -127,6 +127,8 @@ typedef struct {
   int report_target;
   int check_proofs;
   int check_tasks;
+  int check_deadlines;
+  int report_deadlines;
   int check_effects;
   int check_purity_fault;
   int emit_object;

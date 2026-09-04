@@ -693,6 +693,56 @@ naming the conjunct it could not establish.
 `--check-proofs` re-checks a struct refinement by evaluating the predicate
 itself, in the scope where the value was proven.
 
+## Deadlines
+
+A function may declare what its longest path is allowed to cost:
+
+```mettle
+fn tick(seed: int32) -> int32 where cycles < 400 { ... }
+```
+
+`where cycles < N` reads the same way `where value >= 0` does. It is a claim
+the compiler proves or refuses, never a hint. The cost of one instruction
+comes from a model of the target, the cost of a call is the callee's own
+longest path, and the cost of a loop is its body times a trip count taken from
+the loop's own bound: the induction variable's entry value, its step, and the
+constant it is tested against. A path costing more than the bound is `D0001`.
+
+```text
+error[D0001]: 'tick' declares a deadline of 60 cycles, and its longest path
+costs 191 on this target
+```
+
+The model costs the IR as lowered, before the optimizer runs, so the number is
+an upper bound on the work the program asked for and not a prediction of one
+machine's cycles.
+
+A path with no bound the compiler can find is `D0002`, and it is a refusal
+rather than a silence, because a deadline that cannot be proven is not a
+deadline. `--pgo` interprets the program and lets a measured trip count stand
+in; the deadline then holds, and the report says on what:
+
+```text
+deadline tick: 182 of 4000 cycles, 3817 to spare, held on a measured trip count
+deadlines: 1 declared, 1 proven, 1 held on evidence
+```
+
+`--report-deadlines` prints the longest path block by block with what each one
+costs, which is where the work is:
+
+```text
+  longest path through tick:
+    ir_entry_82 at line 13 costs 2
+    ir_while_83 at line 16 costs 170
+```
+
+`--check-deadlines` asks the same question while the program runs. Every basic
+block adds its own model cost to the frame on top, and returning past the
+proven longest path traps. The model is the one the proof used; what is
+re-checked is the claim that no path costs more, which is the half an analysis
+can get wrong. A program with no deadline compiles to the same bytes with the
+flag as without it.
+
 ## What a declared type earns
 
 A property the program declared and the compiler proved earns the treatment one

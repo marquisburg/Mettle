@@ -221,6 +221,9 @@ IRFunction *ir_lower_function(IRLoweringContext *context,
                           function_data->is_naked ||
                           function_data->is_interrupt;
   function->is_pure = function_data->is_pure;
+  function->deadline_cycles = function_data->deadline_cycles;
+  function->has_deadline = function_data->has_deadline;
+  function->deadline_inclusive = function_data->deadline_inclusive;
   function->reference_twin =
       function_data->reference_twin
           ? string_intern(function_data->reference_twin)

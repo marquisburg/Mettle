@@ -1160,6 +1160,49 @@ static int parser_parse_effect_clauses(Parser *parser,
   }
 }
 
+static int parser_parse_deadline_clause(Parser *parser, long long *out_cycles,
+                                        int *out_present, int *out_inclusive) {
+  *out_cycles = 0;
+  *out_present = 0;
+  *out_inclusive = 0;
+  if (parser->current_token.type != TOKEN_WHERE) {
+    return 1;
+  }
+  if (!parser_is_identifier_like(parser->peek_token.type) ||
+      !parser->peek_token.value ||
+      strcmp(parser->peek_token.value, "cycles") != 0) {
+    return 1;
+  }
+  parser_advance(parser);
+  parser_advance(parser);
+  if (parser->current_token.type == TOKEN_LESS_THAN) {
+    *out_inclusive = 0;
+  } else if (parser->current_token.type == TOKEN_LESS_EQUALS) {
+    *out_inclusive = 1;
+  } else {
+    parser_set_error(parser,
+                     "A deadline is written 'where cycles < N' or 'where "
+                     "cycles <= N'");
+    return 0;
+  }
+  parser_advance(parser);
+  if (parser->current_token.type != TOKEN_NUMBER ||
+      !parser->current_token.value) {
+    parser_set_error(parser,
+                     "Expected the cycle count after 'cycles <': a deadline "
+                     "is a number the compiler can compare against");
+    return 0;
+  }
+  *out_cycles = strtoll(parser->current_token.value, NULL, 0);
+  if (*out_cycles <= 0) {
+    parser_set_error(parser, "A deadline has to be a positive cycle count");
+    return 0;
+  }
+  *out_present = 1;
+  parser_advance(parser);
+  return 1;
+}
+
 static int parser_apply_effect_clauses(FunctionDeclaration *decl,
                                        ParsedEffectClauses *clauses) {
   for (int c = 0; c < 4; c++) {
@@ -5880,10 +5923,48 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     }
   }
 
+  long long deadline_cycles = 0;
+  int has_deadline = 0;
+  int deadline_inclusive = 0;
+  if (!parser_parse_deadline_clause(parser, &deadline_cycles, &has_deadline,
+                                    &deadline_inclusive)) {
+    for (size_t i = 0; i < param_count; i++) {
+      free(param_names[i]);
+      free(param_types[i]);
+    }
+    free(param_names);
+    free(param_types);
+    parser_free_type_param_list(func_type_params, func_type_param_traits,
+                                func_type_param_count);
+    free(func_name);
+    free(return_type);
+    free(link_name);
+    parser_free_string_array(return_types, return_type_count);
+    return NULL;
+  }
+
   if (parser->current_token.type == TOKEN_WHERE &&
       !parser_parse_where_clause(parser, func_type_params,
                                  func_type_param_traits,
                                  func_type_param_count)) {
+    for (size_t i = 0; i < param_count; i++) {
+      free(param_names[i]);
+      free(param_types[i]);
+    }
+    free(param_names);
+    free(param_types);
+    parser_free_type_param_list(func_type_params, func_type_param_traits,
+                                func_type_param_count);
+    free(func_name);
+    free(return_type);
+    free(link_name);
+    parser_free_string_array(return_types, return_type_count);
+    return NULL;
+  }
+
+  if (!has_deadline &&
+      !parser_parse_deadline_clause(parser, &deadline_cycles, &has_deadline,
+                                    &deadline_inclusive)) {
     for (size_t i = 0; i < param_count; i++) {
       free(param_names[i]);
       free(param_types[i]);
@@ -6047,6 +6128,9 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
   parser_free_effect_clauses(&effect_clauses);
   if (func_decl && func_decl->data) {
     FunctionDeclaration *func_data = (FunctionDeclaration *)func_decl->data;
+    func_data->deadline_cycles = deadline_cycles;
+    func_data->has_deadline = has_deadline;
+    func_data->deadline_inclusive = deadline_inclusive;
     func_data->reference_twin = reference_twin;
     reference_twin = NULL;
     func_data->explain_code = explain_code;

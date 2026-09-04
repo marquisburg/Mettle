@@ -318,6 +318,11 @@ fn abs_fast(x: int32) -> int32 reference abs_slow { ... }
 answers a constant's text, so a name or a tag can be built while compiling.
 [Control flow](control-flow.md) covers it beside `comptime for`.
 
+A function may also declare what its longest path is allowed to cost:
+`fn tick() where cycles < 400`. It reads the same way a declared type's
+predicate does, and the compiler proves it or refuses the build.
+[Types](types.md) covers deadlines beside the rest of `where`.
+
 `@naked` and `@interrupt` are for code the operating system is not running.
 [Bare metal](bare-metal.md) covers both, along with inline assembly.
 

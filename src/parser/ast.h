@@ -163,6 +163,9 @@ typedef struct {
   int is_noinline;        // `@noinline`: never inline this function
   int is_pure;            // `@pure`    : side-effect-free; enables call LICM
   char *reference_twin;
+  long long deadline_cycles;
+  int has_deadline;
+  int deadline_inclusive;
   char *explain_code;
   char *explain_text;
   int is_noalloc;         // `@noalloc` : proven allocation-free or compile error

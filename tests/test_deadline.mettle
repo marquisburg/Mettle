@@ -1,0 +1,27 @@
+// A deadline is a claim about the longest path, and the compiler proves it
+// from the target's cost model or stops the build. The loop is bounded by a
+// constant, so its trip count is a fact rather than a guess, and the call is
+// costed at what the callee's own longest path costs.
+import "std/io";
+
+var g_total: int32 = 0;
+
+fn mix(seed: int32) -> int32 {
+  return seed * 3 + 1;
+}
+
+fn tick(seed: int32) -> int32 where cycles < 400 {
+  var acc: int32 = seed;
+  var i: int32 = 0;
+  while (i < 8) {
+    acc = mix(acc);
+    i = i + 1;
+  }
+  return acc;
+}
+
+fn main() -> int32 {
+  g_total = tick(1);
+  println("total {g_total}");
+  return 0;
+}

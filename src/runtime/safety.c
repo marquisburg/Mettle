@@ -657,3 +657,77 @@ void mettle_safety_task_capture_check(const void *pointer, const char *task,
   }
   mettle_crash_trap_ex(METTLE_CRASH_TRAP_UNKNOWN, g_task_message, 0, 0, 0, 0);
 }
+
+/* ---- the deadline check --------------------------------------------------- */
+
+#define SAFETY_DEADLINE_DEPTH 64
+
+typedef struct {
+  const char *name;
+  int64_t limit;
+  int64_t proven;
+  int64_t spent;
+} SafetyDeadline;
+
+#if defined(_WIN32) && defined(__GNUC__) && !defined(__clang__)
+static SafetyDeadline g_deadline_stack[SAFETY_DEADLINE_DEPTH];
+static unsigned g_deadline_depth;
+#else
+static __thread SafetyDeadline g_deadline_stack[SAFETY_DEADLINE_DEPTH];
+static __thread unsigned g_deadline_depth;
+#endif
+
+static char g_deadline_message[512];
+
+void mettle_safety_deadline_enter(const char *name, int64_t limit,
+                                  int64_t proven) {
+  if (g_deadline_depth >= SAFETY_DEADLINE_DEPTH) {
+    g_deadline_depth++;
+    return;
+  }
+  g_deadline_stack[g_deadline_depth].name = name;
+  g_deadline_stack[g_deadline_depth].limit = limit;
+  g_deadline_stack[g_deadline_depth].proven = proven;
+  g_deadline_stack[g_deadline_depth].spent = 0;
+  g_deadline_depth++;
+}
+
+void mettle_safety_deadline_step(int64_t cost) {
+  if (g_deadline_depth == 0 || g_deadline_depth > SAFETY_DEADLINE_DEPTH) {
+    return;
+  }
+  g_deadline_stack[g_deadline_depth - 1].spent += cost;
+}
+
+void mettle_safety_deadline_leave(void) {
+  SafetyDeadline *frame = NULL;
+  size_t at = 0;
+  const size_t capacity = sizeof(g_deadline_message);
+  if (g_deadline_depth == 0) {
+    return;
+  }
+  g_deadline_depth--;
+  if (g_deadline_depth >= SAFETY_DEADLINE_DEPTH) {
+    return;
+  }
+  frame = &g_deadline_stack[g_deadline_depth];
+  if (g_deadline_depth > 0) {
+    g_deadline_stack[g_deadline_depth - 1].spent += frame->spent;
+  }
+  if (frame->spent <= frame->proven) {
+    return;
+  }
+  g_deadline_message[0] = '\0';
+  safety_append(g_deadline_message, capacity, &at,
+                "Fatal error: the path '");
+  safety_append(g_deadline_message, capacity, &at,
+                frame->name ? frame->name : "?");
+  safety_append(g_deadline_message, capacity, &at, "' actually took cost ");
+  safety_append_signed(g_deadline_message, capacity, &at, frame->spent);
+  safety_append(g_deadline_message, capacity, &at,
+                ", more than the longest path the compiler proved (");
+  safety_append_signed(g_deadline_message, capacity, &at, frame->proven);
+  safety_append(g_deadline_message, capacity, &at, ")");
+  mettle_crash_trap_ex(METTLE_CRASH_TRAP_UNKNOWN, g_deadline_message, 0, 0, 0,
+                       0);
+}

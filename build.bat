@@ -325,7 +325,7 @@ if exist obj\link.ok del /Q obj\link.ok
 if exist bin\mtlc.lib del /Q bin\mtlc.lib
 REM Backend IR core -- explicitly listed to EXCLUDE the lowering TUs below.
 set "AROBJS="
-for %%o in (ir ir_comptime ir_rules ir_effects ir_purity ir_twins ir_machine ir_trace ir_debug_hooks ir_interp ir_optimize ir_pgo ir_profile ir_verify ml_gnn ml_obs ml_opt mtlc_type) do call set "AROBJS=%%AROBJS%% obj\ir\%%o.o"
+for %%o in (ir ir_comptime ir_rules ir_effects ir_deadline ir_purity ir_twins ir_machine ir_trace ir_debug_hooks ir_interp ir_optimize ir_pgo ir_profile ir_verify ml_gnn ml_obs ml_opt mtlc_type) do call set "AROBJS=%%AROBJS%% obj\ir\%%o.o"
 %AR% rcs bin\mtlc.lib %AROBJS%
 if errorlevel 1 exit /b 1
 
