@@ -436,6 +436,51 @@ static const ErrorCodeDoc DOCS[] = {
      "\n"
      "Fix: widen the type's `with` clause, remove the effect from the\n"
      "function, or pass the function by name.\n"},
+    {"N0001", "A described machine is not one the compiler can read",
+     "A machine is a `const` of `std/machine`'s `MachineInsn`, one row per\n"
+     "instruction, and every field of a row is a literal, because all of it\n"
+     "is answered before anything runs.\n"
+     "\n"
+     "Example:\n"
+     "    const ISA: MachineInsn[1] = [\n"
+     "      { name: \"addi\", encoding: \"10 %0 %1\", operands: 2,\n"
+     "        reads: \"%1\", writes: \"%0\", semantics: \"ins_addi\" },\n"
+     "    ];\n"
+     "\n"
+     "An encoding is pairs of hex digits and operand slots, it starts with at\n"
+     "least one fixed byte, and no two instructions share their fixed prefix,\n"
+     "because that prefix is what a decoder matches on. `reads` and `writes`\n"
+     "may only name operands the encoding actually carries. A semantics\n"
+     "function takes the three operand slots and returns the next instruction\n"
+     "index or -1.\n"},
+    {"N0002", "A described machine has no program to run",
+     "`mettle emulate` assembles `const PROGRAM: string[N]`, one assembly\n"
+     "line per row, into the machine's own encoding. A file describing a\n"
+     "machine and nothing to run on it has only half of what is needed.\n"
+     "\n"
+     "Example:\n"
+     "    const PROGRAM: string[2] = [ \"seti 0, 5\", \"out 0\" ];\n"},
+    {"N0003", "A line of PROGRAM is not an instruction of this machine",
+     "The mnemonic is not one the machine describes, the operand count is\n"
+     "not the one the instruction takes, or an operand does not fit the byte\n"
+     "the encoding gives it.\n"},
+    {"N0004", "A described machine does not round-trip",
+     "Assembling and decoding are separate walks over the same description,\n"
+     "and re-assembling what the decoder read back is what says the two\n"
+     "agree. When they do not, the description is not one machine: it writes\n"
+     "bytes it cannot read.\n"
+     "\n"
+     "The usual cause is two instructions whose fixed prefixes overlap, which\n"
+     "is refused up front, or an encoding whose fixed bytes appear where\n"
+     "another instruction's operand lands.\n"},
+    {"N0005", "A described instruction's semantics did not run",
+     "The function an instruction names is what the instruction does, and the\n"
+     "compile-time interpreter runs it. This reports that it was not there,\n"
+     "that it trapped, or that it ran out of steps.\n"},
+    {"N0006", "A described machine did not halt",
+     "The emulator runs until the program's bytes run out or an instruction\n"
+     "branches past the end. A machine that does neither inside its step\n"
+     "budget is reported rather than left running.\n"},
     {"D0001", "A function's longest path costs more than its deadline",
      "`where cycles < N` on a function is a claim about its longest path, and\n"
      "the compiler costs that path from a model of the target: one cost per\n"

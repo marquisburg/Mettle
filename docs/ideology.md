@@ -922,7 +922,10 @@ only where proven.
   while the program ran.
 - ~~A machine concept, the reachable half.~~ *(III.3)* Landed. A target's
   description is a Mettle `const` the compiler reads: `mettle target
-  <triple>` prints every built-in one, `--target desc.mettle` builds for a
+  <triple>` prints every built-in one, a whole instruction set can be a
+  `const` too, with `mettle emulate` assembling a program into it, decoding
+  it back to check the description agrees with itself, and running it through
+  the semantics functions the description names, `--target desc.mettle` builds for a
   described one, and a printed description fed back reproduces the built-in
   target byte for byte on every triple. A freestanding x86_64 target chooses
   its calling convention; a hosted one cannot rewrite the platform's, and a

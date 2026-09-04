@@ -35,6 +35,7 @@
 #include "semantic/target_desc.h"
 #include "ir/ir_rules.h"
 #include "ir/ir_deadline.h"
+#include "semantic/machine_desc.h"
 #include "ir/ir_effects.h"
 #include "ir/ir_purity.h"
 #include "ir/ir_twins.h"
@@ -4430,6 +4431,26 @@ int main(int argc, char *argv[]) {
         return 1;
       }
     }
+    if (strcmp(argv[1], "machine") == 0 ||
+        strcmp(argv[1], "emulate") == 0) {
+      if (strcmp(argv[1], "machine") == 0) {
+        options.machine_mode = 1;
+      } else {
+        options.emulate_mode = 1;
+      }
+      for (int i = 1; i + 1 < argc; i++) {
+        argv[i] = argv[i + 1];
+      }
+      argc--;
+      if (argc < 2) {
+        fprintf(stderr,
+                "usage: mettle machine <file.mettle>   prints the machine the "
+                "file describes\n"
+                "       mettle emulate <file.mettle>   assembles PROGRAM into "
+                "that machine's encoding, decodes it back, and runs it\n");
+        return 1;
+      }
+    }
     if (strcmp(argv[1], "why") == 0) {
       if (argc < 5) {
         fprintf(stderr,
@@ -5067,6 +5088,265 @@ static int compile_run_swap_check(IRProgram *ir_program,
             new_name, skip_reason[0] ? skip_reason : "unknown");
     return 2;
   }
+}
+
+
+IRFunction *ir_program_find_function(IRProgram *program, const char *name);
+
+#define MACHINE_FUEL 20000000LL
+#define MACHINE_STATE_WORDS 8
+#define MACHINE_CODE_MAX 4096
+#define MACHINE_STEP_MAX 1000000
+#define MACHINE_LINE_MAX 256
+
+/* The program a described machine runs: `const PROGRAM: string[N]`, one
+ * assembly line per row. It is read straight out of the AST, the same way the
+ * machine itself is, because both are answered before anything runs. */
+static size_t machine_program_lines(ASTNode *program_node, const char **out,
+                                    size_t capacity) {
+  Program *program = program_node ? (Program *)program_node->data : NULL;
+  size_t count = 0;
+  for (size_t i = 0; program && i < program->declaration_count; i++) {
+    ASTNode *declaration = program->declarations[i];
+    VarDeclaration *variable = NULL;
+    AggregateLiteral *rows = NULL;
+    if (!declaration || declaration->type != AST_VAR_DECLARATION) {
+      continue;
+    }
+    variable = (VarDeclaration *)declaration->data;
+    if (!variable || !variable->name || strcmp(variable->name, "PROGRAM") != 0) {
+      continue;
+    }
+    rows = variable->initializer &&
+                   variable->initializer->type == AST_AGGREGATE_LITERAL
+               ? (AggregateLiteral *)variable->initializer->data
+               : NULL;
+    if (!rows || rows->is_struct) {
+      return 0;
+    }
+    for (size_t k = 0; k < rows->element_count && count < capacity; k++) {
+      ASTNode *row = rows->elements[k];
+      if (!row || row->type != AST_STRING_LITERAL || !row->data) {
+        return 0;
+      }
+      out[count++] = ((StringLiteral *)row->data)->value;
+    }
+    return count;
+  }
+  return 0;
+}
+
+/* What the emulated machine wrote. The interpreter models the write family
+ * by recording the call and the bytes the pointer argument addressed, so an
+ * instruction whose semantics prints is observable from here without the
+ * interpreter having to be given a console. */
+static size_t machine_drain_output(IRInterpMachine *interp, size_t from) {
+  size_t count = ir_interp_extern_trace_count(interp);
+  int wrote = 0;
+  for (size_t i = from; i < count; i++) {
+    const IRInterpExternCall *call = ir_interp_extern_trace(interp, i);
+    size_t which = 0;
+    if (!call) {
+      continue;
+    }
+    if (strcmp(call->name, "write") == 0) {
+      which = 1;
+    } else if (strcmp(call->name, "fwrite") == 0 ||
+               strcmp(call->name, "puts") == 0 ||
+               strcmp(call->name, "fputs") == 0) {
+      which = 0;
+    } else {
+      continue;
+    }
+    if (which < call->arg_count && call->arg_mem_len[which] > 0) {
+      size_t length = call->arg_mem_len[which];
+      if (strcmp(call->name, "write") == 0 && call->arg_count >= 3 &&
+          call->args[2].i >= 0 && (size_t)call->args[2].i < length) {
+        length = (size_t)call->args[2].i;
+      }
+      if (strcmp(call->name, "fwrite") == 0 && call->arg_count >= 3) {
+        long long span = call->args[1].i * call->args[2].i;
+        if (span >= 0 && (size_t)span < length) {
+          length = (size_t)span;
+        }
+      }
+      while (length > 0 && call->arg_mem[which][length - 1] == 0) {
+        length--;
+      }
+      fwrite(call->arg_mem[which], 1, length, stdout);
+      wrote = 1;
+    }
+  }
+  if (wrote) {
+    printf("\n");
+  }
+  return count;
+}
+
+static int machine_emulate(const MachineDesc *desc, ASTNode *program_node,
+                           IRProgram *ir_program) {
+  const char *lines[MACHINE_CODE_MAX];
+  size_t starts[MACHINE_CODE_MAX];
+  unsigned char code[MACHINE_CODE_MAX];
+  unsigned char again[MACHINE_CODE_MAX];
+  size_t line_count = machine_program_lines(program_node, lines,
+                                            MACHINE_CODE_MAX);
+  size_t length = 0;
+  size_t steps = 0;
+  size_t at = 0;
+  size_t printed = 0;
+  IRInterpMachine *interp = NULL;
+  char error[256];
+  if (line_count == 0) {
+    fprintf(stderr,
+            "error[N0002]: this file describes a machine and no program to "
+            "run on it; a program is `const PROGRAM: string[N]`, one "
+            "assembly line per row\n");
+    return 1;
+  }
+  for (size_t i = 0; i < line_count; i++) {
+    size_t written = 0;
+    starts[i] = length;
+    if (!machine_assemble(desc, lines[i], code + length,
+                          MACHINE_CODE_MAX - length, &written, error,
+                          sizeof(error))) {
+      fprintf(stderr, "error[N0003]: line %zu of PROGRAM: %s\n", i + 1, error);
+      return 1;
+    }
+    length += written;
+  }
+
+  /* Assembling and decoding are separate walks over the same description, so
+   * re-assembling what the decoder read back is what says the two agree. A
+   * description that cannot round-trip is a machine that disagrees with
+   * itself, and nothing after this point would notice. */
+  {
+    size_t cursor = 0;
+    size_t out = 0;
+    while (cursor < length) {
+      const MachineInsn *insn = NULL;
+      long long operands[MACHINE_OPERANDS];
+      size_t consumed = 0;
+      if (!machine_decode(desc, code, length, cursor, &insn, operands,
+                          &consumed)) {
+        fprintf(stderr,
+                "error[N0004]: nothing in '%s' decodes the byte at offset "
+                "%zu, so what it assembles is not what it can read back\n",
+                desc->name, cursor);
+        return 1;
+      }
+      for (size_t k = 0; k < insn->length; k++) {
+        again[out + k] = insn->slot[k] >= 0
+                             ? (unsigned char)operands[insn->slot[k]]
+                             : insn->bytes[k];
+      }
+      out += insn->length;
+      cursor += consumed;
+    }
+    if (out != length || memcmp(code, again, length) != 0) {
+      fprintf(stderr,
+              "error[N0004]: '%s' does not round-trip: what it assembled and "
+              "what it decoded back are different bytes\n",
+              desc->name);
+      return 1;
+    }
+  }
+
+  interp = ir_interp_create(ir_program);
+  if (!interp) {
+    fprintf(stderr, "error[N0005]: could not start the interpreter\n");
+    return 1;
+  }
+  while (at < length) {
+    const MachineInsn *insn = NULL;
+    long long operands[MACHINE_OPERANDS];
+    size_t consumed = 0;
+    IRFunction *body = NULL;
+    IRInterpValue args[MACHINE_OPERANDS];
+    IRInterpValue answer;
+    IRInterpStatus status;
+    if (steps++ >= MACHINE_STEP_MAX) {
+      fprintf(stderr,
+              "error[N0006]: '%s' ran %d instructions without halting\n",
+              desc->name, MACHINE_STEP_MAX);
+      ir_interp_destroy(interp);
+      return 1;
+    }
+    if (!machine_decode(desc, code, length, at, &insn, operands, &consumed)) {
+      fprintf(stderr,
+              "error[N0004]: nothing in '%s' decodes the byte at offset %zu\n",
+              desc->name, at);
+      ir_interp_destroy(interp);
+      return 1;
+    }
+    body = ir_program_find_function(ir_program, insn->semantics);
+    if (!body) {
+      fprintf(stderr,
+              "error[N0005]: '%s' says '%s' is what it does, and there is no "
+              "such function to run\n",
+              insn->name, insn->semantics);
+      ir_interp_destroy(interp);
+      return 1;
+    }
+    for (int k = 0; k < MACHINE_OPERANDS; k++) {
+      memset(&args[k], 0, sizeof(args[k]));
+      args[k].i = operands[k];
+    }
+    memset(&answer, 0, sizeof(answer));
+    status = ir_interp_run(interp, body, args, MACHINE_OPERANDS, &answer,
+                           MACHINE_FUEL);
+    if (status != IR_INTERP_OK) {
+      fprintf(stderr,
+              "error[N0005]: '%s' at offset %zu did not finish; its semantics "
+              "function trapped or ran out of steps\n",
+              insn->name, at);
+      ir_interp_destroy(interp);
+      return 1;
+    }
+    printed = machine_drain_output(interp, printed);
+    if (answer.i < 0) {
+      at += consumed;
+      continue;
+    }
+    if ((size_t)answer.i >= line_count) {
+      break;
+    }
+    at = starts[answer.i];
+  }
+  {
+    size_t globals = ir_interp_global_count(interp);
+    for (size_t i = 0; i < globals; i++) {
+      const char *name = ir_interp_global_name(interp, i);
+      IRInterpValue value = ir_interp_global_value(interp, i);
+      if (!name) {
+        continue;
+      }
+      if (value.is_float) {
+        printf("  %s = %f\n", name, value.f);
+        continue;
+      }
+      {
+        unsigned char words[MACHINE_STATE_WORDS * 8];
+        long long read = ir_interp_read_bytes(
+            interp, (unsigned long long)value.i, words, sizeof(words));
+        if (read == (long long)sizeof(words)) {
+          printf("  %s =", name);
+          for (size_t k = 0; k < MACHINE_STATE_WORDS; k++) {
+            long long word = 0;
+            memcpy(&word, words + k * 8, 8);
+            printf(" %lld", word);
+          }
+          printf("\n");
+          continue;
+        }
+      }
+      printf("  %s = %lld\n", name, value.i);
+    }
+  }
+  ir_interp_destroy(interp);
+  printf("%s: %zu instructions in %zu bytes, %zu executed\n", desc->name,
+         line_count, length, steps);
+  return 0;
 }
 
 static int compile_lower_to_ir(ASTNode *program, TypeChecker *type_checker,
@@ -6311,6 +6591,30 @@ int compile_file(const char *input_filename, const char *output_filename,
   if (options->pgo) {
     ir_pgo_profile_program(ir_program);
     ir_pgo_print_summary();
+  }
+
+  if (options->machine_mode || options->emulate_mode) {
+    MachineDesc desc;
+    char error[256];
+    SourceLocation where;
+    if (!machine_desc_read(program, &desc, error, sizeof(error), &where)) {
+      if (where.line) {
+        error_reporter_add_error(error_reporter, ERROR_SEMANTIC, where, error);
+        error_reporter_set_last_code(error_reporter, "N0001");
+        error_reporter_print_errors(error_reporter);
+      } else {
+        fprintf(stderr, "error[N0001]: %s\n", error);
+      }
+      result = 1;
+      goto cleanup;
+    }
+    if (options->machine_mode) {
+      machine_desc_print(stdout, &desc);
+      result = 0;
+      goto cleanup;
+    }
+    result = machine_emulate(&desc, program, ir_program);
+    goto cleanup;
   }
 
   {

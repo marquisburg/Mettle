@@ -1,0 +1,25 @@
+// Two instructions with the same fixed prefix. A description that writes
+// bytes it cannot read back is not one machine, and it is refused before
+// anything runs on it.
+import "std/machine";
+
+var REG: int64[8];
+
+fn ins_a(a: int64, b: int64, c: int64) -> int64 {
+  REG[a] = b;
+  return -1;
+}
+
+fn ins_b(a: int64, b: int64, c: int64) -> int64 {
+  REG[a] = REG[a] + b;
+  return -1;
+}
+
+const ISA: MachineInsn[2] = [
+  { name: "seti", encoding: "10 %0 %1", operands: 2, reads: "", writes: "%0", semantics: "ins_a" },
+  { name: "addi", encoding: "10 %0 %1", operands: 2, reads: "%0", writes: "%0", semantics: "ins_b" },
+];
+
+const PROGRAM: string[1] = [ "seti 0, 1" ];
+
+fn main() -> int32 { return 0; }

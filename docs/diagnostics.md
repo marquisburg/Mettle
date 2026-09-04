@@ -149,6 +149,19 @@ Effect diagnostics:
 | F0005 | The effect pass spent more than its budget |
 | F0006 | Two threads write one global and nothing orders them |
 
+Described machines:
+
+| Code | Meaning |
+|------|---------|
+| N0001 | A described machine is not one the compiler can read |
+| N0002 | A described machine has no program to run |
+| N0003 | A line of PROGRAM is not an instruction of this machine |
+| N0004 | A described machine does not round-trip |
+| N0005 | A described instruction's semantics did not run |
+| N0006 | A described machine did not halt |
+
+[Bare metal](bare-metal.md) covers the N codes in context.
+
 Deadlines:
 
 | Code | Meaning |

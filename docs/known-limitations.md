@@ -53,6 +53,26 @@ mismatch against `fn(...)`.
 Omitted struct fields and short array literals leave the rest zero. Extra
 elements, unknown field names, and repeated field names are errors.
 
+## Described machines
+
+A described machine is one a program is written for and run on. It is not one
+the compiler's backend can be aimed at: the register allocator does not
+schedule around a described instruction, and a rewrite rule cannot map IR onto
+one. Both would mean handing out the allocator and the emitters, which III.3
+keeps private, and that is the next mountain rather than this one.
+
+An operand occupies exactly one byte, so an immediate is 0 to 255 and a
+program larger than that has to build wider values out of instructions.
+An instruction takes at most three operands. A description is one `const` per
+file. A branch names an index into `PROGRAM` rather than a byte offset, since
+what a semantics function returns is the next instruction and not the next
+address.
+
+What an emulated instruction prints comes from the interpreter's model of the
+write family, which records the bytes a call passed and caps how many calls it
+keeps. A machine that prints thousands of lines exhausts that trace, and the
+emulator reports it rather than pretending it printed them.
+
 ## Deadlines
 
 The cost model is the compiler's. A target description says what registers and

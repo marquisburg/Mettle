@@ -1,0 +1,20 @@
+// An instruction that names a function nobody wrote. What an instruction
+// does is a function of the module, and a name that resolves to nothing is a
+// machine with a hole in it.
+import "std/machine";
+
+var REG: int64[8];
+
+fn ins_a(a: int64, b: int64, c: int64) -> int64 {
+  REG[a] = b;
+  return -1;
+}
+
+const ISA: MachineInsn[2] = [
+  { name: "seti", encoding: "10 %0 %1", operands: 2, reads: "", writes: "%0", semantics: "ins_a" },
+  { name: "jump", encoding: "20 %0", operands: 1, reads: "", writes: "", semantics: "ins_jump" },
+];
+
+const PROGRAM: string[1] = [ "seti 0, 1" ];
+
+fn main() -> int32 { return 0; }

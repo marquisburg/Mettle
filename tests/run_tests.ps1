@@ -4476,6 +4476,57 @@ catch {
   Write-CaseResult -Name "abstraction_examples" -Passed $false -Reason $_.Exception.Message
 }
 
+# A machine that does not exist, described in Mettle, assembled to its own
+# encoding and run. Enforce: `mettle machine` prints the description, `mettle
+# emulate` assembles the program, decodes it back, runs each instruction's
+# semantics in the interpreter and reports the right answer, a description
+# that cannot be decoded back is refused, an instruction naming an operand or
+# a function that is not there is refused, and --verify validates the
+# semantics functions the same way it validates any other Mettle.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath machine "examples/machine/little.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the machine could not be read: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "machine ISA: 6 instructions") { throw "the description was not printed: $out" }
+  if ($flat -notmatch "reads %1,%2, writes %0, does ins_add") { throw "the description does not say what add touches: $out" }
+
+  $out = & $CompilerPath emulate "examples/machine/little.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the machine did not run: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "r0 = 55") { throw "the machine computed the wrong answer: $out" }
+  if ($flat -notmatch "REG = 55 34 0 55") { throw "the register file is wrong at the end: $out" }
+  if ($flat -notmatch "11 instructions in 32 bytes, 65 executed") { throw "the emulator's ledger is wrong: $out" }
+
+  $out = & $CompilerPath emulate "tests/test_machine_ambiguous.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a machine that writes bytes it cannot read back was accepted" }
+  if ($out -notmatch "error\[N0001\]") { throw "the ambiguous encoding was not refused: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "same fixed bytes") { throw "the refusal does not say what is ambiguous: $out" }
+
+  $out = & $CompilerPath emulate "tests/test_machine_bad_operands.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "an instruction naming an operand it does not encode was accepted" }
+  if ($out -notmatch "error\[N0001\]") { throw "the bad operand was not refused: $out" }
+
+  $out = & $CompilerPath emulate "tests/test_machine_no_semantics.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "an instruction naming no function was accepted" }
+  if ($out -notmatch "error\[N0001\]") { throw "the missing semantics was not refused: $out" }
+
+  $verified = Join-Path $tmpDir "machine_verified.exe"
+  $out = & $CompilerPath --build "examples/machine/little.mettle" -o $verified --verify 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "--verify did not hold on the semantics functions: $out" }
+  if ($out -notmatch "translation validation: OK") { throw "--verify said nothing: $out" }
+
+  $out = & $CompilerPath explain N0004 2>&1 | Out-String
+  if ($out -notmatch "separate walks over the same description") { throw "explain N0004 says nothing: $out" }
+  Write-CaseResult -Name "machine_described_as_data" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "machine_described_as_data" -Passed $false -Reason $_.Exception.Message
+}
+
 # The job system with a frame around it, and every claim in one file. Enforce:
 # it builds and runs, expand prints the generated dispatchers, the reports name
 # the shared global, the schedule and the deadline, and each of the three ways

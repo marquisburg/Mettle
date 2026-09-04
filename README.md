@@ -164,7 +164,10 @@ a `const` of `std/schedule`'s `Schedule` names its phases, and the compiler
 generates the dispatcher for each thread from it, with a `quiesce` at every
 phase boundary and a call across one refused. A target is a
 Mettle `const` the compiler reads, so `mettle target x86_64-none` prints one
-and `--target mine.mettle` builds for it. [Rules](docs/rules.md),
+and `--target mine.mettle` builds for it. A whole machine can be a `const`
+too: `mettle emulate` assembles a program into an instruction set the file
+describes, decodes it back to check the description agrees with itself, and
+runs it by calling each instruction's own semantics function. [Rules](docs/rules.md),
 [Effects](docs/effects.md), [Types](docs/types.md) and
 [Bare metal](docs/bare-metal.md) cover them.
 

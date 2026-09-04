@@ -128,6 +128,8 @@ typedef struct {
   int check_proofs;
   int check_tasks;
   int check_deadlines;
+  int machine_mode;
+  int emulate_mode;
   int report_deadlines;
   int check_effects;
   int check_purity_fault;

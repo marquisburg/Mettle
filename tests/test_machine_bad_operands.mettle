@@ -1,0 +1,19 @@
+// An instruction that says it writes an operand its encoding does not carry.
+// A description says what an instruction reads and writes so a scheduler can
+// use it, and one that names an operand that is not there says nothing.
+import "std/machine";
+
+var REG: int64[8];
+
+fn ins_a(a: int64, b: int64, c: int64) -> int64 {
+  REG[a] = b;
+  return -1;
+}
+
+const ISA: MachineInsn[1] = [
+  { name: "seti", encoding: "10 %0 %1", operands: 2, reads: "", writes: "%2", semantics: "ins_a" },
+];
+
+const PROGRAM: string[1] = [ "seti 0, 1" ];
+
+fn main() -> int32 { return 0; }

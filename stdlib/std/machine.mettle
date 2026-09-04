@@ -1,0 +1,44 @@
+// Mettle standard library: a machine described as data.
+//
+// One row is one instruction: what it is called, how it is encoded, which
+// registers it reads and writes, and the function that says what it does.
+// A `const` of these rows is an instruction set the compiler reads.
+//
+//   import "std/machine";
+//
+//   var REG: int64[8];
+//
+//   fn ins_addi(a: int64, b: int64, c: int64) -> int64 {
+//     REG[a] = REG[b] + c;
+//     return -1;
+//   }
+//
+//   const ISA: MachineInsn[1] = [
+//     { name: "addi", encoding: "10 %0 %1 %2", operands: 3,
+//       reads: "%1", writes: "%0", semantics: "ins_addi" },
+//   ];
+//
+// `encoding` is hex, one byte per pair, with `%N` standing for the byte an
+// operand occupies. The literal bytes at the front are the opcode, and no two
+// instructions may share one, which is what makes the encoding decodable
+// rather than merely printable.
+//
+// A semantics function takes the three operand slots and returns the index of
+// the next instruction, or -1 to fall through to the one after it. The
+// registers are the program's own storage; the compiler does not supply them,
+// which is why they are ordinary Mettle and not a compiler concept.
+//
+//   mettle machine prog.mettle    prints the described machine
+//   mettle emulate prog.mettle    assembles PROGRAM, decodes it, and runs it
+//
+// The assemble/decode round trip has to reproduce the bytes exactly, which is
+// how a description is verified rather than believed.
+
+export struct MachineInsn {
+  name: string;
+  encoding: string;
+  operands: int64;
+  reads: string;
+  writes: string;
+  semantics: string;
+}

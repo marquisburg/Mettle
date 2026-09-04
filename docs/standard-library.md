@@ -291,6 +291,17 @@ Spin locks on an `int32*`: `spin_try_lock`, `spin_lock`, `spin_unlock`.
 Wait results come back as `WAIT_OBJECT_0()`, `WAIT_TIMEOUT()`, or
 `WAIT_FAILED()`, and `INFINITE()` is the timeout that never expires.
 
+## std/machine
+
+One type, `MachineInsn`, and a `const` of it is an instruction set: `name`,
+`encoding`, `operands`, `reads`, `writes` and `semantics` per row. The
+compiler reads the const, refuses one that cannot be decoded back,
+assembles `const PROGRAM: string[N]` into that machine's bytes, and runs the
+result by calling each instruction's semantics function in the compile-time
+interpreter. `mettle machine <file>` prints the description and
+`mettle emulate <file>` runs it. [Bare metal](bare-metal.md) covers it, and
+[`examples/machine/`](../examples/machine/) is a worked one.
+
 ## std/schedule
 
 One type, `Schedule`, and a `const` of it is a frame written down: `phase`,

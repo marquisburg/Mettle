@@ -318,6 +318,71 @@ machinery: `kernel`, `@interrupt`, the 16-bit mode, a new object format. A
 description cannot add one. Whether a description is enough for a genuinely
 new machine is not proven, and this document does not claim it.
 
+## Describing a machine
+
+A target description says what an existing machine has. A machine description
+says what a machine *is*: `std/machine`'s `MachineInsn`, one row per
+instruction, carrying its mnemonic, its encoding, which operands it reads and
+writes, and the name of the Mettle function that says what it does.
+
+```mettle
+import "std/machine";
+
+var REG: int64[8];
+
+fn ins_add(a: int64, b: int64, c: int64) -> int64 {
+  REG[a] = REG[b] + REG[c];
+  return -1;
+}
+
+const ISA: MachineInsn[1] = [
+  { name: "add", encoding: "11 %0 %1 %2", operands: 3,
+    reads: "%1,%2", writes: "%0", semantics: "ins_add" },
+];
+
+const PROGRAM: string[1] = [ "add 0, 1, 2" ];
+```
+
+Nothing here is a compiler concept. The registers are a global array, the
+meaning of an instruction is a function, and the encoding is a string: pairs
+of hex digits, with `%N` standing for the byte an operand occupies. A
+semantics function takes the three operand slots and returns the index of the
+next instruction, or -1 to fall through.
+
+```bash
+mettle machine app.mettle    # print the machine
+mettle emulate app.mettle    # assemble PROGRAM, decode it back, run it
+```
+
+The description is checked before anything runs on it: every instruction
+starts with at least one fixed byte and no two share their fixed prefix,
+because that prefix is what a decoder matches on; `operands` matches the slots
+the encoding carries; `reads` and `writes` name only operands that are there;
+and the semantics function exists with the right shape. Each is `N0001`,
+reported at the row.
+
+Then `PROGRAM` is assembled into the machine's own bytes and decoded back out
+of them by a separate walk over the same description. Re-assembling what the
+decoder read has to give the same bytes, or the description is not one
+machine: it writes bytes it cannot read (`N0004`). That is the same shape as a
+printed target description having to reproduce its built-in target byte for
+byte, and for the same reason: a description is verified, never believed.
+
+Each decoded instruction's semantics function then runs in the compile-time
+interpreter, on one interpreter that lasts the whole program, which is why the
+register file carries from one instruction to the next. `--verify` validates
+those functions exactly as it validates any other Mettle, so what an
+instruction means is held to the standard the rest of the program is held to.
+[`examples/machine/`](../examples/machine/) is a worked one: eight registers,
+six instructions, and the tenth Fibonacci number computed by a machine nobody
+built.
+
+What this does not do is aim the compiler's backend at a described machine.
+The register allocator does not schedule around a described instruction, and a
+rewrite rule cannot map IR onto one, because both would mean handing out the
+allocator and the emitters. III.3 is the reason, the same one that keeps pass
+ordering private, and [known limitations](known-limitations.md) says so.
+
 ## A chosen link address
 
 `--image-base <addr>` sets where the linked image is loaded, replacing the
