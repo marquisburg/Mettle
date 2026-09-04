@@ -4856,6 +4856,20 @@ try {
   for ($i = 0; $i -lt $a.Length; $i++) {
     if ($a[$i] -ne $b[$i]) { throw "the race check changed the binary at byte $i" }
   }
+  $out = & $CompilerPath --build "tests/test_race_heap.mettle" -o (Join-Path $tmpDir "race_heap.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "an allocation two threads write through one global pointer built" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "error\[F0006\]") { throw "the shared allocation was not refused: $out" }
+  if ($flat -notmatch "'\*g_buf' is written by") { throw "the refusal does not name the object behind the pointer: $out" }
+
+  $exe = Join-Path $tmpDir "race_heap_locked.exe"
+  $out = & $CompilerPath --build "tests/test_race_heap_locked.mettle" -o $exe --report-effects 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a shared requirement did not order the writes through the pointer: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "shared \*g_buf: tick \(Sim\), draw \(Render\), ordered by an effect both require") { throw "the ledger does not carry the allocation: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "buf 1 7") { throw "the locked heap program did not run: $run" }
+
   Write-CaseResult -Name "two_threads_writing_one_global" -Passed $true
 }
 catch {

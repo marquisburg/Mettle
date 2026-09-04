@@ -60,6 +60,9 @@ typedef struct {
   EGlobal *globals;
   size_t global_count;
   size_t global_capacity;
+  char **owned;
+  size_t owned_count;
+  size_t owned_capacity;
 } Ctx;
 
 struct IREffectResults {
@@ -452,6 +455,39 @@ int ir_instruction_writes_symbol(const IRInstruction *instruction);
 const char *ir_function_local_declared_type(const IRFunction *function,
                                             const char *name);
 
+/* An object named `*g` has no name in the program, so the pass owns the
+ * string. One copy per distinct object, freed with the rest of the table. */
+static const char *intern_object(Ctx *ctx, const char *name) {
+  for (size_t i = 0; i < ctx->global_count; i++) {
+    if (strcmp(ctx->globals[i].name, name) == 0) {
+      return ctx->globals[i].name;
+    }
+  }
+  if (name[0] != '*') {
+    return name;
+  }
+  {
+    size_t length = strlen(name) + 1;
+    char *copy = malloc(length);
+    if (!copy) {
+      return name;
+    }
+    memcpy(copy, name, length);
+    if (ctx->owned_count == ctx->owned_capacity) {
+      size_t grown = ctx->owned_capacity ? ctx->owned_capacity * 2 : 8;
+      char **table = realloc(ctx->owned, grown * sizeof(char *));
+      if (!table) {
+        free(copy);
+        return name;
+      }
+      ctx->owned = table;
+      ctx->owned_capacity = grown;
+    }
+    ctx->owned[ctx->owned_count++] = copy;
+    return copy;
+  }
+}
+
 static int note_global_writer(Ctx *ctx, const char *name, size_t writer,
                               size_t site) {
   EGlobal *entry = NULL;
@@ -500,6 +536,68 @@ static int note_global_writer(Ctx *ctx, const char *name, size_t writer,
   return 1;
 }
 
+static int symbol_is_global(const IRFunction *fn, const char *name) {
+  return name && !ir_function_symbol_is_parameter(fn, name) &&
+         !ir_function_local_declared_type(fn, name);
+}
+
+/* The global an address was computed from. A store through a pointer is a
+ * write to whatever that pointer names, and the compiler can say what that is
+ * exactly when the address came out of a global: `g_buf[i] = v` writes the
+ * block `g_buf` points at, and `g_jobs[i] = v` writes `g_jobs` itself. Both
+ * are objects two threads can share, and neither was visible while only the
+ * symbol a write names was counted. */
+static const char *store_base_global(const IRProgram *program,
+                                     const IRFunction *fn, size_t at) {
+  IROperand address = fn->instructions[at].dest;
+  int guard = 0;
+  while (guard++ < 16) {
+    if (address.kind == IR_OPERAND_SYMBOL) {
+      return symbol_is_global(fn, address.name) ? address.name : NULL;
+    }
+    if (address.kind != IR_OPERAND_TEMP || !address.name) {
+      return NULL;
+    }
+    {
+      const IRInstruction *source = NULL;
+      for (size_t i = at; i-- > 0;) {
+        const IRInstruction *candidate = &fn->instructions[i];
+        if (candidate->dest.kind == IR_OPERAND_TEMP && candidate->dest.name &&
+            strcmp(candidate->dest.name, address.name) == 0) {
+          source = candidate;
+          break;
+        }
+      }
+      if (!source) {
+        return NULL;
+      }
+      if (source->op == IR_OP_BINARY || source->op == IR_OP_ASSIGN ||
+          source->op == IR_OP_CAST || source->op == IR_OP_ADDRESS_OF) {
+        address = source->lhs;
+        continue;
+      }
+      return NULL;
+    }
+  }
+  (void)program;
+  return NULL;
+}
+
+static const char *store_object_name(Ctx *ctx, const IRFunction *fn, size_t at,
+                                     char *storage, size_t capacity) {
+  const char *base = store_base_global(ctx->program, fn, at);
+  const IRModuleSymbol *symbol = NULL;
+  if (!base) {
+    return NULL;
+  }
+  symbol = ir_program_lookup_symbol(ctx->program, base);
+  if (symbol && symbol->type && symbol->type->kind == MTLC_TYPE_POINTER) {
+    snprintf(storage, capacity, "*%s", base);
+    return storage;
+  }
+  return base;
+}
+
 static int scan_globals(Ctx *ctx, size_t index) {
   const IRFunction *fn = ctx->fns[index].fn;
   if (fn->is_rule || fn->rewrite_role) {
@@ -507,11 +605,20 @@ static int scan_globals(Ctx *ctx, size_t index) {
   }
   for (size_t i = 0; i < fn->instruction_count; i++) {
     const IRInstruction *insn = &fn->instructions[i];
+    if (insn->op == IR_OP_STORE) {
+      char storage[128];
+      const char *object = store_object_name(ctx, fn, i, storage,
+                                             sizeof(storage));
+      if (object && !note_global_writer(ctx, intern_object(ctx, object), index,
+                                        i)) {
+        return 0;
+      }
+      continue;
+    }
     if (!ir_instruction_writes_symbol(insn) || !insn->dest.name) {
       continue;
     }
-    if (ir_function_symbol_is_parameter(fn, insn->dest.name) ||
-        ir_function_local_declared_type(fn, insn->dest.name)) {
+    if (!symbol_is_global(fn, insn->dest.name)) {
       continue;
     }
     if (!note_global_writer(ctx, insn->dest.name, index, i)) {
@@ -1425,6 +1532,10 @@ static void ctx_free(Ctx *ctx) {
     free(ctx->globals[i].writers);
     free(ctx->globals[i].sites);
   }
+  for (size_t i = 0; i < ctx->owned_count; i++) {
+    free(ctx->owned[i]);
+  }
+  free(ctx->owned);
   free(ctx->globals);
   free(ctx->fns);
   free(ctx->index);

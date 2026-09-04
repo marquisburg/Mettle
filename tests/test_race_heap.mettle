@@ -1,0 +1,43 @@
+// One allocation, reached through a global pointer from two phases. The block
+// itself has no name in the program, so nothing about pointer aliasing has to
+// be settled: the compiler can say exactly which object `g_buf[i]` writes,
+// because the address came out of `g_buf`.
+import "std/io";
+import "std/mem";
+import "std/thread";
+
+effect Sim;
+effect Render;
+
+var g_buf: int32* = 0;
+
+fn tick() requires Sim {
+  g_buf[0] = g_buf[0] + 1;
+}
+
+fn draw() requires Render {
+  g_buf[1] = 7;
+}
+
+fn sim_main(arg: cstring) -> uint32 provides Sim {
+  tick();
+  return 0;
+}
+
+fn render_main(arg: cstring) -> uint32 provides Render {
+  draw();
+  return 0;
+}
+
+fn main() -> int32 {
+  g_buf = (int32*)malloc(64);
+  var a: int64 = CreateThread(0, 0, &sim_main, 0, 0, 0);
+  var b: int64 = CreateThread(0, 0, &render_main, 0, 0, 0);
+  thread_join_infinite(a);
+  thread_join_infinite(b);
+  thread_close(a);
+  thread_close(b);
+  println("buf {g_buf[0]} {g_buf[1]}");
+  free(g_buf);
+  return 0;
+}

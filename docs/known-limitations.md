@@ -197,9 +197,12 @@ named, and does not see the predicate itself.
 ## Effects
 
 A global written from two places is checked against the effects each writer
-needs. A heap object is not: two functions reaching the same allocation
-through pointers is the aliasing question, and the analysis does not answer
-it, so `F0006` speaks about globals only.
+needs, and so is the object a global names: `g_jobs[i] = v` writes `g_jobs`,
+and `g_buf[i] = v` writes the block `g_buf` points at, which the ledger calls
+`*g_buf`. What is still not answered is the aliasing question itself. Two
+different globals pointing at one allocation are two objects here, a pointer
+passed in as a parameter is not traced back to whatever global it came from,
+and an allocation reached only through a local is not named at all.
 
 The check needs both writers to need an effect something `provides`. One
 writer with no placed requirement means the program has not said where that

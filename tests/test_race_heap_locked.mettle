@@ -1,0 +1,58 @@
+// The same allocation reached from two phases, with an effect both writers
+// require. The object behind a global pointer is ordered the same way a
+// global is, because the thing that orders two writes is a requirement they
+// share and not what kind of storage they land in.
+import "std/io";
+import "std/mem";
+import "std/thread";
+
+effect Sim;
+effect Render;
+effect BufLock;
+
+var g_buf: int32* = 0;
+
+fn tick() requires Sim, BufLock {
+  g_buf[0] = g_buf[0] + 1;
+}
+
+fn draw() requires Render, BufLock {
+  g_buf[1] = 7;
+}
+
+var g_lock: int32 = 0;
+
+fn under_lock_sim() provides BufLock requires Sim {
+  spin_lock(&g_lock);
+  tick();
+  spin_unlock(&g_lock);
+}
+
+fn under_lock_render() provides BufLock requires Render {
+  spin_lock(&g_lock);
+  draw();
+  spin_unlock(&g_lock);
+}
+
+fn sim_main(arg: cstring) -> uint32 provides Sim {
+  under_lock_sim();
+  return 0;
+}
+
+fn render_main(arg: cstring) -> uint32 provides Render {
+  under_lock_render();
+  return 0;
+}
+
+fn main() -> int32 {
+  g_buf = (int32*)malloc(64);
+  var a: int64 = CreateThread(0, 0, &sim_main, 0, 0, 0);
+  var b: int64 = CreateThread(0, 0, &render_main, 0, 0, 0);
+  thread_join_infinite(a);
+  thread_join_infinite(b);
+  thread_close(a);
+  thread_close(b);
+  println("buf {g_buf[0]} {g_buf[1]}");
+  free(g_buf);
+  return 0;
+}

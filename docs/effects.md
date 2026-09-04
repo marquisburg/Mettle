@@ -132,11 +132,11 @@ are the entry points, where nothing is provided: `main`, an `@interrupt` or
 `@naked` function, a `kernel`, a `@test`, and an exported function of a
 `--shared` library.
 
-## Two threads writing one global
+## Two threads writing one object
 
-Once a program says where its code runs, it has already said which globals two
-threads share, and the compiler reads that rather than asking for it again. A
-global written by two functions whose requirements are disjoint is refused,
+Once a program says where its code runs, it has already said which memory two
+threads share, and the compiler reads that rather than asking for it again. An
+object written by two functions whose requirements are disjoint is refused,
 naming both writers and the effect each one runs under:
 
 ```mettle
@@ -165,6 +165,21 @@ effect FrameLock;
 fn tick() requires Sim, FrameLock { frame = frame + 1; }
 fn draw() requires Render, FrameLock { frame = 0; }
 ```
+
+The object does not have to be the global itself. A write through an address
+computed from a global is a write to what that global names, so `g_jobs[i]`
+is `g_jobs` and `g_buf[i]` is the block `g_buf` points at, written `*g_buf`:
+
+```text
+error[F0006]: '*g_buf' is written by 'draw', which runs where 'Render' is
+provided, and by 'tick', which runs where 'Sim' is provided, and nothing
+either one needs orders the two writes
+```
+
+That is not an answer to the aliasing question, and it does not need to be:
+the address came out of a global, so which object it names is a fact rather
+than a guess. Two different globals pointing at one allocation are still two
+objects here.
 
 The claim is only ever made about effects a function somewhere `provides`. A
 program that declares none is not saying where its code runs, and this says

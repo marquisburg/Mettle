@@ -919,8 +919,9 @@ only where proven.
   carried on function types so a call through a pointer stays honest, read by
   rules, and re-checked under `mettle test` and `--check-effects` by a
   machine that does not trust the analysis. Saying where code runs says which
-  globals two threads share: one written from two disjoint requirement sets
-  is refused as F0006, and an effect both writers require is what orders
+  memory two threads share: an object written from two disjoint requirement
+  sets is refused as F0006, whether it is a global or the block a global
+  points at, and an effect both writers require is what orders
   them, so a lock becomes a requirement the compiler carries rather than a
   convention. The borrow analyser closed the other half, following a pointer
   handed to a task (M0121, M0122) and re-asking the question at run time
