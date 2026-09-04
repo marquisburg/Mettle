@@ -43,7 +43,9 @@ frontend can drive instead. The documentation is organized the same way.
   when.
 - [Runtime model](runtime-model.md): what an emitted program assumes of the OS, and a frame written down as data.
 - [Bare metal](bare-metal.md): inline assembly, `volatile`, `@naked` and
-  `@interrupt`, cross-compilation, a chosen link address, and 16-bit code.
+  `@interrupt`, cross-compilation, a described calling convention, a described
+  instruction set, a chosen link address, 16-bit code, and one table of what
+  was proven on which machine.
 - [C interoperability](c-interop.md): calling out, being called, the struct
   ABI, and `syscall`.
 - [Shared libraries](shared-libraries.md): binding a `.so`, emitting one, and

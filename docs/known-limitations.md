@@ -53,6 +53,14 @@ mismatch against `fn(...)`.
 Omitted struct fields and short array literals leave the rest zero. Extra
 elements, unknown field names, and repeated field names are errors.
 
+## What ran what
+
+[Bare metal](bare-metal.md) carries one table of every machine claim, what
+actually ran it, and where the evidence stops: AArch64 is proven on a
+user-mode emulator and not on silicon, the GPU backends are proven well-formed
+and not executed, and the 16-bit image is proven by its bytes and not by a
+boot. Read that table before quoting any of them.
+
 ## Described calling conventions
 
 A freestanding x86_64 or aarch64 target chooses its integer argument

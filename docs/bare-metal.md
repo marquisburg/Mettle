@@ -405,6 +405,34 @@ rewrite rule cannot map IR onto one, because both would mean handing out the
 allocator and the emitters. III.3 is the reason, the same one that keeps pass
 ordering private, and [known limitations](known-limitations.md) says so.
 
+## What is proven, and on which machine
+
+A claim about a machine is worth exactly what ran it. This is what each of
+Mettle's machine claims rests on, and where the evidence stops.
+
+| Claim | What ran it | What is not claimed |
+|---|---|---|
+| x86-64 code is correct | The whole suite, natively on Windows, and the same suite on Linux through `run_tests.ps1` against a Linux-built compiler | Nothing about a CPU older than SSE2, or about AVX-512 |
+| AArch64 code is correct | Every `tests/arm64/` fixture emitted by this compiler and run under a user-mode `qemu-aarch64`, plus the from-scratch encoder's own ELFs | No ARM hardware has run any of it; QEMU is the CPU, and where no emulator is reachable the gate reports itself skipped rather than passed |
+| A described aarch64 calling convention reaches the code | The same emulator, on a probe whose answer depends on every argument landing in the right parameter, built three ways and giving the same answer each time with different bytes | Nothing about interoperating with code built by anything else; a described convention is self-consistent and calls nothing outside its own build |
+| A printed target description is the built-in target | Every built-in triple printed, fed back with `--target`, and compared byte for byte | Nothing about a triple that is not built in |
+| PTX is well-formed | The portable modules assembled by NVIDIA's `ptxas` where one is installed | No GPU has run any of it in the suite; a device is needed and the gate skips without one |
+| SPIR-V is well-formed | Structural validation only | No Vulkan driver has consumed it here |
+| 16-bit and flat images are correct | Structural validation and the byte layout of the emitted image | No 8086 and no bootloader has been booted from one in the suite |
+| A described machine runs | The compile-time interpreter, executing the semantics functions the description names, with `--verify` validating those functions | Nothing about a physical machine; a described machine is one this compiler runs, not one it targets |
+
+Two lines of that table are the honest edge of the whole chapter. AArch64 is
+proven on an emulator and not on silicon, and the GPU backends are proven
+well-formed and not executed. Both are stated here rather than left for a
+reader to discover, because a gate that skips quietly is the same as no gate.
+
+And the machinery stays the compiler's. The emitters, the register allocator
+and the pass ordering are libmtlc's, and no description reaches them: a
+description says what a machine has, and the emitter decides what to do about
+it. III.3 in [the ideology](ideology.md) is the reason, and it is the same
+reason a metaprogram never sees pass ordering. Everything above is what
+handing out the description bought while keeping that line.
+
 ## A chosen link address
 
 `--image-base <addr>` sets where the linked image is loaded, replacing the
