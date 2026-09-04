@@ -400,6 +400,35 @@ Two declarations agree on a layout:
 }
 ```
 
+## A rule over a run that happened
+
+A rule over a `Trace` reads what a run did. `mettle test` gives it the events
+the compile-time interpreter produced. `--record-trace` gives it the events a
+compiled process wrote down:
+
+```bash
+mettle --build app.mettle -o app.exe --record-trace
+METTLE_TRACE=run.txt app.exe
+mettle check-trace app.mettle run.txt --report-rules
+```
+
+```text
+trace: 17 events from 'run.txt'
+rule every_allocation_is_freed: pass, 1445 steps
+rule every_lock_is_released: pass, 959 steps
+rules: 2 run, 2 passed, 0 failed, 0 gaps, 2404 steps
+```
+
+The rule does not know which run it is reading. One rule, checked against the
+runs the tests drive and against a process that shipped, and the same verdict
+shape either way; a rule that fails on a recording reports at the rule's own
+site, exactly as it does under `mettle test`.
+
+The recording is a line per event, `kind|name|file|line|column|value`, so it
+is readable without a tool and diffable between runs. What is in it, and what
+is not, is in [known limitations](known-limitations.md). A program built
+without `--record-trace` carries none of it.
+
 ## See also
 
 - [Declarations](declarations.md) for the decorators the compiler owns

@@ -401,11 +401,23 @@ happened.
 Unreachable-code analysis is block-local and conservative. Some dead paths in
 complex control flow are not diagnosed.
 
-A `@rule` over a `Trace` runs in the compile-time interpreter under
-`mettle test` and nowhere else. There is no sampled version of it inside a
-compiled program: that would mean linking the rule and building the `Trace` at
-run time, and neither exists. A trace rule therefore says what the runs your
-tests drive did, and says nothing about a run in production.
+A `@rule` over a `Trace` reads events, and there are two ways to get them:
+`mettle test` runs the program in the compile-time interpreter, and
+`--record-trace` has a compiled process write down what it did for
+`mettle check-trace` to read back. The rule is not linked into the program and
+does not run inside it; what ships is the recording, and the verdict is
+reached afterwards on a machine that has the compiler.
+
+A recording carries entering a function, an allocation, a free, taking a lock
+and releasing one, and nothing else. There is no argument value, no return
+value and no timing. Events stop after `METTLE_TRACE_MAX` of them (200000 by
+default) and the file ends with a line saying how many were dropped. The
+buffer is flushed where `main` returns, so a process that leaves through
+`exit`, a fault or a kill writes only the buffers that had already filled.
+
+The recorder is not thread-aware: two threads write into one buffer with
+nothing ordering them, so a trace from a program that records on more than one
+thread is not one this reads back with confidence.
 
 `--check-overflow` traps on a signed `+`, `-` or `*` that leaves its type,
 and a declared range that bounds the operands tightly enough deletes the

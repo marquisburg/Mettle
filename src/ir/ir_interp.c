@@ -2423,6 +2423,14 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
   if ((strcmp(name, "malloc") == 0 && arg_count == 1) ||
       (strcmp(name, "calloc") == 0 && arg_count == 2)) {
     long long size = ii_as_int(&args[0]);
+    /* An allocator call is an allocation, the same as `new`. A trace rule
+     * that counts them has to see both, or it means one thing here and
+     * another against a recorded run. */
+    if (ir_trace_collecting()) {
+      ir_trace_record("alloc", name, machine->current_call_loc.filename,
+                      machine->current_call_loc.line,
+                      machine->current_call_loc.column, 0);
+    }
     if (arg_count == 2) {
       size *= ii_as_int(&args[1]);
     }

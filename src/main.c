@@ -35,6 +35,7 @@
 #include "semantic/target_desc.h"
 #include "ir/ir_rules.h"
 #include "ir/ir_deadline.h"
+#include "ir/ir_trace_record.h"
 #include "semantic/machine_desc.h"
 #include "ir/ir_effects.h"
 #include "ir/ir_purity.h"
@@ -944,6 +945,12 @@ static int object_needs_safety_runtime(const char *object_path) {
   return object_needs_runtime_object(object_path, "mettle_safety_");
 }
 
+/* `--record-trace` names mettle_trace_; a program built without it names
+ * none of them and links none of this. */
+static int object_needs_trace_runtime(const char *object_path) {
+  return object_needs_runtime_object(object_path, "mettle_trace_");
+}
+
 /* `quiesce;` lowers to mettle_swap_apply, and staging reaches
  * mettle_swap_stage. A program with no swap point names neither and does not
  * link this object, which is the whole of what opting in costs. */
@@ -1302,6 +1309,7 @@ static int elf_collect_on_demand_objects(const char *runtime_directory,
       {"string.o", "string.o", object_needs_string_runtime},
       {"swap.o", "swap.o", object_needs_swap_runtime},
       {"safety.o", "safety_shared.o", object_needs_safety_runtime},
+      {"trace.o", "trace.o", object_needs_trace_runtime},
       {"debug.o", "debug.o", object_needs_debug_runtime},
       {"atomics.o", "atomics.o", object_needs_atomics},
   };
@@ -2415,6 +2423,9 @@ static int mettle_link_object_file(const char *object_filename,
   char safety_gcc_object[1024];
   char safety_msvc_object[1024];
   int needs_safety = object_needs_safety_runtime(object_filename);
+  char trace_gcc_object[1024];
+  char trace_msvc_object[1024];
+  int needs_trace = object_needs_trace_runtime(object_filename);
   char swap_gcc_object[1024];
   char swap_msvc_object[1024];
   int needs_swap = object_needs_swap_runtime(object_filename);
@@ -2432,6 +2443,10 @@ static int mettle_link_object_file(const char *object_filename,
   snprintf(safety_gcc_object, sizeof(safety_gcc_object), "%s/safety.o",
            runtime_directory);
   snprintf(safety_msvc_object, sizeof(safety_msvc_object), "%s/safety.obj",
+           runtime_directory);
+  snprintf(trace_gcc_object, sizeof(trace_gcc_object), "%s/trace.o",
+           runtime_directory);
+  snprintf(trace_msvc_object, sizeof(trace_msvc_object), "%s/trace.obj",
            runtime_directory);
   if (needs_safety) {
     needs_crash = 1;
@@ -2633,6 +2648,7 @@ static int mettle_link_object_file(const char *object_filename,
     const char *profile_object = NULL;
     const char *debug_object = NULL;
     const char *safety_object = NULL;
+    const char *trace_object = NULL;
     const char *swap_object_internal = NULL;
     const char *string_object_internal = NULL;
     char *startup_object = want_shared
@@ -2738,6 +2754,14 @@ static int mettle_link_object_file(const char *object_filename,
                                    ? swap_msvc_object
                                    : swap_gcc_object;
       }
+      if (needs_trace) {
+        trace_object = (_access(trace_msvc_object, 0) == 0)
+                           ? trace_msvc_object
+                           : trace_gcc_object;
+        if (_access(trace_object, 0) != 0) {
+          trace_object = NULL;
+        }
+      }
       if (needs_safety) {
         safety_object = (_access(safety_msvc_object, 0) == 0)
                             ? safety_msvc_object
@@ -2785,6 +2809,10 @@ static int mettle_link_object_file(const char *object_filename,
       if (safety_object) {
         object_is_default[object_count] = 1u;
         object_paths[object_count++] = safety_object;
+      }
+      if (trace_object) {
+        object_is_default[object_count] = 1u;
+        object_paths[object_count++] = trace_object;
       }
       if (swap_object_internal) {
         object_is_default[object_count] = 1u;
@@ -3007,6 +3035,14 @@ static int mettle_link_object_file(const char *object_filename,
         goto cleanup;
       }
       runtime_objects[runtime_object_count++] = msvc_swap_object;
+    }
+    if (needs_trace) {
+      const char *msvc_trace_object = (_access(trace_msvc_object, 0) == 0)
+                                          ? trace_msvc_object
+                                          : trace_gcc_object;
+      if (_access(msvc_trace_object, 0) == 0) {
+        runtime_objects[runtime_object_count++] = msvc_trace_object;
+      }
     }
     if (needs_safety) {
       const char *msvc_safety_object = (_access(safety_msvc_object, 0) == 0)
@@ -3957,6 +3993,8 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
     options->report_rules = 1;
   } else if (strcmp(argv[i], "--check-proofs") == 0) {
     options->check_proofs = 1;
+  } else if (strcmp(argv[i], "--record-trace") == 0) {
+    options->record_trace = 1;
   } else if (strcmp(argv[i], "--check-overflow") == 0) {
     options->check_overflow = 1;
   } else if (strcmp(argv[i], "--check-deadlines") == 0) {
@@ -4432,6 +4470,21 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "usage: mettle expand <file.mettle>\n");
         return 1;
       }
+    }
+    if (strcmp(argv[1], "check-trace") == 0) {
+      if (argc < 4) {
+        fprintf(stderr,
+                "usage: mettle check-trace <file.mettle> <trace>\n"
+                "  runs the file's `@rule` functions over `Trace` against a "
+                "run --record-trace wrote down\n");
+        return 1;
+      }
+      options.check_trace_path = argv[3];
+      argv[1] = argv[2];
+      for (int k = 4; k < argc; k++) {
+        argv[k - 2] = argv[k];
+      }
+      argc -= 2;
     }
     if (strcmp(argv[1], "machine") == 0 ||
         strcmp(argv[1], "emulate") == 0) {
@@ -5651,6 +5704,85 @@ typedef struct {
   long long budget;
 } TraceRuleContext;
 
+
+/* One line of a recorded trace: kind|name|file|line|column|value. The fields
+ * go straight into the collector the compile-time interpreter fills, so a
+ * rule cannot tell a recorded run from an interpreted one, which is the whole
+ * point of recording. */
+static int trace_line_load(char *line) {
+  char *field[6];
+  size_t count = 0;
+  char *at = line;
+  while (count < 6) {
+    field[count++] = at;
+    at = strchr(at, '|');
+    if (!at) {
+      break;
+    }
+    *at++ = '\0';
+  }
+  if (count != 6) {
+    return 0;
+  }
+  ir_trace_record(field[0], field[1], field[2][0] ? field[2] : NULL,
+                  (size_t)strtoull(field[3], NULL, 10),
+                  (size_t)strtoull(field[4], NULL, 10),
+                  strtoll(field[5], NULL, 10));
+  return 1;
+}
+
+static int trace_file_load(const char *path, size_t *out_events,
+                           size_t *out_dropped) {
+  char *text = read_file(path);
+  char *at = text;
+  size_t events = 0;
+  size_t dropped = 0;
+  if (!text) {
+    fprintf(stderr, "Error: could not read the recorded trace '%s'\n", path);
+    return 0;
+  }
+  ir_trace_set_collect(1);
+  ir_trace_begin(path);
+  while (at && *at) {
+    char *end = strchr(at, '\n');
+    if (end) {
+      *end = '\0';
+    }
+    while (*at == '\r') {
+      at++;
+    }
+    {
+      size_t length = strlen(at);
+      while (length > 0 && (at[length - 1] == '\r' || at[length - 1] == ' ')) {
+        at[--length] = '\0';
+      }
+    }
+    if (*at) {
+      if (strncmp(at, "dropped|", 8) == 0) {
+        dropped++;
+      }
+      if (!trace_line_load(at)) {
+        fprintf(stderr,
+                "Error: '%s' is not a recorded trace: a line is not "
+                "kind|name|file|line|column|value\n",
+                path);
+        free(text);
+        return 0;
+      }
+      events++;
+    }
+    at = end ? end + 1 : NULL;
+  }
+  free(text);
+  if (out_events) {
+    *out_events = events;
+  }
+  if (out_dropped) {
+    *out_dropped = dropped;
+  }
+  return 1;
+}
+
 static int compile_run_trace_rules(void *raw, const char *test_name) {
   TraceRuleContext *ctx = (TraceRuleContext *)raw;
   IRRuleImage image;
@@ -6602,6 +6734,16 @@ int compile_file(const char *input_filename, const char *output_filename,
     ir_pgo_print_summary();
   }
 
+  if (options->record_trace) {
+    size_t trace_sites = 0;
+    if (!ir_trace_record_instrument(ir_program, &trace_sites)) {
+      mettle_compiler_ice_report("Trace recording instrumentation failed",
+                                 NULL);
+      result = 1;
+      goto cleanup;
+    }
+  }
+
   if (options->machine_mode || options->emulate_mode) {
     MachineDesc desc;
     char error[256];
@@ -6654,6 +6796,37 @@ int compile_file(const char *input_filename, const char *output_filename,
     }
   }
 
+
+  if (options->check_trace_path) {
+    size_t events = 0;
+    size_t dropped = 0;
+    if (!ir_program_has_rules_of(ir_program, IR_RULE_OVER_TRACE)) {
+      fprintf(stderr,
+              "Error: '%s' declares no `@rule fn f(t: Trace) -> Verdict`, so "
+              "there is nothing to hold a recorded run to\n",
+              input_filename);
+      result = 1;
+      goto cleanup;
+    }
+    if (!trace_file_load(options->check_trace_path, &events, &dropped)) {
+      result = 1;
+      goto cleanup;
+    }
+    g_trace_rule_context.program = ir_program;
+    g_trace_rule_context.type_checker = type_checker;
+    g_trace_rule_context.reporter = error_reporter;
+    g_trace_rule_context.filename = input_filename;
+    g_trace_rule_context.report = options->report_rules ? stdout : NULL;
+    g_trace_rule_context.budget = options->rule_budget_set
+                                      ? options->rule_budget
+                                      : 0;
+    printf("trace: %zu events from '%s'%s\n", events,
+           options->check_trace_path,
+           dropped ? ", and the run said it dropped some" : "");
+    result = compile_run_trace_rules(&g_trace_rule_context, NULL) ? 0 : 1;
+    ir_trace_reset();
+    goto cleanup;
+  }
 
   if (options->test_mode || options->trace_function) {
     options->trace_rule_checker = type_checker;
@@ -7238,6 +7411,11 @@ void print_usage(const char *program_name) {
   printf("  --check-overflow    Trap at run time when a signed +, - or * leaves its type;\n"
          "                      a declared range that bounds the operands deletes the\n"
          "                      check\n");
+  printf("  --record-trace      Write what the run did to METTLE_TRACE (default\n"
+         "                      mettle-trace.txt), for `mettle check-trace` to hold the\n"
+         "                      trace rules to\n");
+  printf("  check-trace <file.mettle> <trace>   Run the file's @rule over Trace against a\n"
+         "                      run that --record-trace wrote down\n");
   printf("  --report-deadlines  Print each `where cycles < N` deadline, what its longest\n"
          "                      path costs, and whether it was proven or measured\n");
   printf("  --check-deadlines   Count what a path actually costs while the program runs and\n"

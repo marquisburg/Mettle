@@ -919,7 +919,9 @@ only where proven.
   whole call graph, refused with the chain that broke them (F0001 to F0003),
   carried on function types so a call through a pointer stays honest, read by
   rules, and re-checked under `mettle test` and `--check-effects` by a
-  machine that does not trust the analysis. Saying where code runs says which
+  machine that does not trust the analysis. A rule over a trace reaches past
+  the tests too: `--record-trace` has a shipped process write down what it
+  did, and `mettle check-trace` holds the same rule to that recording. Saying where code runs says which
   memory two threads share: an object written from two disjoint requirement
   sets is refused as F0006, whether it is a global or the block a global
   points at, and an effect both writers require is what orders

@@ -117,6 +117,7 @@ divergence. See [ML-driven IR optimization](ml-opt.md).
 | `--check-effects` | Trap at run time when an [effect](effects.md) the compiler proved absent is performed, or one it proved provided is not. Survives `--release`, and costs nothing in a program that declares no effect. |
 | `--report-deadlines` | Each `where cycles < N` deadline, its longest path block by block, and whether it was proven or measured. |
 | `--check-deadlines` | Count what a path actually costs while the program runs and trap past the longest path the compiler proved. Costs nothing in a program with no deadline. |
+| `--record-trace` | Write what the run did to `METTLE_TRACE` (default `mettle-trace.txt`), for `mettle check-trace` to hold the [trace rules](rules.md) to. |
 | `--check-overflow` | Trap at run time when a signed `+`, `-` or `*` leaves its type. A [declared range](types.md) that bounds the operands deletes the check, and `--explain` reports which one did. |
 | `--check-tasks` | Trap at run time when a pointer handed to a task lies in the stack of the thread that spawned it, re-checking M0121 without consulting the [borrow analysis](borrow-checker.md). Costs nothing in a program that spawns no task. |
 

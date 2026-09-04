@@ -1,0 +1,50 @@
+// A rule about what a run does, held to a run that happened rather than to a
+// run the tests drove.
+//
+//   mettle --build tests/test_trace_recorded.mettle -o app.exe --record-trace
+//   app.exe
+//   mettle check-trace tests/test_trace_recorded.mettle mettle-trace.txt
+//
+// The rule does not know which run it is reading. `mettle test` hands it the
+// events the interpreter produced; `check-trace` hands it the events a
+// compiled process wrote down. One rule, two runs, the same verdict shape.
+import "std/io";
+import "std/mem";
+import "std/rule";
+import "std/thread";
+
+var g_lock: int32 = 0;
+var g_total: int64 = 0;
+
+fn work(n: int64) -> int64 {
+  var scratch: cstring = malloc(64);
+  spin_lock(&g_lock);
+  g_total = g_total + n;
+  spin_unlock(&g_lock);
+  free(scratch);
+  return g_total;
+}
+
+@rule fn every_allocation_is_freed(t: Trace) -> Verdict {
+  if (trace_count(t, "alloc") != trace_count(t, "free")) {
+    return verdict_fail_program("this run allocated and freed a different number of times");
+  }
+  return verdict_pass();
+}
+
+@rule fn every_lock_is_released(t: Trace) -> Verdict {
+  if (!trace_balanced(t, "lock", "unlock")) {
+    return verdict_fail_program("this run took a lock it never released");
+  }
+  return verdict_pass();
+}
+
+@test fn the_shape_holds() {
+  assert_eq(work(2), 2);
+}
+
+fn main() -> int32 {
+  work(3);
+  work(4);
+  return (int32)g_total;
+}

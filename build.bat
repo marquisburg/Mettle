@@ -232,6 +232,7 @@ REM (--safe), atomics (std/thread), profiling (--profile-runtime), debug hooks
 REM (--debug-hooks) and the Tracy stubs (std/tracy without --tracy).
 call :cc src\runtime\crash_handler.c obj\runtime\crash_handler.o "%RUNTIME_CFLAGS%"
 call :cc src\runtime\safety.c obj\runtime\safety.o "%RUNTIME_CFLAGS%"
+call :cc src\runtime\trace.c obj\runtime\trace.o "%RUNTIME_CFLAGS%"
 call :cc src\runtime\atomics.c obj\runtime\atomics.o "%RUNTIME_CFLAGS% -DMETTLE_ATOMICS_IN_FREESTANDING"
 call :cc src\runtime\profile.c obj\runtime\profile.o "%RUNTIME_CFLAGS%"
 call :cc src\runtime\debug.c obj\runtime\debug.o "%RUNTIME_CFLAGS%"
@@ -326,7 +327,7 @@ if exist obj\link.ok del /Q obj\link.ok
 if exist bin\mtlc.lib del /Q bin\mtlc.lib
 REM Backend IR core -- explicitly listed to EXCLUDE the lowering TUs below.
 set "AROBJS="
-for %%o in (ir ir_comptime ir_rules ir_effects ir_deadline ir_purity ir_twins ir_machine ir_trace ir_debug_hooks ir_interp ir_optimize ir_pgo ir_profile ir_verify ml_gnn ml_obs ml_opt mtlc_type) do call set "AROBJS=%%AROBJS%% obj\ir\%%o.o"
+for %%o in (ir ir_comptime ir_rules ir_effects ir_deadline ir_purity ir_twins ir_machine ir_trace ir_trace_record ir_debug_hooks ir_interp ir_optimize ir_pgo ir_profile ir_verify ml_gnn ml_obs ml_opt mtlc_type) do call set "AROBJS=%%AROBJS%% obj\ir\%%o.o"
 %AR% rcs bin\mtlc.lib %AROBJS%
 if errorlevel 1 exit /b 1
 
@@ -422,6 +423,8 @@ copy /Y obj\runtime\host_startup.o bin\runtime\host_startup.obj >nul
 copy /Y obj\runtime\crash_handler.o bin\runtime\crash_handler.o >nul
 copy /Y obj\runtime\crash_handler.o bin\runtime\crash_handler.obj >nul
 copy /Y obj\runtime\safety.o bin\runtime\safety.o >nul
+copy /Y obj\runtime\trace.o bin\runtime\trace.o >nul
+copy /Y obj\runtime\trace.o bin\runtime\trace.obj >nul
 copy /Y obj\runtime\safety.o bin\runtime\safety.obj >nul
 echo Compiling swap runtime from Mettle source...
 bin\mettle.exe --release --emit-obj src\runtime\swap.mettle -o bin\runtime\swap.o

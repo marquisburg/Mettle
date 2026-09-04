@@ -129,6 +129,8 @@ typedef struct {
   int check_tasks;
   int check_deadlines;
   int check_overflow;
+  int record_trace;
+  const char *check_trace_path;
   int machine_mode;
   int emulate_mode;
   int report_deadlines;

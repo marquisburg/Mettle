@@ -5084,6 +5084,75 @@ catch {
   Write-CaseResult -Name "task_ownership_crosses_the_handover" -Passed $false -Reason $_.Exception.Message
 }
 
+# A rule about what a run does, held to a run that happened. Enforce:
+# --record-trace writes the events a compiled process produced, check-trace
+# reads them back and runs the same rules the interpreter runs, the two agree
+# about a program whose allocations and locks balance, a run that leaks is
+# caught by the same rule, and a program built without the flag has none of
+# the recording in it.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "trace_recorded.exe"
+  $trace = Join-Path $tmpDir "recorded.txt"
+  $out = & $CompilerPath --build "tests/test_trace_recorded.mettle" -o $exe --record-trace 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the recording build failed: $out" }
+  $env:METTLE_TRACE = $trace
+  & $exe | Out-Null
+  Remove-Item Env:METTLE_TRACE
+  if (-not (Test-Path $trace)) { throw "the run wrote no trace" }
+  $lines = Get-Content $trace
+  if ($lines.Count -lt 8) { throw "the recorded trace is too short: $($lines.Count) lines" }
+  if (($lines -join "`n") -notmatch "call\|work\|") { throw "the trace does not record entering a function: $($lines[0])" }
+  if (($lines -join "`n") -notmatch "alloc\|work\|") { throw "the trace does not record an allocation" }
+  if (($lines -join "`n") -notmatch "lock\|spin_lock\|") { throw "the trace does not record taking a lock" }
+
+  $out = & $CompilerPath check-trace "tests/test_trace_recorded.mettle" $trace --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the rules failed against a run that balances: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "rule every_allocation_is_freed: pass") { throw "the allocation rule did not run on the recording: $out" }
+  if ($flat -notmatch "rule every_lock_is_released: pass") { throw "the lock rule did not run on the recording: $out" }
+
+  # The same rules, the same file, run by the interpreter instead.
+  $out = & $CompilerPath test "tests/test_trace_recorded.mettle" --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the same rules failed under mettle test: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "rule every_allocation_is_freed: pass") { throw "the two runs disagree about an allocation: $out" }
+
+  # A run that leaks, caught by the rule that read it.
+  $leaky = Join-Path $tmpDir "trace_leaky.mettle"
+  $source = Get-Content "tests/test_trace_recorded.mettle" -Raw
+  Set-Content -Path $leaky -Value ($source -replace "(?m)^  free\(scratch\);`$", "") -Encoding UTF8
+  $leakyExe = Join-Path $tmpDir "trace_leaky.exe"
+  $leakyTrace = Join-Path $tmpDir "leaky.txt"
+  $out = & $CompilerPath --build $leaky -o $leakyExe --record-trace 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the leaky build failed: $out" }
+  $env:METTLE_TRACE = $leakyTrace
+  & $leakyExe | Out-Null
+  Remove-Item Env:METTLE_TRACE
+  $out = & $CompilerPath check-trace $leaky $leakyTrace 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a run that leaked passed the rule that reads it" }
+  if ($out -notmatch "error\[R0002\]") { throw "the leak was not reported as a failing rule: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "allocated and freed a different number of times") { throw "the verdict does not say what went wrong: $out" }
+
+  $plain = Join-Path $tmpDir "trace_free_plain.exe"
+  $out = & $CompilerPath --build "tests/test_trace_recorded.mettle" -o $plain 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the unrecorded build failed: $out" }
+  $a = [System.IO.File]::ReadAllBytes($plain)
+  $b = [System.IO.File]::ReadAllBytes($exe)
+  if ($a.Length -ge $b.Length) { throw "the recording added nothing to the binary, so it is not in there" }
+  $bytes = [System.IO.File]::ReadAllBytes($plain)
+  $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+  if ($text.Contains("mettle-trace.txt")) { throw "a program built without --record-trace still carries the recorder" }
+  Write-CaseResult -Name "a_rule_reads_a_recorded_run" -Passed $true
+}
+catch {
+  $failed++
+  if (Test-Path Env:METTLE_TRACE) { Remove-Item Env:METTLE_TRACE }
+  Write-CaseResult -Name "a_rule_reads_a_recorded_run" -Passed $false -Reason $_.Exception.Message
+}
+
 # A @rule is a property the program requires of itself. Enforce: there is an
 # input on which the build actually fails, and the failure names the site the
 # rule pointed at and the rule that pointed there.
