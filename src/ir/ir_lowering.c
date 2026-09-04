@@ -103,6 +103,7 @@ IRProgram *ir_lower_program(ASTNode *program, TypeChecker *type_checker,
   context.emit_safety_checks = emit_safety_checks ? 1 : 0;
   context.emit_refinement_checks = g_ir_lowering_refinement_checks;
   context.emit_task_checks = g_ir_lowering_task_checks;
+  context.emit_overflow_checks = g_ir_lowering_overflow_checks;
   context.program = ir_program;
 
   Program *program_data = (Program *)program->data;
@@ -333,6 +334,7 @@ IRFunction *ir_lower_function(IRLoweringContext *context,
 int g_ir_lowering_explain = 0;
 int g_ir_lowering_refinement_checks = 0;
 int g_ir_lowering_task_checks = 0;
+int g_ir_lowering_overflow_checks = 0;
 
 void ir_lowering_set_explain(int enabled) { g_ir_lowering_explain = enabled; }
 
@@ -342,6 +344,10 @@ void ir_lowering_set_refinement_checks(int enabled) {
 
 void ir_lowering_set_task_checks(int enabled) {
   g_ir_lowering_task_checks = enabled;
+}
+
+void ir_lowering_set_overflow_checks(int enabled) {
+  g_ir_lowering_overflow_checks = enabled;
 }
 
 void ir_set_error(IRLoweringContext *context, const char *format, ...) {

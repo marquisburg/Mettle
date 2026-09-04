@@ -120,8 +120,11 @@ through a message the sender already handed over. You write no lifetimes and no
 ownership marks. It infers them, and it reports only what it can prove. See
 [the memory analyser](docs/borrow-checker.md).
 
-**Checks the rest at run time, cheaply enough to ship.** `--safe` checks every
-memory access at every optimization level, then proves away what it can: a
+**Checks the rest at run time, cheaply enough to ship.** `--check-overflow`
+traps on a signed add, subtract or multiply that leaves its type, and a
+declared range that bounds the operands deletes the check outright. `--safe`
+checks every memory access at every optimization level, then proves away what
+it can: a
 constant index, a counter its loop already bounds, an index its own arithmetic
 bounds, one check that covers a whole loop. What survives compares against an
 allocation the loop resolved once, and costs a few instructions. A vectorized

@@ -907,9 +907,10 @@ only where proven.
   Proven by `refine_unproven_is_refused`, `proofs_cross_calls`,
   `proofs_carry_around_loops`, `declared_types_relate_values`,
   `float_predicates_bound_reassociation` and `declared_types_refine_structs`.
-  Gapped, and written into known-limitations.md: no integer-overflow check, no
-  way to declare two pointers disjoint, and a float accumulator carries a
-  bound only where the loop's trip count is constant.
+  A declared range now deletes a signed overflow check under
+  `--check-overflow`, and a program whose every signed operation is proven
+  compiles to the same bytes with the flag as without. Gapped, and written
+  into known-limitations.md: two pointers cannot be declared disjoint.
 - ~~An execution model.~~ *(V.6)* Landed as a position and a worked shape:
   the model is the program's, `quiesce` is its point, and its properties are
   a contract, a declared type, effects and rules that hold on every build.

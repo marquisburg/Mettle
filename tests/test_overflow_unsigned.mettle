@@ -1,0 +1,20 @@
+// Unsigned arithmetic wraps on purpose. A hash is written to wrap, and a
+// check on it would refuse the programs that want it, so `--check-overflow`
+// emits nothing here and this compiles to the same bytes with the flag as
+// without it.
+import "std/io";
+
+fn mix(h: uint32, x: uint32) -> uint32 {
+  return h * 2654435761 + x;
+}
+
+fn main() -> int32 {
+  var h: uint32 = 0;
+  var i: uint32 = 0;
+  while (i < 8) {
+    h = mix(h, i);
+    i = i + 1;
+  }
+  println("h {h}");
+  return 0;
+}

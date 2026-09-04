@@ -1,0 +1,25 @@
+// Signed arithmetic that does not fit, and signed arithmetic a declared type
+// says will. `add` takes two plain int32 and the compiler cannot say the sum
+// fits, so `--check-overflow` puts a check on it. `blend` takes two `Half`,
+// and a Half is at most a billion, so the sum is at most two billion, which
+// is inside int32 and needs no check at all. A range earning the deletion of
+// a check is what a range is for.
+import "std/io";
+
+type Half = int32 where value >= 0 && value <= 1000000000;
+
+fn add(a: int32, b: int32) -> int32 {
+  return a + b;
+}
+
+fn blend(a: Half, b: Half) -> int32 {
+  return a + b;
+}
+
+fn main() -> int32 {
+  var small: int32 = 3;
+  var x: Half = (Half)7;
+  var y: Half = (Half)11;
+  println("add {add(small, small)} blend {blend(x, y)}");
+  return 0;
+}

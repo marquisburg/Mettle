@@ -1,5 +1,6 @@
 // AST->IR lowering: expression and call lowering.
 #include "ir_lowering_internal.h"
+#include "ir_explain_ledger.h"
 #include "frontend/mtlc_frontend.h" // mtlc_type_from_frontend (value_type baking)
 
 int ir_lower_statement_or_expression(IRLoweringContext *context,
@@ -261,6 +262,132 @@ static int ir_emit_task_capture_check(IRLoweringContext *context,
   free(helper.arguments);
   ir_operand_destroy(&pointer);
   return ok;
+}
+
+/* Whether a signed `+`, `-` or `*` needs its result checked.
+ *
+ * The answer comes from the operands, never from the result: asking the
+ * interval prover about `a + b` gets back a range already clamped to the type
+ * the sum lands in, which fits by construction and would prove every check
+ * away including the ones that catch something. So the operands' intervals
+ * are combined here, at a width the combination cannot itself overflow, and
+ * the question is whether every value that pair can produce lands inside the
+ * result's type.
+ *
+ * The intervals a declared type gives are what make this answer yes. That is
+ * the payoff: a range earns the deletion of a check, which is what a range is
+ * for. */
+#if defined(__SIZEOF_INT128__)
+typedef __int128 IROverflowWide;
+#define IR_OVERFLOW_WIDE 1
+#else
+#define IR_OVERFLOW_WIDE 0
+#endif
+
+static int ir_overflow_check_wanted(IRLoweringContext *context,
+                                    ASTNode *expression, ASTNode *left_node,
+                                    ASTNode *right_node, const char *op,
+                                    const struct Type **out_type) {
+  const struct Type *type = NULL;
+  long long low = 0;
+  unsigned long long high = 0;
+  *out_type = NULL;
+  if (!context->emit_overflow_checks || !expression || !op) {
+    return 0;
+  }
+  if (strcmp(op, "+") != 0 && strcmp(op, "-") != 0 && strcmp(op, "*") != 0) {
+    return 0;
+  }
+  type = expression->resolved_type;
+  if (!type || !type_checker_integer_bounds(type, &low, &high)) {
+    return 0;
+  }
+  if (ir_type_is_unsigned_integer(type) || high > (unsigned long long)LLONG_MAX) {
+    return 0;
+  }
+  /* Unsigned arithmetic wraps on purpose, and an operation with an unsigned
+   * operand is unsigned arithmetic however wide the expression's own type
+   * came out. This is the same rule the emitted instruction uses, so the
+   * check and the code it guards agree about what the operation is. */
+  if (ir_type_is_unsigned_integer(ir_infer_expression_type(context,
+                                                           left_node)) ||
+      ir_type_is_unsigned_integer(ir_infer_expression_type(context,
+                                                           right_node))) {
+    return 0;
+  }
+  *out_type = type;
+#if IR_OVERFLOW_WIDE
+  if (context->type_checker && left_node && right_node) {
+    int a_has_min = 0;
+    int a_has_max = 0;
+    int b_has_min = 0;
+    int b_has_max = 0;
+    long long a_min = 0;
+    long long a_max = 0;
+    long long b_min = 0;
+    long long b_max = 0;
+    if (type_checker_expression_range(context->type_checker, left_node,
+                                      &a_has_min, &a_min, &a_has_max, &a_max) &&
+        type_checker_expression_range(context->type_checker, right_node,
+                                      &b_has_min, &b_min, &b_has_max, &b_max) &&
+        a_has_min && a_has_max && b_has_min && b_has_max && a_min <= a_max &&
+        b_min <= b_max) {
+      IROverflowWide corners[4];
+      IROverflowWide lowest;
+      IROverflowWide highest;
+      size_t i;
+      if (strcmp(op, "+") == 0) {
+        corners[0] = (IROverflowWide)a_min + b_min;
+        corners[1] = (IROverflowWide)a_min + b_max;
+        corners[2] = (IROverflowWide)a_max + b_min;
+        corners[3] = (IROverflowWide)a_max + b_max;
+      } else if (strcmp(op, "-") == 0) {
+        corners[0] = (IROverflowWide)a_min - b_min;
+        corners[1] = (IROverflowWide)a_min - b_max;
+        corners[2] = (IROverflowWide)a_max - b_min;
+        corners[3] = (IROverflowWide)a_max - b_max;
+      } else {
+        corners[0] = (IROverflowWide)a_min * b_min;
+        corners[1] = (IROverflowWide)a_min * b_max;
+        corners[2] = (IROverflowWide)a_max * b_min;
+        corners[3] = (IROverflowWide)a_max * b_max;
+      }
+      lowest = corners[0];
+      highest = corners[0];
+      for (i = 1; i < 4; i++) {
+        if (corners[i] < lowest) {
+          lowest = corners[i];
+        }
+        if (corners[i] > highest) {
+          highest = corners[i];
+        }
+      }
+      if (lowest >= (IROverflowWide)low &&
+          highest <= (IROverflowWide)(long long)high) {
+        char detail[224];
+        char span[96];
+        snprintf(span, sizeof(span), "%lld..%lld", (long long)lowest,
+                 (long long)highest);
+        snprintf(detail, sizeof(detail),
+                 "holds every value the operands can produce here, %s, so the "
+                 "check could never fire; consumed by lowering, which decides "
+                 "check emission per operation",
+                 span);
+        g_ir_overflow_proved++;
+        ir_explain_type_payoff(expression->location.filename,
+                               expression->location.line,
+                               context->current_function_name,
+                               type->name ? type->name : "?",
+                               "no overflow check emitted", detail);
+        return 0;
+      }
+    }
+  }
+#else
+  (void)left_node;
+  (void)right_node;
+#endif
+  return 1;
 }
 
 int ir_lower_call_expression(IRLoweringContext *context,
@@ -1976,9 +2103,6 @@ static int ir_lower_binary_expression(IRLoweringContext *context,
     return 0;
   }
 
-  ir_operand_destroy(&left);
-  ir_operand_destroy(&right);
-
   /* A temp is 64 bits wide whatever the expression's type is, and the
    * arithmetic that produced it ran at that width. `int32 + int32` overflows
    * at 32 bits by the language's own rule, so the value has to come back to
@@ -1986,6 +2110,10 @@ static int ir_lower_binary_expression(IRLoweringContext *context,
    * and nothing else did, so `big + big > 0` answered yes for two values
    * whose int32 sum is negative. */
   {
+    const struct Type *checked = NULL;
+    int wants = ir_overflow_check_wanted(context, expression, binary->left,
+                                         binary->right, binary->operator,
+                                         &checked);
     const char *narrow = ir_narrow_integer_result_type(
         instruction.is_float ? NULL : ir_infer_expression_type(context,
                                                                expression),
@@ -1994,6 +2122,8 @@ static int ir_lower_binary_expression(IRLoweringContext *context,
       IROperand wrapped = ir_operand_none();
       if (!ir_make_temp_operand(context, &wrapped)) {
         ir_operand_destroy(&destination);
+        ir_operand_destroy(&left);
+        ir_operand_destroy(&right);
         return 0;
       }
       IRInstruction truncate = {0};
@@ -2005,14 +2135,39 @@ static int ir_lower_binary_expression(IRLoweringContext *context,
       if (!ir_emit(context, function, &truncate)) {
         ir_operand_destroy(&wrapped);
         ir_operand_destroy(&destination);
+        ir_operand_destroy(&left);
+        ir_operand_destroy(&right);
+        return 0;
+      }
+      if (wants &&
+          !ir_emit_overflow_check_narrow(context, function,
+                                         expression->location, &destination,
+                                         &wrapped, binary->operator, narrow)) {
+        ir_operand_destroy(&wrapped);
+        ir_operand_destroy(&destination);
+        ir_operand_destroy(&left);
+        ir_operand_destroy(&right);
         return 0;
       }
       ir_operand_destroy(&destination);
+      ir_operand_destroy(&left);
+      ir_operand_destroy(&right);
       *out_value = wrapped;
       return 1;
     }
+    if (wants && checked &&
+        !ir_emit_overflow_check_wide(context, function, expression->location,
+                                     &destination, &left, &right,
+                                     binary->operator, checked->name)) {
+      ir_operand_destroy(&destination);
+      ir_operand_destroy(&left);
+      ir_operand_destroy(&right);
+      return 0;
+    }
   }
 
+  ir_operand_destroy(&left);
+  ir_operand_destroy(&right);
   *out_value = destination;
   return 1;
 }

@@ -405,11 +405,19 @@ compiled program: that would mean linking the rule and building the `Trace` at
 run time, and neither exists. A trace rule therefore says what the runs your
 tests drive did, and says nothing about a run in production.
 
-Mettle emits no integer overflow check, so a declared range has none to delete;
-what a range earns is the bounds check and the divide. Two pointers cannot be
-declared disjoint, so a vectorizer that refuses over a possible overlap cannot
-be given a proof to proceed on; it refuses rather than emitting a run-time
-overlap test, so there is no test for a proof to remove either.
+`--check-overflow` traps on a signed `+`, `-` or `*` that leaves its type,
+and a declared range that bounds the operands tightly enough deletes the
+check, which `--explain` reports under **proven by type**. Unsigned
+arithmetic is not checked: wrapping is what an unsigned type is reached for in
+a hash or a checksum. Nothing else is checked either, so a cast that narrows,
+a shift past the width and a divide by a variable zero are what they were.
+Without the flag, signed arithmetic wraps, which is the language's own rule
+and not an omission.
+
+Two pointers cannot be declared disjoint, so a vectorizer that refuses over a
+possible overlap cannot be given a proof to proceed on; it refuses rather than
+emitting a run-time overlap test, so there is no test for a proof to remove
+either.
 
 A float accumulator carries a declared bound only where the compiler bounded
 the loop's trip count: a counter with a constant initialiser, a constant step,

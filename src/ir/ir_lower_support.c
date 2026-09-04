@@ -453,6 +453,200 @@ int ir_emit_refinement_predicate(IRLoweringContext *context,
   return 1;
 }
 
+
+size_t g_ir_overflow_emitted;
+size_t g_ir_overflow_proved;
+
+void ir_lowering_overflow_totals(size_t *emitted, size_t *proved) {
+  if (emitted) {
+    *emitted = g_ir_overflow_emitted;
+  }
+  if (proved) {
+    *proved = g_ir_overflow_proved;
+  }
+}
+
+/* Trap when `holds` is zero. The compare that produced it is the caller's,
+ * because the three overflow shapes compute it differently. */
+static int ir_emit_overflow_trap(IRLoweringContext *context,
+                                 IRFunction *function, SourceLocation location,
+                                 const IROperand *holds, const char *message) {
+  IRInstruction branch = {0};
+  IRInstruction jump = {0};
+  IRInstruction trap = {0};
+  IRInstruction ok = {0};
+  char *trap_label = ir_new_label_name(context, "trap_overflow");
+  char *ok_label = ir_new_label_name(context, "in_range");
+  int emitted;
+  if (!trap_label || !ok_label) {
+    free(trap_label);
+    free(ok_label);
+    return 0;
+  }
+  branch.op = IR_OP_BRANCH_ZERO;
+  branch.location = location;
+  branch.lhs = *holds;
+  branch.text = trap_label;
+  jump.op = IR_OP_JUMP;
+  jump.location = location;
+  jump.text = ok_label;
+  trap.op = IR_OP_LABEL;
+  trap.location = location;
+  trap.text = trap_label;
+  ok.op = IR_OP_LABEL;
+  ok.location = location;
+  ok.text = ok_label;
+  emitted = ir_emit(context, function, &branch) &&
+            ir_emit(context, function, &jump) &&
+            ir_emit(context, function, &trap) &&
+            ir_emit_runtime_trap_ex(context, function, location, 6u, message,
+                                    NULL, NULL) &&
+            ir_emit(context, function, &ok);
+  free(trap_label);
+  free(ok_label);
+  if (emitted) {
+    g_ir_overflow_emitted++;
+  }
+  return emitted;
+}
+
+/* A narrow signed result: the truncation the language already applies is the
+ * check. `wide` is what the arithmetic produced at register width and
+ * `narrow` is that value in its declared type, so the two differing is
+ * exactly the definition of the result not fitting. */
+int ir_emit_overflow_check_narrow(IRLoweringContext *context,
+                                  IRFunction *function, SourceLocation location,
+                                  const IROperand *wide,
+                                  const IROperand *narrow, const char *op,
+                                  const char *type_name) {
+  IROperand holds = ir_operand_none();
+  IRInstruction compare = {0};
+  char message[192];
+  if (!ir_make_temp_operand(context, &holds)) {
+    return 0;
+  }
+  compare.op = IR_OP_BINARY;
+  compare.location = location;
+  compare.dest = holds;
+  compare.lhs = ir_operand_copy(narrow);
+  compare.rhs = ir_operand_copy(wide);
+  compare.text = "==";
+  if (!ir_emit(context, function, &compare)) {
+    ir_operand_destroy(&holds);
+    return 0;
+  }
+  snprintf(message, sizeof(message),
+           "Fatal error: signed '%s' overflowed %s", op,
+           type_name ? type_name : "its type");
+  {
+    int ok = ir_emit_overflow_trap(context, function, location, &holds,
+                                   message);
+    ir_operand_destroy(&holds);
+    return ok;
+  }
+}
+
+/* A 64-bit signed result has nothing wider to be compared against, so the
+ * question is asked of the operands' signs instead: an add overflows when
+ * both operands differ in sign from the result, a subtract when the operands
+ * differ from each other and the result differs from the left one, and a
+ * multiply when dividing the result back does not return what went in. */
+int ir_emit_overflow_check_wide(IRLoweringContext *context,
+                                IRFunction *function, SourceLocation location,
+                                const IROperand *result, const IROperand *left,
+                                const IROperand *right, const char *op,
+                                const char *type_name) {
+  IROperand a = ir_operand_none();
+  IROperand b = ir_operand_none();
+  IROperand c = ir_operand_none();
+  IROperand holds = ir_operand_none();
+  IRInstruction one = {0};
+  IRInstruction two = {0};
+  IRInstruction three = {0};
+  IRInstruction test = {0};
+  char message[192];
+  int multiply = strcmp(op, "*") == 0;
+  if (!ir_make_temp_operand(context, &a) || !ir_make_temp_operand(context, &b) ||
+      !ir_make_temp_operand(context, &c) ||
+      !ir_make_temp_operand(context, &holds)) {
+    ir_operand_destroy(&a);
+    ir_operand_destroy(&b);
+    ir_operand_destroy(&c);
+    ir_operand_destroy(&holds);
+    return 0;
+  }
+  if (multiply) {
+    /* left == 0 || result / left == right */
+    one.op = IR_OP_BINARY;
+    one.location = location;
+    one.dest = a;
+    one.lhs = ir_operand_copy(left);
+    one.rhs = ir_operand_int(0);
+    one.text = "==";
+    two.op = IR_OP_BINARY;
+    two.location = location;
+    two.dest = b;
+    two.lhs = ir_operand_copy(result);
+    two.rhs = ir_operand_copy(left);
+    two.text = "/";
+    three.op = IR_OP_BINARY;
+    three.location = location;
+    three.dest = c;
+    three.lhs = b;
+    three.rhs = ir_operand_copy(right);
+    three.text = "==";
+    test.op = IR_OP_BINARY;
+    test.location = location;
+    test.dest = holds;
+    test.lhs = a;
+    test.rhs = c;
+    test.text = "|";
+  } else {
+    int adding = strcmp(op, "+") == 0;
+    one.op = IR_OP_BINARY;
+    one.location = location;
+    one.dest = a;
+    one.lhs = ir_operand_copy(left);
+    one.rhs = adding ? ir_operand_copy(result) : ir_operand_copy(right);
+    one.text = "^";
+    two.op = IR_OP_BINARY;
+    two.location = location;
+    two.dest = b;
+    two.lhs = adding ? ir_operand_copy(right) : ir_operand_copy(left);
+    two.rhs = ir_operand_copy(result);
+    two.text = "^";
+    three.op = IR_OP_BINARY;
+    three.location = location;
+    three.dest = c;
+    three.lhs = a;
+    three.rhs = b;
+    three.text = "&";
+    test.op = IR_OP_BINARY;
+    test.location = location;
+    test.dest = holds;
+    test.lhs = c;
+    test.rhs = ir_operand_int(0);
+    test.text = ">=";
+  }
+  if (!ir_emit(context, function, &one) ||
+      (multiply && !ir_emit(context, function, &two)) ||
+      (!multiply && !ir_emit(context, function, &two)) ||
+      !ir_emit(context, function, &three) ||
+      !ir_emit(context, function, &test)) {
+    ir_operand_destroy(&holds);
+    return 0;
+  }
+  snprintf(message, sizeof(message),
+           "Fatal error: signed '%s' overflowed %s", op,
+           type_name ? type_name : "its type");
+  {
+    int ok = ir_emit_overflow_trap(context, function, location, &holds,
+                                   message);
+    ir_operand_destroy(&holds);
+    return ok;
+  }
+}
+
 int ir_emit_refinement_check(IRLoweringContext *context, IRFunction *function,
                              SourceLocation location, const IROperand *value,
                              const Type *refined) {

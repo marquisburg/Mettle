@@ -708,6 +708,43 @@ naming the conjunct it could not establish.
 `--check-proofs` re-checks a struct refinement by evaluating the predicate
 itself, in the scope where the value was proven.
 
+## What a range deletes
+
+`--check-overflow` puts a trap on every signed `+`, `-` and `*` whose result
+the compiler cannot show will fit:
+
+```mettle
+fn add(a: int32, b: int32) -> int32 { return a + b; }
+```
+
+```text
+Fatal error: signed '+' overflowed int32
+```
+
+A declared type that bounds the operands is what removes it. The operands'
+intervals are combined at a width the combination cannot itself overflow, and
+if every value the pair can produce lands inside the result's type, no check
+is emitted:
+
+```mettle
+type Half = int32 where value >= 0 && value <= 1000000000;
+
+fn blend(a: Half, b: Half) -> int32 { return a + b; }
+```
+
+Two `Half`s sum to at most two billion, which an `int32` holds. `--explain`
+reports the deletion and what proved it:
+
+```text
+line 16 in blend: no overflow check emitted, because 'int32' holds every value
+the operands can produce here, 0..2000000000, so the check could never fire
+```
+
+A program whose every signed operation is proven that way compiles to the same
+bytes with the flag as without it, which is the claim stated as a comparison.
+Unsigned arithmetic is never checked, because wrapping is what an unsigned
+type is reached for.
+
 ## Deadlines
 
 A function may declare what its longest path is allowed to cost:

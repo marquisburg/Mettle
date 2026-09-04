@@ -70,6 +70,7 @@ typedef struct {
   int emit_refinement_checks;
   int emit_task_checks;
   int emitted_task_check;
+  int emit_overflow_checks;
   /* While a relational predicate is being lowered as a run-time check, the
      binding it speaks about stands for this operand. */
   const char *refine_binding_name;
@@ -316,6 +317,7 @@ int ir_emit(IRLoweringContext *context, IRFunction *function,
 
 extern int g_ir_lowering_refinement_checks;
 extern int g_ir_lowering_task_checks;
+extern int g_ir_lowering_overflow_checks;
 int ir_emit_refinement_predicate(IRLoweringContext *context,
                                  IRFunction *function, SourceLocation location,
                                  const IROperand *value, const Type *refined,
@@ -329,6 +331,19 @@ int ir_emit_runtime_trap_ex(IRLoweringContext *context,
                                    SourceLocation location, uint32_t kind,
                                    const char *message, const IROperand *arg0,
                                    const IROperand *arg1);
+
+int ir_emit_overflow_check_narrow(IRLoweringContext *context,
+                                  IRFunction *function, SourceLocation location,
+                                  const IROperand *wide,
+                                  const IROperand *narrow, const char *op,
+                                  const char *type_name);
+int ir_emit_overflow_check_wide(IRLoweringContext *context,
+                                IRFunction *function, SourceLocation location,
+                                const IROperand *result, const IROperand *left,
+                                const IROperand *right, const char *op,
+                                const char *type_name);
+extern size_t g_ir_overflow_emitted;
+extern size_t g_ir_overflow_proved;
 
 int ir_emit_null_check(IRLoweringContext *context, IRFunction *function,
                               SourceLocation location, const IROperand *value);

@@ -32,5 +32,10 @@ void ir_lowering_set_explain(int enabled);
 
 void ir_lowering_set_refinement_checks(int enabled);
 void ir_lowering_set_task_checks(int enabled);
+void ir_lowering_set_overflow_checks(int enabled);
+/* Signed additions, subtractions and multiplications checked at run time,
+ * and how many the declared types in the program proved could not
+ * overflow and so were never emitted. */
+void ir_lowering_overflow_totals(size_t *emitted, size_t *proved);
 
 #endif /* IR_LOWERING_H */

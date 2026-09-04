@@ -3957,6 +3957,8 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
     options->report_rules = 1;
   } else if (strcmp(argv[i], "--check-proofs") == 0) {
     options->check_proofs = 1;
+  } else if (strcmp(argv[i], "--check-overflow") == 0) {
+    options->check_overflow = 1;
   } else if (strcmp(argv[i], "--check-deadlines") == 0) {
     options->check_deadlines = 1;
   } else if (strcmp(argv[i], "--report-deadlines") == 0) {
@@ -6386,6 +6388,7 @@ int compile_file(const char *input_filename, const char *output_filename,
                                     options->trace_function != NULL ||
                                     ir_verify_enabled());
   ir_lowering_set_task_checks(options->check_tasks);
+  ir_lowering_set_overflow_checks(options->check_overflow);
   ir_explain_safety_set_collect(options->explain && options->optimize,
                                 input_filename);
 
@@ -7232,6 +7235,9 @@ void print_usage(const char *program_name) {
          "                      declared type is not one (survives --release)\n");
   printf("  --check-tasks       Trap at run time when a pointer handed to a task lies in\n"
          "                      the stack of the thread that spawned it\n");
+  printf("  --check-overflow    Trap at run time when a signed +, - or * leaves its type;\n"
+         "                      a declared range that bounds the operands deletes the\n"
+         "                      check\n");
   printf("  --report-deadlines  Print each `where cycles < N` deadline, what its longest\n"
          "                      path costs, and whether it was proven or measured\n");
   printf("  --check-deadlines   Count what a path actually costs while the program runs and\n"

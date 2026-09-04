@@ -4677,6 +4677,78 @@ catch {
   Write-CaseResult -Name "engine_example" -Passed $false -Reason $_.Exception.Message
 }
 
+# Signed arithmetic that does not fit, and the ranges that say it will.
+# Enforce: --check-overflow traps on a signed add, subtract and multiply that
+# leave the type, a declared type that bounds the operands deletes the check
+# and --explain says which type earned it, a program whose every operation is
+# proven compiles to the same bytes with the flag as without, and a program
+# with no signed arithmetic pays nothing either way.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "overflow.exe"
+  $out = & $CompilerPath --build "tests/test_overflow.mettle" -o $exe --check-overflow --explain -O 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the checked build failed: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "no overflow check emitted") { throw "no deletion was reported: $out" }
+  if ($flat -notmatch "0\.\.2000000000") { throw "the report does not say what the operands can produce: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "add 6 blend 18") { throw "the checked program did not run: $run" }
+
+  $wide = Join-Path $tmpDir "overflow_wide.exe"
+  $out = & $CompilerPath --build "tests/test_overflow_traps.mettle" -o $wide --check-overflow 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the trapping build failed: $out" }
+  $run = & $wide 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a signed add that left int64 ran to completion" }
+  $flat = $run -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "signed '\+' overflowed int64") { throw "the trap does not name the operation: $run" }
+
+  $plain = Join-Path $tmpDir "overflow_unchecked.exe"
+  $out = & $CompilerPath --build "tests/test_overflow_traps.mettle" -o $plain 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the unchecked build failed: $out" }
+  $run = & $plain 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the same program trapped without the flag: $run" }
+
+  $a1 = Join-Path $tmpDir "overflow_proved_plain.exe"
+  $a2 = Join-Path $tmpDir "overflow_proved_checked.exe"
+  $out = & $CompilerPath --build "tests/test_overflow_proved.mettle" -o $a1 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the proved build failed: $out" }
+  $out = & $CompilerPath --build "tests/test_overflow_proved.mettle" -o $a2 --check-overflow 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the proved build under the flag failed: $out" }
+  $x = [System.IO.File]::ReadAllBytes($a1)
+  $y = [System.IO.File]::ReadAllBytes($a2)
+  if ($x.Length -ne $y.Length) { throw "a program whose arithmetic is all proven changed size under --check-overflow" }
+  for ($i = 0; $i -lt $x.Length; $i++) {
+    if ($x[$i] -ne $y[$i]) { throw "a program whose arithmetic is all proven changed at byte $i under --check-overflow" }
+  }
+  $run = & $a2 2>&1 | Out-String
+  if ($run -notmatch "b 18 s 45 g -2") { throw "the proved program did not run: $run" }
+
+  $b1 = Join-Path $tmpDir "overflow_unsigned_plain.exe"
+  $b2 = Join-Path $tmpDir "overflow_unsigned_checked.exe"
+  $out = & $CompilerPath --build "tests/test_overflow_unsigned.mettle" -o $b1 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the unsigned build failed: $out" }
+  $out = & $CompilerPath --build "tests/test_overflow_unsigned.mettle" -o $b2 --check-overflow 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the unsigned build under the flag failed: $out" }
+  $x = [System.IO.File]::ReadAllBytes($b1)
+  $y = [System.IO.File]::ReadAllBytes($b2)
+  if ($x.Length -ne $y.Length) { throw "unsigned arithmetic changed size under --check-overflow" }
+  for ($i = 0; $i -lt $x.Length; $i++) {
+    if ($x[$i] -ne $y[$i]) { throw "unsigned arithmetic changed at byte $i under --check-overflow" }
+  }
+  $run = & $b2 2>&1 | Out-String
+  if ($run -notmatch "h \d+") { throw "the unsigned program did not run: $run" }
+
+  $out = & $CompilerPath explain M0123 2>&1 | Out-String
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "wrap rather than trapping") { throw "explain M0123 says nothing: $out" }
+  Write-CaseResult -Name "signed_overflow_checked_and_proven_away" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "signed_overflow_checked_and_proven_away" -Passed $false -Reason $_.Exception.Message
+}
+
 # A deadline is a claim about a function's longest path, and the compiler
 # proves it from a cost model or stops the build. Enforce: a path that fits
 # builds and the report prints it block by block, a path that does not fails

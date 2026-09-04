@@ -1,0 +1,29 @@
+// Every signed operation here is one a declared type bounds, so
+// `--check-overflow` has nothing to emit and the program compiles to the same
+// bytes with the flag as without it. That is the whole claim about what a
+// range earns, stated as a comparison a test can make.
+import "std/io";
+
+type Half = int32 where value >= 0 && value <= 1000000000;
+type Small = int32 where value >= 0 && value <= 100;
+
+fn blend(a: Half, b: Half) -> int32 {
+  return a + b;
+}
+
+fn scale(a: Small, b: Small) -> int32 {
+  return a * b;
+}
+
+fn gap(a: Half, b: Small) -> int32 {
+  return a - b;
+}
+
+fn main() -> int32 {
+  var x: Half = (Half)7;
+  var y: Half = (Half)11;
+  var p: Small = (Small)5;
+  var q: Small = (Small)9;
+  println("b {blend(x, y)} s {scale(p, q)} g {gap(x, q)}");
+  return 0;
+}
