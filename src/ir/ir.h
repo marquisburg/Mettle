@@ -653,6 +653,7 @@ typedef struct {
    * speculated: LICM hoists it only under a clone of the loop's entry test.
    * Computed by the pure-call LICM pass; meaningless before it runs. */
   int is_readonly_inferred;
+  int is_speculatable_inferred;
   int is_noalloc;         // `@noalloc` : proven allocation-free or error
   int is_test;            // `@test`    : compile-time unit test (mettle test)
   /* `@swappable`: may be replaced in a running process at a `quiesce` point.

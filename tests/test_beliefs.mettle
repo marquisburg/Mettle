@@ -1,0 +1,19 @@
+import "std/io";
+
+effect Audit;
+
+extern fn audited_tick(x: int32) -> int32 with Audit;
+extern fn quiet_tick(x: int32) -> int32 with none;
+
+fn tick_twice(x: int32) -> int32 {
+  return quiet_tick(quiet_tick(x));
+}
+
+fn audit(x: int32) -> int32 provides Audit {
+  return audited_tick(x);
+}
+
+fn main() -> int32 {
+  print("ticked {tick_twice(1)} audited {audit(2)}");
+  return 0;
+}

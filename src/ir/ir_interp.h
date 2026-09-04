@@ -157,6 +157,9 @@ void ir_interp_set_value_hook(IRInterpMachine *machine, IRInterpValueHook hook,
 /* Execution counting (zero-run PGO): when enabled, every executed
  * instruction increments a per-function counter array indexed by instruction
  * position. Query after the run. */
+void ir_interp_recheck_inferred_purity(IRInterpMachine *machine, int on);
+void ir_interp_set_purity_fault(int on);
+int ir_interp_purity_fault_enabled(void);
 void ir_interp_enable_counting(IRInterpMachine *machine);
 const long long *ir_interp_get_counts(const IRInterpMachine *machine,
                                       const IRFunction *function,

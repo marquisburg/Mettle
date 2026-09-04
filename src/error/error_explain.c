@@ -390,6 +390,43 @@ static const ErrorCodeDoc DOCS[] = {
      "\n"
      "Fix: widen the type's `with` clause, remove the effect from the\n"
      "function, or pass the function by name.\n"},
+    {"F0005", "The effect pass spent more than its budget",
+     "`--effect-budget=N` makes the cost of inferring the program's effects\n"
+     "a contract: the steps the pass spends scanning bodies and running its\n"
+     "fixpoint may not exceed N. They did.\n"
+     "\n"
+     "`--report-effects` prints what the pass settled, one line per\n"
+     "function that performs or needs anything, and the totals: functions\n"
+     "seen, functions with an effect, fixpoint rounds, steps.\n"
+     "\n"
+     "Fix: declare fewer effects, cut the call graph the fixpoint walks, or\n"
+     "raise the budget deliberately.\n"},
+    {"F0004", "A function declared @pure performs something",
+     "`@pure` is a contract, and this build checked it. The function\n"
+     "carries the decorator and its body, or something it calls, writes\n"
+     "observable state: a global, memory through a pointer, an allocation,\n"
+     "inline assembly, or a call the compiler cannot see into.\n"
+     "\n"
+     "The decorator buys no optimization. Purity is inferred by a\n"
+     "whole-program fixpoint, and the loop-invariant call hoist reads only\n"
+     "what that pass proved, so a pure function has its call hoisted\n"
+     "whether or not anyone wrote `@pure` on it. What the decorator does is\n"
+     "make the claim checkable: write it down and the build fails the day\n"
+     "the body stops being pure.\n"
+     "\n"
+     "Fix: remove the write, or remove the decorator.\n"},
+    {"P0003", "The declared-type prover spent more than its budget",
+     "`--proof-budget=N` makes the cost of proving declared types a\n"
+     "contract: the interval and guard steps the prover spends may not\n"
+     "exceed N. They did.\n"
+     "\n"
+     "`--report-proofs` prints one line per conversion the prover settled:\n"
+     "the type, the expression, the site, whether it was proven, what it\n"
+     "cost, and which route settled it (a range, or a dominating test).\n"
+     "\n"
+     "Fix: declare fewer refined types on hot paths, narrow what they are\n"
+     "computed from so the prover settles sooner, or raise the budget\n"
+     "deliberately.\n"},
     {"P0002", "A bounds check was proven away by a declared type",
      "Not an error. `--explain` reports it: an index whose declared type\n"
      "pins its range inside the array it indexes needs no bounds check, so\n"

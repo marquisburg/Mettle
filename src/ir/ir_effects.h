@@ -4,6 +4,7 @@
 #include "ir.h"
 #include "../error/error_reporter.h"
 #include <stddef.h>
+#include <stdio.h>
 
 typedef struct {
   const char *name;
@@ -25,12 +26,14 @@ typedef struct {
   size_t obligation_count;
   int instrument;
   int library_build;
+  FILE *report;
 } IREffectInput;
 
 typedef struct IREffectResults IREffectResults;
 
 int ir_effects_run(IRProgram *program, const IREffectInput *input,
-                   ErrorReporter *reporter, IREffectResults **out_results);
+                   ErrorReporter *reporter, IREffectResults **out_results,
+                   long long *out_steps);
 void ir_effect_results_free(IREffectResults *results);
 int ir_effect_results_lookup(const IREffectResults *results,
                              const char *function, const char ***performs,

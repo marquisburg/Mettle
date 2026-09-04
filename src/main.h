@@ -109,10 +109,17 @@ typedef struct {
   int report_rules;
   long long rule_budget;
   int rule_budget_set;
+  int report_proofs;
+  long long proof_budget;
+  int proof_budget_set;
+  int report_effects;
+  long long effect_budget;
+  int effect_budget_set;
   const char *target_desc_path;
   int report_target;
   int check_proofs;
   int check_effects;
+  int check_purity_fault;
   int emit_object;
   int generate_debug_symbols;
   int generate_line_mapping;

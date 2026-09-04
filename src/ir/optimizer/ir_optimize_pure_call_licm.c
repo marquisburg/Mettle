@@ -1,5 +1,6 @@
 #include "ir_optimize_internal.h"
 #include "../../common.h"
+#include "../ir_purity.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -112,81 +113,7 @@ static int pure_licm_writes_global(const IRFunction *function,
 
 /* ---- inferred read-only functions --------------------------------------- */
 
-/* One body sweep of the read-only fixpoint: every instruction must be free of
- * observable writes -- no STORE, no allocation, no global write, no indirect
- * call, no call to an unknown/extern function, and every direct callee must
- * itself still hold the read-only bit (a function's own bit is set while it is
- * being examined, so direct and mutual recursion pass through here and only a
- * genuine write anywhere in the cycle strips it). Loads are fine: "read-only",
- * not "const". */
-static int pure_licm_body_is_readonly(IRProgram *program,
-                                      const IRFunction *function) {
-  for (size_t k = 0; k < function->instruction_count; k++) {
-    const IRInstruction *inst = &function->instructions[k];
-    if (pure_licm_writes_global(function, inst)) {
-      return 0;
-    }
-    switch (inst->op) {
-    case IR_OP_NOP:
-    case IR_OP_LABEL:
-    case IR_OP_JUMP:
-    case IR_OP_BRANCH_ZERO:
-    case IR_OP_BRANCH_EQ:
-    case IR_OP_DECLARE_LOCAL:
-    case IR_OP_ASSIGN:
-    case IR_OP_ADDRESS_OF:
-    case IR_OP_LOAD:
-    case IR_OP_BINARY:
-    case IR_OP_UNARY:
-    case IR_OP_ROTATE_ADD:
-    case IR_OP_CAST:
-    case IR_OP_RETURN:
-      break;
-    case IR_OP_CALL: {
-      if (pure_licm_is_runtime_trap_call(inst)) {
-        break;
-      }
-      IRFunction *callee =
-          inst->text ? ir_program_find_function(program, inst->text) : NULL;
-      if (!callee || !callee->is_readonly_inferred) {
-        return 0;
-      }
-      break;
-    }
-    default:
-      return 0;
-    }
-  }
-  return 1;
-}
 
-/* Optimistic greatest-fixpoint over the program: start every defined function
- * read-only, strip the bit from any whose body disproves it, and repeat until
- * a full sweep strips nothing (each round must strip at least one function to
- * continue, so rounds are bounded by the function count and in practice by the
- * call-graph depth of the impurity). */
-static void pure_licm_infer_readonly(IRProgram *program) {
-  for (size_t i = 0; i < program->function_count; i++) {
-    IRFunction *fn = program->functions[i];
-    if (fn) {
-      fn->is_readonly_inferred = 1;
-    }
-  }
-  int changed = 1;
-  while (changed) {
-    changed = 0;
-    for (size_t i = 0; i < program->function_count; i++) {
-      IRFunction *fn = program->functions[i];
-      if (!fn || !fn->is_readonly_inferred) {
-        continue;
-      }
-      if (!pure_licm_body_is_readonly(program, fn)) {
-        fn->is_readonly_inferred = 0;
-        changed = 1;
-      }
-    }
-  }
-}
 
 /* Every instruction in [lo, hi) of `function` must be free of side effects that
  * could perturb a pure callee's memory reads or be unsafe to evaluate once up
@@ -226,7 +153,7 @@ static int pure_licm_range_side_effect_free(IRProgram *program,
       }
       IRFunction *callee =
           inst->text ? ir_program_find_function(program, inst->text) : NULL;
-      if (!callee || (!callee->is_pure && !callee->is_readonly_inferred)) {
+      if (!callee || !callee->is_readonly_inferred) {
         return 0; /* impure or unresolved call: memory may change. */
       }
       break;
@@ -748,8 +675,8 @@ static int pure_licm_hoist_one(IRProgram *program, IRFunction *function) {
        * guarantee. An inferred read-only callee may fault (a load through a
        * pointer), so it hoists only under a clone of the loop's entry test;
        * a loop whose condition yields no usable guard keeps the call. */
-      int unconditional =
-          callee->is_pure && pure_licm_callee_hoistable(program, callee);
+      int unconditional = callee->is_speculatable_inferred &&
+                          pure_licm_callee_hoistable(program, callee);
       size_t guard_end = 0;
       if (!unconditional) {
         if (!callee->is_readonly_inferred) {
@@ -892,12 +819,14 @@ static int pure_licm_hoist_one(IRProgram *program, IRFunction *function) {
             function->name, entity, saved_loc, 1,
             "hoisted out of the loop (runs once, not every iteration)",
             unconditional
-                ? "`@pure` + loop-invariant arguments enable loop-invariant "
-                  "code motion"
-                : "the callee is inferred read-only (it writes nothing "
+                ? "proof: the callee is inferred speculatable (it writes "
+                  "nothing anywhere it can reach, cannot fault, and always "
+                  "returns) and every argument is loop-invariant; consumed "
+                  "by pure-call LICM"
+                : "proof: the callee is inferred read-only (it writes nothing "
                   "anywhere it can reach) and every argument is "
-                  "loop-invariant; the hoisted call runs under a copy of the "
-                  "loop's entry test",
+                  "loop-invariant; consumed by pure-call LICM, which runs the "
+                  "hoisted call under a copy of the loop's entry test",
             NULL, NULL);
         ir_explain_remark_code("hoisted");
       }
@@ -911,7 +840,7 @@ int ir_hoist_pure_calls_pass(IRProgram *program, int *changed) {
   if (!program) {
     return 0;
   }
-  pure_licm_infer_readonly(program);
+  ir_purity_infer(program);
   for (size_t i = 0; i < program->function_count; i++) {
     IRFunction *function = program->functions[i];
     if (!function) {

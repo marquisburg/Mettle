@@ -1,4 +1,5 @@
 #include "ir_effects.h"
+#include "ir_explain_ledger.h"
 #include "../common.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +47,8 @@ typedef struct {
   size_t index_count;
   int failed;
   int errors;
+  long long steps;
+  size_t rounds;
 } Ctx;
 
 struct IREffectResults {
@@ -352,11 +355,29 @@ static int callee_is_defined(const EFn *callee) {
   return callee && callee->fn && callee->fn->instruction_count > 0;
 }
 
+static void believe_extern(const char *name, const char *clause) {
+  char what[192];
+  char why[320];
+  snprintf(what, sizeof(what), "extern `%s`", name ? name : "?");
+  if (clause) {
+    snprintf(why, sizeof(why),
+             "its `with %s` clause is taken as written; nothing outside the "
+             "program was analysed",
+             clause);
+  } else {
+    snprintf(why, sizeof(why),
+             "it is on the compiler's known-clean list, so it was assumed to "
+             "perform nothing");
+  }
+  ir_explain_belief(what, why);
+}
+
 static int extern_performs(Ctx *ctx, EFn *efn, const char *name,
                            const EFn *callee, size_t site) {
   int alloc_bit = effect_bit(ctx, "alloc");
   const IRModuleSymbol *symbol = ir_program_lookup_symbol(ctx->program, name);
   if (callee && callee->fn->effects_with_count > 0) {
+    believe_extern(name, callee->fn->effects_with[0]);
     Word *with = words_new(ctx);
     if (!with) {
       return 0;
@@ -378,6 +399,7 @@ static int extern_performs(Ctx *ctx, EFn *efn, const char *name,
     Word *with = words_new(ctx);
     int saw_none = 0;
     const char *text = symbol->effect_clause;
+    believe_extern(name, text);
     if (!with) {
       return 0;
     }
@@ -394,7 +416,18 @@ static int extern_performs(Ctx *ctx, EFn *efn, const char *name,
     return 1;
   }
   if (ir_effects_name_is_known_clean(name)) {
+    believe_extern(name, NULL);
     return 1;
+  }
+  {
+    char what[192];
+    char why[320];
+    snprintf(what, sizeof(what), "extern `%s`", name ? name : "?");
+    snprintf(why, sizeof(why),
+             "it declares no effects, so it was taken to allocate and to "
+             "perform no effect this program declared; write `with ...` on "
+             "it to say what it does");
+    ir_explain_belief(what, why);
   }
   if (alloc_bit >= 0) {
     note_source(efn, (size_t)alloc_bit, site);
@@ -405,6 +438,7 @@ static int extern_performs(Ctx *ctx, EFn *efn, const char *name,
 static int scan_function(Ctx *ctx, size_t index) {
   EFn *efn = &ctx->fns[index];
   IRFunction *fn = efn->fn;
+  ctx->steps += (long long)fn->instruction_count;
   int alloc_bit = effect_bit(ctx, "alloc");
   int asm_bit = effect_bit(ctx, "asm");
   int syscall_bit = effect_bit(ctx, "syscall");
@@ -511,9 +545,12 @@ static void propagate(Ctx *ctx) {
   int changed = 1;
   while (changed) {
     changed = 0;
+    ctx->rounds++;
     for (size_t i = 0; i < ctx->fn_count; i++) {
       EFn *efn = &ctx->fns[i];
+      ctx->steps++;
       for (size_t c = 0; c < efn->callee_count; c++) {
+        ctx->steps++;
         changed |= words_or(efn->performs, ctx->fns[efn->callees[c]].performs,
                             ctx->words);
       }
@@ -522,8 +559,10 @@ static void propagate(Ctx *ctx) {
   changed = 1;
   while (changed) {
     changed = 0;
+    ctx->rounds++;
     for (size_t i = 0; i < ctx->fn_count; i++) {
       EFn *efn = &ctx->fns[i];
+      ctx->steps++;
       Word *gathered = words_new(ctx);
       if (!gathered) {
         ctx->failed = 1;
@@ -532,6 +571,7 @@ static void propagate(Ctx *ctx) {
       memcpy(gathered, efn->requires, ctx->words * sizeof(Word));
       for (size_t c = 0; c < efn->callee_count; c++) {
         const Word *callee_needs = ctx->fns[efn->callees[c]].needs;
+        ctx->steps++;
         for (size_t w = 0; w < ctx->words; w++) {
           gathered[w] |= callee_needs[w] & ~efn->provides[w];
         }
@@ -1220,8 +1260,91 @@ static void ctx_free(Ctx *ctx) {
   free(ctx->index);
 }
 
+static void report_effects(Ctx *ctx, FILE *out) {
+  size_t declared = 0;
+  for (size_t i = 0; i < ctx->fn_count; i++) {
+    EFn *efn = &ctx->fns[i];
+    char performs[512];
+    char needs[512];
+    size_t used = 0;
+    size_t need_used = 0;
+    if (!efn->fn || !efn->fn->name) {
+      continue;
+    }
+    performs[0] = '\0';
+    needs[0] = '\0';
+    for (size_t bit = 0; bit < ctx->bit_count; bit++) {
+      if (bit_test(efn->performs, bit)) {
+        int wrote = snprintf(performs + used, sizeof(performs) - used, "%s%s",
+                             used ? ", " : "", effect_name(ctx, bit));
+        if (wrote > 0) {
+          used += (size_t)wrote;
+        }
+      }
+      if (bit_test(efn->needs, bit)) {
+        int wrote = snprintf(needs + need_used, sizeof(needs) - need_used,
+                             "%s%s", need_used ? ", " : "",
+                             effect_name(ctx, bit));
+        if (wrote > 0) {
+          need_used += (size_t)wrote;
+        }
+      }
+    }
+    if (!used && !need_used) {
+      continue;
+    }
+    declared++;
+    fprintf(out, "effects %s: performs %s, needs %s\n",
+            display_name(efn->fn->name), used ? performs : "nothing",
+            need_used ? needs : "nothing");
+  }
+  fprintf(out,
+          "effects: %zu functions, %zu with an effect, %zu fixpoint rounds, "
+          "%lld steps\n",
+          ctx->fn_count, declared, ctx->rounds, ctx->steps);
+}
+
+static void ledger_effects(Ctx *ctx) {
+  for (size_t i = 0; i < ctx->fn_count; i++) {
+    EFn *efn = &ctx->fns[i];
+    char performs[256];
+    char needs[256];
+    size_t used = 0;
+    size_t need_used = 0;
+    if (!efn->fn || !efn->fn->name) {
+      continue;
+    }
+    performs[0] = '\0';
+    needs[0] = '\0';
+    for (size_t bit = 0; bit < ctx->bit_count; bit++) {
+      if (bit_test(efn->performs, bit)) {
+        int wrote = snprintf(performs + used, sizeof(performs) - used, "%s%s",
+                             used ? ", " : "", effect_name(ctx, bit));
+        if (wrote > 0) {
+          used += (size_t)wrote;
+        }
+      }
+      if (bit_test(efn->needs, bit)) {
+        int wrote = snprintf(needs + need_used, sizeof(needs) - need_used,
+                             "%s%s", need_used ? ", " : "",
+                             effect_name(ctx, bit));
+        if (wrote > 0) {
+          need_used += (size_t)wrote;
+        }
+      }
+    }
+    if (!used && !need_used) {
+      continue;
+    }
+    ir_explain_effect_held(display_name(efn->fn->name),
+                           used ? performs : NULL,
+                           need_used ? needs : NULL);
+  }
+}
+
 int ir_effects_run(IRProgram *program, const IREffectInput *input,
-                   ErrorReporter *reporter, IREffectResults **out_results) {
+                   ErrorReporter *reporter, IREffectResults **out_results,
+                   long long *out_steps) {
   Ctx ctx;
   int ok = 1;
   if (out_results) {
@@ -1292,6 +1415,13 @@ int ir_effects_run(IRProgram *program, const IREffectInput *input,
   }
   if (ok && ctx.errors > 0) {
     ok = 0;
+  }
+  if (input->report) {
+    report_effects(&ctx, input->report);
+  }
+  ledger_effects(&ctx);
+  if (out_steps) {
+    *out_steps = ctx.steps;
   }
   ctx_free(&ctx);
   return ok;

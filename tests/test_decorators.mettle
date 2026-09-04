@@ -104,13 +104,15 @@ fn global_read_no_hoist() -> int32 {
   return total;
 }
 
-// SOUNDNESS GUARD 3: a function mislabeled @pure that MUTATES a global is not
-// observationally pure. Hoisting its call out of a loop would change how many
-// times the side effect runs, so the LICM inspects the callee's body and
-// declines. Correct (called 5x): g_writes == 5.
+// SOUNDNESS GUARD 3: a function that MUTATES a global is not observationally
+// pure. Hoisting its call out of a loop would change how many times the side
+// effect runs, so the LICM inspects the callee's body and declines. Purity is
+// inferred here, so no decorator can talk it into the hoist; writing @pure on
+// this function is the F0004 build failure, not a faster program.
+// Correct (called 5x): g_writes == 5.
 var g_writes: int32 = 0;
 
-@pure @noinline fn bump_global(x: int32) -> int32 {
+@noinline fn bump_global(x: int32) -> int32 {
   g_writes = g_writes + 1;
   return x;
 }

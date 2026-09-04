@@ -46,5 +46,10 @@ frontend, see [Writing a frontend](embedding.md).
 21. [Quick reference](quick-reference.md)
 22. [Known limitations](known-limitations.md)
 
+Every mechanism above reports what it spent and what it assumed: `--explain`
+carries sections for the types proven, the effects held, the rules run, and
+the beliefs the build rested on, and each has its own `--report-*` flag and
+`--*-budget=N` contract. [Compilation](compilation.md) lists them.
+
 For the backend itself, the IR, the optimizers, the code generators, the
 linker, and the public C API, see the [documentation index](README.md).

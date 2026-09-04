@@ -35,6 +35,9 @@
 #include "semantic/target_desc.h"
 #include "ir/ir_rules.h"
 #include "ir/ir_effects.h"
+#include "ir/ir_purity.h"
+#include "ir/ir_explain_ledger.h"
+#include "ir/ir_interp.h"
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -2011,8 +2014,13 @@ static int mettle_link_internal(const char **object_paths,
 
   if (!link_resolution_build(object_paths, object_count, &resolution_options,
                              &resolution, &error_message)) {
-    fprintf(stderr, "Warning: Internal linker symbol resolution failed: %s\n",
-            error_message ? error_message : "unknown error");
+    if (error_message &&
+        strstr(error_message, "Unresolved external symbol") != NULL) {
+      fprintf(stderr, "Error: %s\n", error_message);
+    } else {
+      fprintf(stderr, "Error: Internal linker symbol resolution failed: %s\n",
+              error_message ? error_message : "unknown error");
+    }
     goto cleanup;
   }
 
@@ -2042,8 +2050,13 @@ static int mettle_link_internal(const char **object_paths,
   }
   if (!pe_emit_executable(resolution, executable_filename, &emission_options,
                           &error_message)) {
-    fprintf(stderr, "Warning: Internal linker PE emission failed: %s\n",
-            error_message ? error_message : "unknown error");
+    if (error_message &&
+        strstr(error_message, "Unresolved external symbol") != NULL) {
+      fprintf(stderr, "Error: %s\n", error_message);
+    } else {
+      fprintf(stderr, "Error: Internal linker PE emission failed: %s\n",
+              error_message ? error_message : "unknown error");
+    }
     goto cleanup;
   }
 
@@ -2764,10 +2777,9 @@ static int mettle_link_object_file(const char *object_filename,
          * scanner charges for. */
         g_link_output_ownership_verified = 1;
       } else if (linker_mode == LINKER_MODE_INTERNAL) {
-        fprintf(stderr,
-                want_shared
-                    ? "Error: Internal linker failed to produce a DLL\n"
-                    : "Error: Internal linker failed to produce an executable\n");
+        /* The detailed diagnostic is already on stderr; a second generic line
+         * would only restate the failure without naming the symbol. */
+        (void)0;
       } else if (!has_gcc && !has_link) {
         fprintf(stderr,
                 "Error: Internal linker failed and no external fallback linker is "
@@ -3899,6 +3911,28 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
     options->check_proofs = 1;
   } else if (strcmp(argv[i], "--check-effects") == 0) {
     options->check_effects = 1;
+  } else if (strcmp(argv[i], "--check-purity-fault") == 0) {
+    options->check_purity_fault = 1;
+  } else if (strcmp(argv[i], "--report-proofs") == 0) {
+    options->report_proofs = 1;
+  } else if (strcmp(argv[i], "--report-effects") == 0) {
+    options->report_effects = 1;
+  } else if (strncmp(argv[i], "--proof-budget=", 15) == 0) {
+    long long budget = strtoll(argv[i] + 15, NULL, 10);
+    if (budget <= 0) {
+      fprintf(stderr, "--proof-budget must be a positive step count\n");
+      return DRIVER_FLAG_FAILED;
+    }
+    options->proof_budget = budget;
+    options->proof_budget_set = 1;
+  } else if (strncmp(argv[i], "--effect-budget=", 16) == 0) {
+    long long budget = strtoll(argv[i] + 16, NULL, 10);
+    if (budget <= 0) {
+      fprintf(stderr, "--effect-budget must be a positive step count\n");
+      return DRIVER_FLAG_FAILED;
+    }
+    options->effect_budget = budget;
+    options->effect_budget_set = 1;
   } else if (strncmp(argv[i], "--rule-budget=", 14) == 0) {
     long long budget = strtoll(argv[i] + 14, NULL, 10);
     if (budget <= 0) {
@@ -5185,6 +5219,7 @@ static int compile_run_comptime(IRProgram *ir_program, ASTNode *program,
     return 1;
   }
   ir_program_drop_rewrite_rules(ir_program);
+  ir_interp_set_purity_fault(options->check_purity_fault);
   if (options->test_mode) {
     return ir_comptime_run_tests(ir_program, error_reporter, input_filename,
                                  options->test_filter);
@@ -5735,6 +5770,7 @@ int compile_file(const char *input_filename, const char *output_filename,
    * report can surface them in a "memory" section. Enabled before type-check
    * (where they fire) and only when the optimizer will run -- the only path
    * that produces a report. */
+  ir_explain_ledger_set_collect(options->explain);
   ir_explain_memory_set_collect(options->explain && options->optimize,
                                 options->explain_all ? NULL
                                                      : options->input_filename);
@@ -5760,6 +5796,20 @@ int compile_file(const char *input_filename, const char *output_filename,
   }
   if (options->report_expansion) {
     type_checker_report_expansion(type_checker, stdout);
+  }
+  if (options->report_proofs) {
+    type_checker_report_proofs(type_checker, stdout);
+  }
+  if (options->proof_budget_set &&
+      type_checker_proof_steps(type_checker) > options->proof_budget) {
+    fprintf(stderr,
+            "error[P0003]: the declared-type prover spent %lld steps, more "
+            "than the %lld --proof-budget allows\n",
+            type_checker_proof_steps(type_checker), options->proof_budget);
+    fprintf(stderr,
+            "  help: --report-proofs prints what each proof cost\n");
+    result = 1;
+    goto cleanup;
   }
   if (options->expand_mode) {
     size_t unprintable =
@@ -5857,8 +5907,10 @@ int compile_file(const char *input_filename, const char *output_filename,
   }
 
   if (ir_program_declares_effects(ir_program) ||
-      type_checker->effect_obligation_count > 0) {
+      type_checker->effect_obligation_count > 0 || options->report_effects ||
+      options->effect_budget_set || options->explain) {
     IREffectInput effect_input;
+    long long effect_steps = 0;
     IREffectDecl *effect_decls =
         calloc(type_checker->effect_count ? type_checker->effect_count : 1,
                sizeof(IREffectDecl));
@@ -5890,8 +5942,9 @@ int compile_file(const char *input_filename, const char *output_filename,
                                 options->trace_function != NULL ||
                                 ir_verify_enabled();
       effect_input.library_build = options->shared_output;
+      effect_input.report = options->report_effects ? stdout : NULL;
       effects_ok = ir_effects_run(ir_program, &effect_input, error_reporter,
-                                  &effect_results);
+                                  &effect_results, &effect_steps);
     }
     free(effect_decls);
     free(obligations);
@@ -5901,6 +5954,16 @@ int compile_file(const char *input_filename, const char *output_filename,
       } else {
         fprintf(stderr, "Error: could not analyse the program's effects\n");
       }
+      result = 1;
+      goto cleanup;
+    }
+    if (options->effect_budget_set && effect_steps > options->effect_budget) {
+      fprintf(stderr,
+              "error[F0005]: the effect pass spent %lld steps, more than the "
+              "%lld --effect-budget allows\n",
+              effect_steps, options->effect_budget);
+      fprintf(stderr,
+              "  help: --report-effects prints what the pass settled\n");
       result = 1;
       goto cleanup;
     }
@@ -5924,6 +5987,16 @@ int compile_file(const char *input_filename, const char *output_filename,
                              safety_stats.hoisted, safety_stats.spanned,
                              safety_stats.exempt, safety_stats.extent_tests,
                              safety_stats.region_calls);
+  }
+
+  {
+    IRPurityStats purity_stats;
+    if (!ir_purity_check_contracts(ir_program, error_reporter,
+                                   &purity_stats)) {
+      error_reporter_print_errors(error_reporter);
+      result = 1;
+      goto cleanup;
+    }
   }
 
   if (ir_program_has_rules(ir_program) || options->report_rules) {
@@ -6482,6 +6555,11 @@ void print_usage(const char *program_name) {
          "                      --release)\n");
   printf("  --report-target     Print the target in effect as a Mettle TargetDesc\n");
   printf("  --rule-budget=N     Fail the build when the rules spend more than N steps\n");
+  printf("  --report-proofs     Print every declared-type proof, its route and its cost\n");
+  printf("  --proof-budget=N    Fail the build when the prover spends more than N steps\n");
+  printf("  --report-effects    Print what each function performs and needs, and the cost\n");
+  printf("  --effect-budget=N   Fail the build when the effect pass spends more than N\n"
+         "                      steps\n");
   printf("  --explain           Report every optimization decision in the input file --\n"
          "                      loop vectorization and call inlining, with the reason\n"
          "                      whenever the optimizer declined (needs -O/--release).\n"

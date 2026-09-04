@@ -190,6 +190,7 @@ int ir_comptime_run_tests(IRProgram *program, ErrorReporter *reporter,
       totals.failed++;
       continue;
     }
+    ir_interp_recheck_inferred_purity(machine, 1);
     IRInterpValue result = {0, 0, 0};
     IRInterpStatus status =
         ir_interp_run(machine, fn, NULL, 0, &result, ICT_TEST_FUEL);
@@ -430,6 +431,7 @@ int ir_comptime_trace(IRProgram *program, ErrorReporter *reporter,
   if (!machine) {
     return 1;
   }
+  ir_interp_recheck_inferred_purity(machine, 1);
   IRInterpValue call_args[16] = {{0}};
   char arg_display[16][48];
   size_t cli_index = 0;

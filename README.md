@@ -131,6 +131,15 @@ and every call, what stopped a loop from vectorizing, and what changed since
 your last build. It simulates each fix it offers before printing it, so it only
 prints fixes that worked. `--explain-json` feeds CI.
 
+**Says what it took on trust.** The same report lists every type it proved,
+every effect it inferred, every rule it ran, and, under **beliefs**, the
+externs it believed because it could not see them. Each mechanism is on a
+ledger and under a budget: `--report-proofs` with `--proof-budget=N`,
+`--report-effects` with `--effect-budget=N`, `--report-rules` with
+`--rule-budget=N`, `--report-expansion` with `--expansion-budget=N`. No
+annotation is believed for speed: `@pure` is checked and never consumed, and a
+call is hoisted only where purity was inferred.
+
 **Fails the build when a promise breaks.** `@simd!` demands that a loop
 vectorize, `@inline!` that every call site inline, `@noalloc` that a call graph
 allocate nothing. When the compiler cannot deliver, it stops and names the site

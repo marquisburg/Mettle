@@ -268,7 +268,7 @@ A decorator sits before a declaration and asks the compiler for something.
 |-----------|--------|
 | `@inline` | Inline this callee past the size budget |
 | `@noinline` | Never inline this callee |
-| `@pure` | The result depends only on the arguments, so calls may be hoisted |
+| `@pure` | A contract: the build fails if the function writes anything |
 | `@simd` | Report whether this loop vectorized |
 | `@unroll(n)` | Unroll this loop n times |
 | `@test` | A compile-time test, run by `mettle test` |
@@ -282,8 +282,15 @@ A decorator sits before a declaration and asks the compiler for something.
 @pure fn square(x: int32) -> int32 { return x * x; }
 ```
 
-`@simd`, `@inline!`, and `@noalloc` are contracts. The build fails when the
-compiler cannot deliver what they ask, and the message names the site that
+`@pure` buys no optimization. Purity is inferred by a whole-program fixpoint,
+and the loop-invariant call hoist reads only what that pass proved, so a
+function whose body writes nothing has its call hoisted whether or not anyone
+wrote `@pure` on it. What the decorator does is make the claim checkable: write
+it down and the build fails with `F0004` the day the body starts writing. A
+program compiles to the same instructions with the decorator and without it.
+
+`@simd`, `@inline!`, `@pure` and `@noalloc` are contracts. The build fails when
+the compiler cannot deliver what they ask, and the message names the site that
 defeated it. Vectorization contracts are only checked when optimization is on:
 
 ```text

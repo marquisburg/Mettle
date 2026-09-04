@@ -30,6 +30,16 @@ typedef struct TypeCheckerEffect {
   int is_builtin;
 } TypeCheckerEffect;
 
+typedef struct TypeCheckerProof {
+  char *type_name;
+  char *expression;
+  char *proof;
+  size_t line;
+  size_t column;
+  int proven;
+  long long steps;
+} TypeCheckerProof;
+
 typedef struct TypeCheckerEffectObligation {
   const char *function;
   const char *signature;
@@ -156,7 +166,19 @@ typedef struct {
   Type **struct_placeholders;
   size_t struct_placeholder_count;
   size_t struct_placeholder_capacity;
+  /* The proof ledger: what the declared-type prover spent and what it
+     settled. `--report-proofs` prints it, `--proof-budget=N` bounds it. */
+  long long proof_steps;
+  size_t proofs_attempted;
+  size_t proofs_proven;
+  size_t proofs_refused;
+  struct TypeCheckerProof *proof_log;
+  size_t proof_log_count;
+  size_t proof_log_capacity;
 } TypeChecker;
+
+void type_checker_report_proofs(const TypeChecker *checker, FILE *out);
+long long type_checker_proof_steps(const TypeChecker *checker);
 
 // Function declarations
 TypeChecker *type_checker_create(SymbolTable *symbol_table);

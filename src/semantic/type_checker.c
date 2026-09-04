@@ -171,6 +171,12 @@ void type_checker_destroy(TypeChecker *checker) {
     free(checker->effect_failure);
     free(checker->effects);
     free(checker->effect_obligations);
+    for (size_t i = 0; i < checker->proof_log_count; i++) {
+      free(checker->proof_log[i].type_name);
+      free(checker->proof_log[i].expression);
+      free(checker->proof_log[i].proof);
+    }
+    free(checker->proof_log);
     // Clean up built-in types
     type_destroy(checker->builtin_int8);
     type_destroy(checker->builtin_int16);

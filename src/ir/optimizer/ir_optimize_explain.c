@@ -2,6 +2,7 @@
 #include "common.h"
 #include "../ir_explain_memory.h"
 #include "../ir_explain_safety.h"
+#include "../ir_explain_ledger.h"
 #include "../../error/diag_style.h"
 
 #include <stdarg.h>
@@ -2280,6 +2281,214 @@ static void ir_explain_typed_flush(void) {
   ir_explain_emit("\n");
 }
 
+/* ---- the ledger: beliefs, proofs, effects, rules -------------------------
+ * Four things the build rested on that are not optimizer decisions. A proof
+ * and an effect were established by a pass and consumed by another; a rule was
+ * run and answered; a belief was not established at all, and saying so is the
+ * point. Collected wherever they happen and printed as their own sections. */
+
+#define IR_EXPLAIN_LEDGER_MAX 64
+
+typedef struct {
+  char *a;
+  char *b;
+  char *c;
+  char *d;
+  size_t line;
+  long long steps;
+} IRExplainLedgerRow;
+
+static MTLC_THREAD_LOCAL int g_ledger_collect = 0;
+static MTLC_THREAD_LOCAL IRExplainLedgerRow *g_beliefs = NULL;
+static MTLC_THREAD_LOCAL size_t g_belief_count = 0;
+static MTLC_THREAD_LOCAL size_t g_belief_total = 0;
+static MTLC_THREAD_LOCAL IRExplainLedgerRow *g_proofs = NULL;
+static MTLC_THREAD_LOCAL size_t g_proof_count = 0;
+static MTLC_THREAD_LOCAL size_t g_proof_total = 0;
+static MTLC_THREAD_LOCAL IRExplainLedgerRow *g_effects = NULL;
+static MTLC_THREAD_LOCAL size_t g_effect_count = 0;
+static MTLC_THREAD_LOCAL size_t g_effect_total = 0;
+static MTLC_THREAD_LOCAL IRExplainLedgerRow *g_ledger_rules = NULL;
+static MTLC_THREAD_LOCAL size_t g_ledger_rule_count = 0;
+static MTLC_THREAD_LOCAL size_t g_ledger_rule_total = 0;
+
+void ir_explain_ledger_set_collect(int enabled) { g_ledger_collect = enabled; }
+
+static IRExplainLedgerRow *ledger_push(IRExplainLedgerRow **table,
+                                       size_t *count, size_t *total) {
+  IRExplainLedgerRow *grown;
+  (*total)++;
+  if (!g_ledger_collect || *count >= IR_EXPLAIN_LEDGER_MAX) {
+    return NULL;
+  }
+  grown = realloc(*table, (*count + 1) * sizeof(IRExplainLedgerRow));
+  if (!grown) {
+    return NULL;
+  }
+  *table = grown;
+  memset(&grown[*count], 0, sizeof(IRExplainLedgerRow));
+  return &grown[(*count)++];
+}
+
+static char *ledger_dup(const char *text) {
+  return text ? strdup(text) : NULL;
+}
+
+void ir_explain_belief(const char *what, const char *why) {
+  IRExplainLedgerRow *row;
+  for (size_t i = 0; i < g_belief_count; i++) {
+    if (g_beliefs[i].a && what && strcmp(g_beliefs[i].a, what) == 0) {
+      return;
+    }
+  }
+  row = ledger_push(&g_beliefs, &g_belief_count, &g_belief_total);
+  if (!row) {
+    return;
+  }
+  row->a = ledger_dup(what);
+  row->b = ledger_dup(why);
+}
+
+void ir_explain_proof_held(const char *type_name, const char *expression,
+                           size_t line, const char *route,
+                           const char *consumer) {
+  IRExplainLedgerRow *row =
+      ledger_push(&g_proofs, &g_proof_count, &g_proof_total);
+  if (!row) {
+    return;
+  }
+  row->a = ledger_dup(type_name);
+  row->b = ledger_dup(expression);
+  row->c = ledger_dup(route);
+  row->d = ledger_dup(consumer);
+  row->line = line;
+}
+
+void ir_explain_effect_held(const char *function, const char *performs,
+                            const char *needs) {
+  IRExplainLedgerRow *row =
+      ledger_push(&g_effects, &g_effect_count, &g_effect_total);
+  if (!row) {
+    return;
+  }
+  row->a = ledger_dup(function);
+  row->b = ledger_dup(performs);
+  row->c = ledger_dup(needs);
+}
+
+void ir_explain_rule_ran(const char *rule, const char *verdict,
+                         long long steps) {
+  IRExplainLedgerRow *row =
+      ledger_push(&g_ledger_rules, &g_ledger_rule_count, &g_ledger_rule_total);
+  if (!row) {
+    return;
+  }
+  row->a = ledger_dup(rule);
+  row->b = ledger_dup(verdict);
+  row->steps = steps;
+}
+
+static void ledger_more(size_t total, size_t shown) {
+  if (total > shown) {
+    ir_explain_emit("  %s(%zu more not listed)%s\n", clr(EXPLAIN_DIM),
+                    total - shown, clr(EXPLAIN_RESET));
+  }
+}
+
+void ir_explain_ledger_flush(void) {
+  if (!g_explain) {
+    return;
+  }
+  if (g_proof_total > 0) {
+    ir_explain_print_header("types proven");
+    ir_explain_emit("  %zu conversion%s into a declared type the compiler "
+                    "proved; a conversion it cannot prove is refused\n",
+                    g_proof_total, g_proof_total == 1 ? "" : "s");
+    for (size_t i = 0; i < g_proof_count; i++) {
+      const IRExplainLedgerRow *r = &g_proofs[i];
+      ir_explain_emit("  %sline %zu%s: `%s` becomes '%s' because %s  "
+                      "%s(consumed by %s)%s\n",
+                      clr(EXPLAIN_BOLD), r->line, clr(EXPLAIN_RESET),
+                      r->b ? r->b : "?", r->a ? r->a : "?",
+                      r->c ? r->c : "?", clr(EXPLAIN_DIM),
+                      r->d ? r->d : "the type checker", clr(EXPLAIN_RESET));
+    }
+    ledger_more(g_proof_total, g_proof_count);
+    ir_explain_emit("\n");
+  }
+  if (g_effect_total > 0) {
+    ir_explain_print_header("effects held");
+    ir_explain_emit("  %zu function%s an inferred effect set; every "
+                    "`forbids`, `requires` and function-type clause was "
+                    "checked against it\n",
+                    g_effect_total,
+                    g_effect_total == 1 ? " carries" : "s carry");
+    for (size_t i = 0; i < g_effect_count; i++) {
+      const IRExplainLedgerRow *r = &g_effects[i];
+      ir_explain_emit("  %s%s%s: performs %s, needs %s  %s(consumed by the "
+                      "effect pass and by every @rule that reads them)%s\n",
+                      clr(EXPLAIN_BOLD), r->a ? r->a : "?", clr(EXPLAIN_RESET),
+                      r->b ? r->b : "nothing", r->c ? r->c : "nothing",
+                      clr(EXPLAIN_DIM), clr(EXPLAIN_RESET));
+    }
+    ledger_more(g_effect_total, g_effect_count);
+    ir_explain_emit("\n");
+  }
+  if (g_ledger_rule_total > 0) {
+    ir_explain_print_header("rules run");
+    ir_explain_emit("  %zu @rule ran on the checked program as data\n",
+                    g_ledger_rule_total);
+    for (size_t i = 0; i < g_ledger_rule_count; i++) {
+      const IRExplainLedgerRow *r = &g_ledger_rules[i];
+      ir_explain_emit("  %s%s%s: %s, %lld steps  %s(consumed by the build: a "
+                      "failing verdict stops it)%s\n",
+                      clr(EXPLAIN_BOLD), r->a ? r->a : "?", clr(EXPLAIN_RESET),
+                      r->b ? r->b : "?", r->steps, clr(EXPLAIN_DIM),
+                      clr(EXPLAIN_RESET));
+    }
+    ledger_more(g_ledger_rule_total, g_ledger_rule_count);
+    ir_explain_emit("\n");
+  }
+  ir_explain_print_header("beliefs");
+  if (g_belief_total == 0) {
+    ir_explain_emit("  nothing: this build rested on no claim it did not "
+                    "check\n\n");
+    return;
+  }
+  ir_explain_emit("  %zu thing%s this build took on trust. Each is checked "
+                  "at run time under `mettle test`, `--check-effects` or "
+                  "`--check-proofs`, and nowhere else\n",
+                  g_belief_total, g_belief_total == 1 ? "" : "s");
+  for (size_t i = 0; i < g_belief_count; i++) {
+    const IRExplainLedgerRow *r = &g_beliefs[i];
+    ir_explain_emit("  %s%s%s: %s\n", clr(EXPLAIN_BOLD), r->a ? r->a : "?",
+                    clr(EXPLAIN_RESET), r->b ? r->b : "?");
+  }
+  ledger_more(g_belief_total, g_belief_count);
+  ir_explain_emit("\n");
+}
+
+static void ledger_free(IRExplainLedgerRow **table, size_t *count,
+                        size_t *total) {
+  for (size_t i = 0; i < *count; i++) {
+    free((*table)[i].a);
+    free((*table)[i].b);
+    free((*table)[i].c);
+    free((*table)[i].d);
+  }
+  free(*table);
+  *table = NULL;
+  *count = 0;
+  *total = 0;
+}
+
+void ir_explain_ledger_release(void) {
+  ledger_free(&g_beliefs, &g_belief_count, &g_belief_total);
+  ledger_free(&g_proofs, &g_proof_count, &g_proof_total);
+  ledger_free(&g_effects, &g_effect_count, &g_effect_total);
+  ledger_free(&g_ledger_rules, &g_ledger_rule_count, &g_ledger_rule_total);
+}
+
 static void ir_explain_safety_flush(void) {
   if (g_explain_json) {
     ir_explain_json_raw("\"safety\":{\"enabled\":%s",
@@ -3027,6 +3236,7 @@ void ir_explain_flush(void) {
   /* Memory diagnostics land after "remarks" and before "backend". */
   ir_explain_safety_flush();
   ir_explain_memory_flush();
+  ir_explain_ledger_flush();
 }
 
 /* The remarks outlive this flush: --annotate-asm reads them during codegen, and

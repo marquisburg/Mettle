@@ -130,10 +130,10 @@ host; and `@noinline` is how a helper stays a real device call. Recursion and
 indirect calls are already rejected in device code, so what the inliner sees is
 a plain DAG of direct calls.
 
-`@pure` hoists a loop-invariant call out of a kernel's loop. A helper that
-writes nothing gets the same treatment by inference, so `@pure` is what you
-write when the callee could fault   a load through a pointer   and you want it
-hoisted anyway.
+A loop-invariant call is hoisted out of a kernel's loop where the compiler
+proves the callee writes nothing and cannot fault. That proof is inferred,
+so `@pure` changes nothing about the hoist; it is a contract that fails the
+build if the helper ever starts writing.
 
 A frontend driving libmtlc directly reaches all four through
 `mtlc_fn_set_inline`, `mtlc_fn_set_inline_required`, `mtlc_fn_set_noinline`,

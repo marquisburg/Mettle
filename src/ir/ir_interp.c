@@ -168,6 +168,13 @@ struct IRInterpMachine {
   size_t effect_frame_count;
   size_t effect_frame_capacity;
 
+  /* `@pure` re-checked while running: the depth of declared-pure frames on
+     the stack, and the name of the outermost one. */
+  int pure_depth;
+  const char *pure_fn;
+  int pure_declared;
+  int recheck_inferred_purity;
+
   /* Execution counting (zero-run PGO). */
   int count_enabled;
   struct {
@@ -1495,10 +1502,51 @@ static int ii_fetch(IRInterpMachine *machine, IIFrame *frame,
   }
 }
 
+static int ii_pure_violation(IRInterpMachine *machine, const char *what) {
+  char detail[192];
+  if (machine->pure_depth <= 0) {
+    return 1;
+  }
+  snprintf(detail, sizeof(detail),
+           "Fatal error: purity violation: `%s` %s and %s",
+           machine->pure_fn ? machine->pure_fn : "?",
+           machine->pure_declared ? "is declared @pure"
+                                  : "was inferred to write nothing",
+           what);
+  ii_fail(machine, IR_INTERP_GUARD_TRAP, detail);
+  return 0;
+}
+
+void ir_interp_recheck_inferred_purity(IRInterpMachine *machine, int on) {
+  if (!machine) {
+    return;
+  }
+  machine->recheck_inferred_purity = on;
+  if (on && ir_interp_purity_fault_enabled() && machine->program) {
+    for (size_t i = 0; i < machine->program->function_count; i++) {
+      IRFunction *fn = machine->program->functions[i];
+      if (fn) {
+        fn->is_readonly_inferred = 1;
+      }
+    }
+  }
+}
+
+static int g_purity_fault;
+
+void ir_interp_set_purity_fault(int on) { g_purity_fault = on; }
+
+int ir_interp_purity_fault_enabled(void) { return g_purity_fault; }
+
 static int ii_store_dest(IRInterpMachine *machine, IIFrame *frame,
                          const IROperand *dest, const IRInterpValue *value) {
   if (dest->kind == IR_OPERAND_NONE) {
     return 1;
+  }
+  if (machine->pure_depth > 0 && dest->kind == IR_OPERAND_SYMBOL &&
+      dest->name && !ii_env_find(&frame->env, dest->name) &&
+      !ii_pure_violation(machine, "wrote a global here")) {
+    return 0;
   }
   if ((dest->kind != IR_OPERAND_TEMP && dest->kind != IR_OPERAND_SYMBOL) ||
       !dest->name) {
@@ -5562,6 +5610,17 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
   }
   machine->depth++;
 
+  const char *saved_pure_fn = machine->pure_fn;
+  int saved_pure_declared = machine->pure_declared;
+  int pure_frame =
+      fn->is_pure ||
+      (machine->recheck_inferred_purity && fn->is_readonly_inferred);
+  if (pure_frame) {
+    machine->pure_fn = fn->name;
+    machine->pure_declared = fn->is_pure;
+    machine->pure_depth++;
+  }
+
   IIFrame frame;
   memset(&frame, 0, sizeof(frame));
   frame.fn = fn;
@@ -5713,6 +5772,9 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
       break;
     }
     case IR_OP_STORE: {
+      if (!ii_pure_violation(machine, "wrote through a pointer here")) {
+        goto done;
+      }
       if (!ii_op_store(machine, &frame, insn)) {
         goto done;
       }
@@ -5782,6 +5844,9 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
       break;
     }
     case IR_OP_NEW: {
+      if (!ii_pure_violation(machine, "allocated here")) {
+        goto done;
+      }
       if (!ii_op_new(machine, &frame, insn)) {
         goto done;
       }
@@ -5884,6 +5949,11 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
   ok = 1;
 
 done:
+  if (pure_frame) {
+    machine->pure_depth--;
+    machine->pure_fn = saved_pure_fn;
+    machine->pure_declared = saved_pure_declared;
+  }
   /* This frame's local storage dies with it, except a buffer the function
    * returned the address of: an aggregate return travels that way and stays
    * alive until the caller's aggregate assignment consumes it. */

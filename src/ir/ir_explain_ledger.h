@@ -1,0 +1,18 @@
+#ifndef IR_EXPLAIN_LEDGER_H
+#define IR_EXPLAIN_LEDGER_H
+
+#include <stddef.h>
+
+void ir_explain_ledger_set_collect(int enabled);
+void ir_explain_belief(const char *what, const char *why);
+void ir_explain_proof_held(const char *type_name, const char *expression,
+                           size_t line, const char *route,
+                           const char *consumer);
+void ir_explain_effect_held(const char *function, const char *performs,
+                            const char *needs);
+void ir_explain_rule_ran(const char *rule, const char *verdict,
+                         long long steps);
+void ir_explain_ledger_flush(void);
+void ir_explain_ledger_release(void);
+
+#endif

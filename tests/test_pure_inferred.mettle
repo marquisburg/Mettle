@@ -1,0 +1,26 @@
+import "std/io";
+
+@noinline fn scale(k: int32) -> int32 {
+  return k * 3 + 1;
+}
+
+fn total() -> int32 {
+  var acc: int32 = 0;
+  var k: int32 = 7;
+  var i: int32 = 0;
+  while (i < 100) {
+    acc = acc + scale(k);
+    i = i + 1;
+  }
+  return acc;
+}
+
+@test fn pure_call_is_stable() {
+  assert_eq(scale(7), 22);
+  assert_eq(total(), 2200);
+}
+
+fn main() -> int32 {
+  print("total {total()}");
+  return 0;
+}

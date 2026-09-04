@@ -142,6 +142,7 @@ Effect diagnostics:
 | F0001 | A function reaches an effect it forbids |
 | F0002 | A function requires an effect nothing provides |
 | F0003 | A function value does not fit the effects its type declares |
+| F0004 | A function declared @pure performs something |
 
 [Effects](effects.md) covers the F codes in context.
 

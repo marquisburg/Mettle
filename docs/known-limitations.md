@@ -272,6 +272,13 @@ happened.
 Unreachable-code analysis is block-local and conservative. Some dead paths in
 complex control flow are not diagnosed.
 
+The interpreter watches every declared-`@pure` and every inferred read-only
+frame under `mettle test` and traps on a write inside one, but that watch can
+only confirm the static proof: purity is proven by refusing every operation
+that could write, so no Mettle program can pass the check and then write, and
+the watch is proven live by `--check-purity-fault`, which corrupts the analysis
+on purpose so the watch has something real to catch.
+
 ## See also
 
 - [Memory safety](memory-safety.md)

@@ -618,6 +618,24 @@ to the same standard: inferred through the call graph, refused with the chain,
 gapped at a call it cannot follow, and re-checked at run time by a machine
 that does not trust the analysis.
 
+`@pure` came out the other side of that as a contract and nothing else. The
+loop-invariant call hoist reads a whole-program purity fixpoint and never the
+decorator, so a function that writes nothing has its call hoisted whether or
+not anyone said so, and a function that carries `@pure` and writes anything
+fails the build with `F0004`. A program compiles to the same instructions with
+the decorator and without it. That is what I.4 asks of every annotation: it
+records intent, and the proof stays the compiler's.
+
+Every one of these mechanisms is on a ledger and under a budget, because
+VII.10 does not exempt the compiler's own passes: `--report-proofs` with
+`--proof-budget=N`, `--report-effects` with `--effect-budget=N`,
+`--report-rules` with `--rule-budget=N`, `--report-expansion` with
+`--expansion-budget=N`. And `--explain` prints a **beliefs** section naming
+every claim the build rested on and did not establish: each `extern` whose
+`with` clause was read as written, each one on the known-clean list, and each
+one with no clause at all. A build that assumed nothing says so. An assumption
+nobody can name is the failure mode the whole document is about.
+
 VII.7 has already decided the other half. The model where the points are
 inserted, `async`/`await` with a compiler-placed yield, a pool that steals
 work at a point nobody wrote, is foreclosed, and the reason is worth stating

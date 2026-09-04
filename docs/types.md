@@ -585,6 +585,14 @@ it: every proven conversion is checked as the interpreter runs, and a value
 that violates its type stops the run naming the type. The prover is code, and
 code is not trusted on its own authority.
 
+`--report-proofs` prints the ledger: one line per conversion, with the type,
+the expression, the site, whether it was proven, what it cost in prover steps,
+and the route that settled it (a range the compiler could bound, or a
+dominating test that repeats the predicate). `--proof-budget=N` makes that cost
+a contract and fails the build with `P0003` when the prover exceeds it.
+`--explain` prints the same proofs under **types proven**, each naming the pass
+that consumed it.
+
 `--check-proofs` extends that to a compiled program: every proven conversion
 traps at run time when the value is not what the compiler proved, in
 `--release` too. It is a separate flag from `--safe`, because it answers a

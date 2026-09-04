@@ -1,0 +1,13 @@
+import "std/io";
+
+var counter: int32 = 0;
+
+@pure @noinline fn bump(x: int32) -> int32 {
+  counter = counter + 1;
+  return x;
+}
+
+fn main() -> int32 {
+  print("bumped {bump(1)}");
+  return 0;
+}

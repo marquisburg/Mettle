@@ -106,6 +106,10 @@ divergence. See [ML-driven IR optimization](ml-opt.md).
 | `--dump-ir` | Write the optimized IR to a `.ir` sidecar. |
 | `--report-rules` | The verdict and interpreter steps of every `@rule`; see [Rules](rules.md). |
 | `--rule-budget=N` | Fail the build when the rules spend more than N interpreter steps together. |
+| `--report-proofs` | Every conversion into a [declared type](types.md) the prover settled: the type, the expression, the site, whether it was proven, what it cost, and the route that settled it. |
+| `--proof-budget=N` | Fail the build when the declared-type prover spends more than N steps. |
+| `--report-effects` | What each function performs and needs, and what the [effect](effects.md) pass spent getting there. |
+| `--effect-budget=N` | Fail the build when the effect pass spends more than N steps. |
 | `--report-target` | The target in effect, printed as a `TargetDesc` in Mettle; `mettle target <triple>` prints a built-in one and `--target desc.mettle` builds for a described one. See [Bare metal](bare-metal.md). |
 | `--check-proofs` | Trap at run time when a value the compiler proved to be a [declared type](types.md) is not one. Survives `--release`, and costs nothing in a program with no declared types. |
 | `--check-effects` | Trap at run time when an [effect](effects.md) the compiler proved absent is performed, or one it proved provided is not. Survives `--release`, and costs nothing in a program that declares no effect. |
@@ -113,6 +117,17 @@ divergence. See [ML-driven IR optimization](ml-opt.md).
 `--explain` needs `-O` or `--release`, because there are no decisions to
 report without the optimizer. A repeat run leads with what changed since the
 last build, regressions first.
+
+Four of its sections are not optimizer decisions. **types proven** lists every
+conversion into a declared type, the route that proved it, and the pass that
+consumed it. **effects held** lists what each function performs and needs.
+**rules run** lists every `@rule`, its verdict and its cost. **beliefs** lists
+everything the build took on trust and did not check: every `extern` with a
+`with` clause, which is read as written, and every `extern` without one, which
+is taken to allocate. A build that rests on nothing says so. Those beliefs are
+the only claims in a build the compiler did not establish itself, and
+`mettle test`, `--check-effects` and `--check-proofs` are where they get
+checked.
 
 [The `--explain-json` schema](explain-json.md) documents the machine-readable
 form.

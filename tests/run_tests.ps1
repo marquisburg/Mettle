@@ -3823,6 +3823,168 @@ catch {
   Write-CaseResult -Name "swap_runtime_excisable" -Passed $false -Reason $_.Exception.Message
 }
 
+# `@pure` is a contract the compiler checks and never believes. Enforce: a
+# function that carries the decorator and writes a global stops the build,
+# naming the write and the decorator.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "pure_contract_fail.exe"
+  $out = & $CompilerPath --build "tests/test_pure_contract_fail.mettle" -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a @pure function that writes a global built" }
+  if ($out -notmatch "error\[F0004\]: ``bump`` is declared @pure but writes a global") { throw "the failure does not name the contract: $out" }
+  if ($out -notmatch "test_pure_contract_fail\.mettle:6:3") { throw "the failure does not point at the write: $out" }
+  if ($out -notmatch "``bump`` carries @pure here") { throw "the failure does not note the decorator: $out" }
+  $ex = & $CompilerPath explain F0004 2>&1 | Out-String
+  if ($ex -notmatch "The decorator buys no optimization") { throw "explain F0004 does not say the decorator is not believed: $ex" }
+  Write-CaseResult -Name "pure_contract_fails_build" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "pure_contract_fails_build" -Passed $false -Reason $_.Exception.Message
+}
+
+# Purity is inferred, so the decorator costs a program nothing and buys it
+# nothing. Enforce: the same program with and without `@pure` compiles to the
+# same instructions, and --explain names the proof the hoist consumed.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $src = Join-Path $tmpDir "purecmp.mettle"
+  $inferredExe = Join-Path $tmpDir "pure_inferred.exe"
+  $declaredExe = Join-Path $tmpDir "pure_declared.exe"
+  Copy-Item "tests/test_pure_inferred.mettle" $src -Force
+  $out = & $CompilerPath --build --release --explain $src -o $inferredExe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the undecorated build failed: $out" }
+  if ($out -notmatch "hoisted out of the loop") { throw "an undecorated pure call was not hoisted: $out" }
+  if ($out -notmatch "proof: the callee is inferred speculatable") { throw "--explain does not name the proof: $out" }
+  if ($out -notmatch "consumed by pure-call LICM") { throw "--explain does not name the pass: $out" }
+  Copy-Item "tests/test_pure_declared.mettle" $src -Force
+  $out = & $CompilerPath --build --release $src -o $declaredExe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the decorated build failed: $out" }
+  $objdump = Get-Command objdump -ErrorAction SilentlyContinue
+  if ($objdump) {
+    $a = (& objdump -d ([IO.Path]::ChangeExtension($inferredExe, $script:ObjExt)) 2>&1 | Select-Object -Skip 2) -join "`n"
+    $b = (& objdump -d ([IO.Path]::ChangeExtension($declaredExe, $script:ObjExt)) 2>&1 | Select-Object -Skip 2) -join "`n"
+    if ($a -ne $b) { throw "@pure changed the emitted code, so it was believed for speed" }
+  }
+  Write-CaseResult -Name "pure_is_inferred_not_believed" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "pure_is_inferred_not_believed" -Passed $false -Reason $_.Exception.Message
+}
+
+# The interpreter re-checks purity while it runs and does not trust the pass
+# that proved it: under `mettle test` every declared-@pure and every inferred
+# read-only frame is watched, and an observable write inside one traps. The
+# static proof is strictly stronger than the watch, so no Mettle program can
+# make it fire; `--check-purity-fault` corrupts the analysis on purpose (every
+# function is marked read-only) so the watch has something real to catch, which
+# is how the guard is proven live rather than assumed to be.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath test "tests/test_pure_declared.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "mettle test failed on an honest @pure function: $out" }
+  if ($out -notmatch "1 passed") { throw "the test did not run: $out" }
+  $out = & $CompilerPath test "tests/test_pure_runtime_catch.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "an honest impure program failed the watch: $out" }
+  $out = & $CompilerPath test --check-purity-fault "tests/test_pure_runtime_catch.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "the watch did not catch a write a corrupted analysis had blessed" }
+  if ($out -notmatch "purity violation") { throw "the watch did not name the violation: $out" }
+  if ($out -notmatch "``record`` was inferred to write nothing and wrote a global here") { throw "the watch did not name the frame and the write: $out" }
+  Write-CaseResult -Name "pure_rechecked_at_run_time" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "pure_rechecked_at_run_time" -Passed $false -Reason $_.Exception.Message
+}
+
+# Every mechanism reports what it spent. Enforce: --report-proofs prints one
+# line per conversion with its route and its cost, --proof-budget=N is a
+# contract the build fails, and neither flag changes the emitted code.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $plain = Join-Path $tmpDir "proofs_plain.exe"
+  $reported = Join-Path $tmpDir "proofs_reported.exe"
+  $out = & $CompilerPath --build "tests/test_refine_ok.mettle" -o $plain 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the plain build failed: $out" }
+  $out = & $CompilerPath --build "tests/test_refine_ok.mettle" -o $reported --report-proofs 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "--report-proofs failed the build: $out" }
+  if ($out -notmatch "proof Percent for ``n`` at \d+:\d+: proven, \d+ steps \(the value's range 0\.\.100 settles the comparison\)") { throw "no ledger line for a range proof: $out" }
+  if ($out -notmatch "proof Even for ``n`` at \d+:\d+: proven, \d+ steps \(a dominating test in scope repeats the predicate\)") { throw "no ledger line for a guard proof: $out" }
+  if ($out -notmatch "proofs: \d+ attempted, \d+ proven, 0 refused, \d+ steps") { throw "no proof ledger total: $out" }
+  $objdump = Get-Command objdump -ErrorAction SilentlyContinue
+  if ($objdump) {
+    $a = (& objdump -d ([IO.Path]::ChangeExtension($plain, $script:ObjExt)) 2>&1 | Select-Object -Skip 2) -join "`n"
+    $b = (& objdump -d ([IO.Path]::ChangeExtension($reported, $script:ObjExt)) 2>&1 | Select-Object -Skip 2) -join "`n"
+    if ($a -ne $b) { throw "--report-proofs changed the emitted code" }
+  }
+  $out = & $CompilerPath --build "tests/test_refine_ok.mettle" -o $plain --proof-budget=10 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "the prover blew its budget and the build went on" }
+  if ($out -notmatch "error\[P0003\]: the declared-type prover spent \d+ steps, more than the 10 --proof-budget allows") { throw "the budget failure does not name the cost: $out" }
+  $ex = & $CompilerPath explain P0003 2>&1 | Out-String
+  if ($ex -notmatch "makes the cost of proving declared types a") { throw "explain P0003 is missing: $ex" }
+  Write-CaseResult -Name "proof_ledger_and_budget" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "proof_ledger_and_budget" -Passed $false -Reason $_.Exception.Message
+}
+
+# The effect pass is on a ledger too. Enforce: --report-effects prints what it
+# settled per function and what it cost, and --effect-budget=N fails the build.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $obj = Join-Path $tmpDir ("effects_report" + $script:ObjExt)
+  $out = & $CompilerPath "tests/test_beliefs.mettle" -o $obj --report-effects 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "--report-effects failed the build: $out" }
+  if ($out -notmatch "effects audit: performs Audit, needs nothing") { throw "no ledger line for an effect a function performs: $out" }
+  if ($out -notmatch "effects: \d+ functions, \d+ with an effect, \d+ fixpoint rounds, \d+ steps") { throw "no effect ledger total: $out" }
+  $out = & $CompilerPath "tests/test_beliefs.mettle" -o $obj --effect-budget=20 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "the effect pass blew its budget and the build went on" }
+  if ($out -notmatch "error\[F0005\]: the effect pass spent \d+ steps, more than the 20 --effect-budget allows") { throw "the budget failure does not name the cost: $out" }
+  $ex = & $CompilerPath explain F0005 2>&1 | Out-String
+  if ($ex -notmatch "makes the cost of inferring the program's effects") { throw "explain F0005 is missing: $ex" }
+  Write-CaseResult -Name "effect_ledger_and_budget" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "effect_ledger_and_budget" -Passed $false -Reason $_.Exception.Message
+}
+
+# Nothing the compiler assumed is silent. Enforce: --explain lists every extern
+# the build took on trust, says which clause or list granted it, and prints the
+# proofs, effects and rules it consumed as their own sections.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "beliefs.obj"
+  $out = & $CompilerPath --release --explain "tests/test_beliefs.mettle" -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the explain build failed: $out" }
+  if ($out -notmatch "-- beliefs: test_beliefs\.mettle") { throw "--explain has no beliefs section: $out" }
+  if ($out -notmatch "this build took on trust") { throw "the beliefs section does not say what it is: $out" }
+  if ($out -notmatch "extern ``audited_tick``: its ``with Audit`` clause is taken as written") { throw "a declared extern clause is not on the ledger: $out" }
+  if ($out -notmatch "extern ``fwrite``: it declares no effects, so it was taken to allocate") { throw "an undeclared extern is not on the ledger: $out" }
+  if ($out -notmatch "-- effects held: test_beliefs\.mettle") { throw "--explain has no effects section: $out" }
+  if ($out -notmatch "effects held[\s\S]*audit: performs Audit") { throw "the effects section does not name what a function performs: $out" }
+  $out = & $CompilerPath --release --explain "tests/test_refine_ok.mettle" -o $exe 2>&1 | Out-String
+  if ($out -notmatch "-- types proven: test_refine_ok\.mettle") { throw "--explain has no types-proven section: $out" }
+  if ($out -notmatch "becomes 'Percent' because the value's range 0\.\.100 settles the comparison") { throw "the types-proven section does not name the proof: $out" }
+  if ($out -notmatch "consumed by the type checker") { throw "the types-proven section does not name the consumer: $out" }
+  $out = & $CompilerPath --release --explain "tests/test_rule_pass.mettle" -o $exe 2>&1 | Out-String
+  if ($out -notmatch "-- rules run: test_rule_pass\.mettle") { throw "--explain has no rules section: $out" }
+  if ($out -notmatch "no_recursion: pass, \d+ steps") { throw "the rules section does not name the verdict: $out" }
+  Write-CaseResult -Name "explain_lists_beliefs" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "explain_lists_beliefs" -Passed $false -Reason $_.Exception.Message
+}
+
 # A @rule is a property the program requires of itself. Enforce: there is an
 # input on which the build actually fails, and the failure names the site the
 # rule pointed at and the rule that pointed there.

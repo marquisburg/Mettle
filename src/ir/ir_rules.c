@@ -1,4 +1,5 @@
 #include "ir_rules.h"
+#include "ir_explain_ledger.h"
 #include "ir_interp.h"
 #include <stdlib.h>
 #include <string.h>
@@ -305,6 +306,7 @@ static int run_one_rule(IRProgram *program, IRFunction *rule,
       fprintf(report, "rule %s: no verdict (%s), %lld steps\n", display, why,
               steps);
     }
+    ir_explain_rule_ran(display, "no verdict", steps);
     ir_interp_destroy(machine);
     *failed_build = 1;
     stats->malformed++;
@@ -326,6 +328,7 @@ static int run_one_rule(IRProgram *program, IRFunction *rule,
       fprintf(report, "rule %s: malformed verdict, %lld steps\n", display,
               steps);
     }
+    ir_explain_rule_ran(display, "malformed verdict", steps);
     ir_interp_destroy(machine);
     *failed_build = 1;
     stats->malformed++;
@@ -336,6 +339,7 @@ static int run_one_rule(IRProgram *program, IRFunction *rule,
     if (report) {
       fprintf(report, "rule %s: pass, %lld steps\n", display, steps);
     }
+    ir_explain_rule_ran(display, "pass", steps);
     ir_interp_destroy(machine);
     return 1;
   }
@@ -406,6 +410,7 @@ static int run_one_rule(IRProgram *program, IRFunction *rule,
     fprintf(report, "rule %s: %s, %lld steps\n", display,
             verdict.outcome == 1 ? "fail" : "gap", steps);
   }
+  ir_explain_rule_ran(display, verdict.outcome == 1 ? "fail" : "gap", steps);
   if (verdict.outcome == 1) {
     stats->failed++;
     *failed_build = 1;

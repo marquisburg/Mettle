@@ -1004,6 +1004,8 @@ IRFunction *ir_function_create(const char *name) {
   function->is_inline_contract = 0;
   function->is_noinline = 0;
   function->is_pure = 0;
+  function->is_readonly_inferred = 0;
+  function->is_speculatable_inferred = 0;
   function->is_noalloc = 0;
   function->is_test = 0;
   function->is_swappable = 0;

@@ -1,4 +1,5 @@
 #include "type_checker_internal.h"
+#include "../ir/ir_explain_ledger.h"
 
 struct TypeCheckerGuard {
   ASTNode *condition;
@@ -299,6 +300,9 @@ static int mul_checked(long long a, long long b, long long *out) {
 
 static int range_of(TypeChecker *checker, ASTNode *expr, Range *out,
                     int depth) {
+  if (checker) {
+    checker->proof_steps++;
+  }
   const char *op = NULL;
   ASTNode *left = NULL;
   ASTNode *right = NULL;
@@ -905,6 +909,8 @@ typedef struct {
   int failed;
   ASTNode *failed_atom;
   int failed_negated;
+  long long steps;
+  char route[192];
 } ProveContext;
 
 static void prove_visit(void *raw, ASTNode *atom, int negated) {
@@ -932,12 +938,22 @@ static void prove_visit(void *raw, ASTNode *atom, int negated) {
       Range bound;
       if (range_of(ctx->checker, other, &bound, 0) &&
           comparison_holds(use, &ctx->value_range, &bound)) {
+        if (ctx->value_range.has_min && ctx->value_range.has_max) {
+          snprintf(ctx->route, sizeof(ctx->route),
+                   "the value's range %lld..%lld settles the comparison",
+                   ctx->value_range.min, ctx->value_range.max);
+        } else {
+          snprintf(ctx->route, sizeof(ctx->route),
+                   "the value's range settles the comparison");
+        }
         return;
       }
     }
   }
   if (guards_prove_atom(ctx->checker, atom, negated, ctx->expr,
                         ctx->binding)) {
+    snprintf(ctx->route, sizeof(ctx->route),
+             "a dominating test in scope repeats the predicate");
     return;
   }
   ctx->failed = 1;
@@ -948,6 +964,58 @@ static void prove_visit(void *raw, ASTNode *atom, int negated) {
 static void set_failure(TypeChecker *checker, const char *text) {
   free(checker->refine_failure);
   checker->refine_failure = strdup(text);
+}
+
+static char *proof_copy(const char *text) {
+  char *copy = strdup(text ? text : "?");
+  return copy;
+}
+
+static void proof_log(TypeChecker *checker, const Type *layer,
+                      const ASTNode *expr, const char *proof, int proven,
+                      long long steps) {
+  TypeCheckerProof *entry;
+  char expr_text[160] = "";
+  if (checker->proof_log_count == checker->proof_log_capacity) {
+    size_t grown =
+        checker->proof_log_capacity ? checker->proof_log_capacity * 2 : 16;
+    TypeCheckerProof *table = (TypeCheckerProof *)realloc(
+        checker->proof_log, grown * sizeof(TypeCheckerProof));
+    if (!table) {
+      return;
+    }
+    checker->proof_log = table;
+    checker->proof_log_capacity = grown;
+  }
+  describe((ASTNode *)expr, expr_text, sizeof(expr_text), 0);
+  entry = &checker->proof_log[checker->proof_log_count++];
+  entry->type_name = proof_copy(layer && layer->name ? layer->name : "?");
+  entry->expression = proof_copy(expr_text);
+  entry->proof = proof_copy(proof);
+  entry->line = expr ? expr->location.line : 0;
+  entry->column = expr ? expr->location.column : 0;
+  entry->proven = proven;
+  entry->steps = steps;
+}
+
+long long type_checker_proof_steps(const TypeChecker *checker) {
+  return checker ? checker->proof_steps : 0;
+}
+
+void type_checker_report_proofs(const TypeChecker *checker, FILE *out) {
+  if (!checker || !out) {
+    return;
+  }
+  for (size_t i = 0; i < checker->proof_log_count; i++) {
+    const TypeCheckerProof *p = &checker->proof_log[i];
+    fprintf(out, "proof %s for `%s` at %zu:%zu: %s, %lld steps (%s)\n",
+            p->type_name, p->expression, p->line, p->column,
+            p->proven ? "proven" : "refused", p->steps, p->proof);
+  }
+  fprintf(out,
+          "proofs: %zu attempted, %zu proven, %zu refused, %lld steps\n",
+          checker->proofs_attempted, checker->proofs_proven,
+          checker->proofs_refused, checker->proof_steps);
 }
 
 int type_checker_prove_refinement(TypeChecker *checker, Type *refined,
@@ -966,6 +1034,9 @@ int type_checker_prove_refinement(TypeChecker *checker, Type *refined,
   memset(&ctx, 0, sizeof(ctx));
   ctx.checker = checker;
   ctx.expr = expr;
+  ctx.steps = checker->proof_steps;
+  snprintf(ctx.route, sizeof(ctx.route), "the value's own type admits it");
+  checker->proofs_attempted++;
   ctx.have_range = range_of(checker, expr, &ctx.value_range, 0);
   for (layer = refined; layer && layer->refined_base; layer = layer->refined_base) {
     if (expr->resolved_type &&
@@ -999,10 +1070,24 @@ int type_checker_prove_refinement(TypeChecker *checker, Type *refined,
                ctx.failed_negated ? "!" : "", atom_text, expr_text,
                layer->name ? layer->name : "?", range_text);
       set_failure(checker, message);
+      checker->proofs_refused++;
+      proof_log(checker, layer, expr, message, 0,
+                checker->proof_steps - ctx.steps);
       return 0;
+    }
+    proof_log(checker, layer, expr, ctx.route, 1,
+              checker->proof_steps - ctx.steps);
+    {
+      char expr_text[160] = "";
+      describe(expr, expr_text, sizeof(expr_text), 0);
+      ir_explain_proof_held(layer->name ? layer->name : "?", expr_text,
+                            expr->location.line, ctx.route,
+                            "the type checker, and by lowering where it "
+                            "decides whether an access needs a check");
     }
   }
   expr->proven_refinement = refined;
+  checker->proofs_proven++;
   return 1;
 }
 

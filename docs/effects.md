@@ -80,6 +80,17 @@ that belief is checked at run time under `mettle test` and `--check-effects`
 (below). A known allocator such as `malloc` performs `alloc` whatever its
 declaration says.
 
+A belief is never silent. `--explain` prints a **beliefs** section listing
+every extern the build took on trust: the ones whose `with` clause was read as
+written, the ones on the compiler's known-clean list, and the ones with no
+clause at all, which are taken to allocate. A build with nothing on that list
+says so in as many words.
+
+`--report-effects` prints what the pass settled, one line per function that
+performs or needs anything, with the totals: functions seen, functions with an
+effect, fixpoint rounds, steps. `--effect-budget=N` makes that cost a
+contract and fails the build with `F0005` when the pass exceeds it.
+
 ## Capabilities
 
 `requires` and `provides` are how an execution model becomes something the
