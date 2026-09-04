@@ -46,8 +46,15 @@ typedef struct {
   const char *worst_function;
 } IRDeadlineStats;
 
+/* `instrumented` says this build carries run-time checks the deadline was not
+ * declared against: `--safe`, `--record-trace`, `--check-overflow`,
+ * `--check-tasks`, `--check-effects`, `--check-proofs` or `--verify`. Their cost is real
+ * and is counted, so the number the report prints is what that build costs;
+ * what changes is the verdict. A deadline missed only because the checks are
+ * on is said and not enforced, because a claim about the plain build is not
+ * evidence about the checked one, either way. */
 int ir_deadline_run(IRProgram *program, ErrorReporter *reporter,
-                    const IRDeadlineCosts *costs, int instrument, FILE *report,
-                    IRDeadlineStats *stats);
+                    const IRDeadlineCosts *costs, int instrument,
+                    int instrumented, FILE *report, IRDeadlineStats *stats);
 
 #endif /* IR_DEADLINE_H */

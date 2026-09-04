@@ -1,0 +1,36 @@
+// Fixed-point arithmetic is a multiply and a shift, and the shift is where the
+// range comes back. An arithmetic right shift by a constant is exact and
+// monotone, so a negative interval narrows through it the same way a positive
+// one does. Without that, no Q15 multiply could carry a declared type.
+//
+// A cast into a declared type also has to be something the compile-time
+// interpreter can run, or a `@test` over a path built out of them is skipped
+// rather than checked.
+import "std/io";
+
+type Sample = int32 where value >= -32768 && value <= 32767;
+type Gain = int32 where value >= 0 && value <= 32768;
+
+@noalloc fn scale(s: Sample, g: Gain) -> Sample {
+  return (Sample)((s * g) >> 15);
+}
+
+@noalloc fn knee(s: Sample) -> Sample {
+  if (s > 16384) { return (Sample)(16384 + ((s - 16384) >> 1)); }
+  if (s < -16384) { return (Sample)(-16384 + ((s + 16384) >> 1)); }
+  return s;
+}
+
+@test fn the_shift_keeps_the_range() {
+  assert_eq(scale(-32768, 32768), -32768);
+  assert_eq(scale(12345, 32768), 12345);
+  assert_eq(scale(-1000, 16384), -500);
+  assert_eq(knee(32767), 24575);
+  assert_eq(knee(-32768), -24576);
+  assert_eq(knee(-1), -1);
+}
+
+fn main() -> int32 {
+  println("scale {scale(-32768, 32768)} {scale(-1000, 16384)} knee {knee(32767)} {knee(-32768)}");
+  return 0;
+}

@@ -2535,12 +2535,20 @@ static int ir_msf_guard_and_version(IRFunction *function, size_t header_index,
     return 0;
   }
   header_label = function->instructions[header_index].text;
-  if (jump_index + 1 >= function->instruction_count ||
-      function->instructions[jump_index + 1].op != IR_OP_LABEL ||
-      !function->instructions[jump_index + 1].text) {
-    return 0;
+  {
+    /* The loop's end label, past anything that is not an instruction. Under
+     * `--explain` every loop carries a marker NOP on the way out, and reading
+     * that as the label would refuse the versioning and quietly leave the
+     * loop scalar. A flag that asks the compiler what it did may not change
+     * what it does. */
+    size_t end_index = 0;
+    if (!ir_find_next_non_nop(function, jump_index + 1, &end_index) ||
+        function->instructions[end_index].op != IR_OP_LABEL ||
+        !function->instructions[end_index].text) {
+      return 0;
+    }
+    end_label = function->instructions[end_index].text;
   }
-  end_label = function->instructions[jump_index + 1].text;
   location = function->instructions[header_index].location;
   for (int i = 0; i < n_regions; i++) {
     if (!regions[i] || region_bytes[i] <= 0) {

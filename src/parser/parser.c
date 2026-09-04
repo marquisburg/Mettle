@@ -5997,6 +5997,25 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     return NULL;
   }
 
+  if (!has_deadline &&
+      !parser_parse_deadline_clause(parser, &deadline_cycles, &has_deadline,
+                                    &deadline_inclusive)) {
+    for (size_t i = 0; i < param_count; i++) {
+      free(param_names[i]);
+      free(param_types[i]);
+    }
+    free(param_names);
+    free(param_types);
+    parser_free_type_param_list(func_type_params, func_type_param_traits,
+                                func_type_param_count);
+    parser_free_effect_clauses(&effect_clauses);
+    free(func_name);
+    free(return_type);
+    free(link_name);
+    parser_free_string_array(return_types, return_type_count);
+    return NULL;
+  }
+
   char *reference_twin = NULL;
   char *explain_code = NULL;
   char *explain_text = NULL;

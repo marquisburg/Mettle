@@ -1,0 +1,38 @@
+// A deadline is a clause like the others and does not care where it sits. Both
+// orders parse to the same function, and the same effect obligations are
+// checked either way.
+import "std/io";
+
+effect Frame;
+
+var g_total: int32 = 0;
+
+fn before(seed: int32) -> int32 where cycles < 4000 requires Frame {
+  var acc: int32 = seed;
+  var i: int32 = 0;
+  while (i < 8) {
+    acc = acc * 3 + 1;
+    i = i + 1;
+  }
+  return acc;
+}
+
+fn after(seed: int32) -> int32 requires Frame where cycles < 4000 {
+  var acc: int32 = seed;
+  var i: int32 = 0;
+  while (i < 8) {
+    acc = acc * 3 + 1;
+    i = i + 1;
+  }
+  return acc;
+}
+
+fn run() provides Frame {
+  g_total = before(1) + after(1);
+}
+
+fn main() -> int32 {
+  run();
+  println("total {g_total}");
+  return 0;
+}

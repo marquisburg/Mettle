@@ -1,0 +1,27 @@
+// The same path, declared tight enough that the run-time checks do not fit
+// inside it. A build with the checks on is not the build the deadline was
+// declared against, so the miss is said and the binary is still produced; a
+// build without them holds the deadline and is refused if it does not.
+import "std/io";
+
+var g_total: int32 = 0;
+
+fn mix(seed: int32) -> int32 {
+  return seed * 3 + 1;
+}
+
+fn tick(seed: int32) -> int32 where cycles < 300 {
+  var acc: int32 = seed;
+  var i: int32 = 0;
+  while (i < 8) {
+    acc = mix(acc);
+    i = i + 1;
+  }
+  return acc;
+}
+
+fn main() -> int32 {
+  g_total = tick(1);
+  println("total {g_total}");
+  return 0;
+}

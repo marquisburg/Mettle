@@ -291,6 +291,13 @@ Spin locks on an `int32*`: `spin_try_lock`, `spin_lock`, `spin_unlock`.
 Wait results come back as `WAIT_OBJECT_0()`, `WAIT_TIMEOUT()`, or
 `WAIT_FAILED()`, and `INFINITE()` is the timeout that never expires.
 
+The externs that perform nothing carry `with none`: the atomics, the waits,
+the handle close, and the yield a spin lock backs off with. That is what lets
+a real-time path declare `forbids alloc` and hold it across taking a lock. The
+ones that do take a resource, `CreateThread` and `CreateMutexA`, declare
+nothing and are read as performing anything, which is what an unannotated
+extern means.
+
 ## std/machine
 
 One type, `MachineInsn`, and a `const` of it is an instruction set: `name`,

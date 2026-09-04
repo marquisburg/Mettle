@@ -589,8 +589,30 @@ code is not trusted on its own authority.
 
 The prover establishes a predicate from a constant, from the value's own type,
 from arithmetic it can bound, from a `for` range, from a dominating test, from
-an early exit, and from a guard that repeats the predicate. Three more facts
-reach further, and each is inferred:
+an early exit, and from a guard that repeats the predicate. The arithmetic
+includes an arithmetic right shift by a constant, which is exact and monotone,
+so a negative interval narrows through one the same way a positive interval
+does. That is what lets fixed-point code carry a declared type at all: a Q15
+multiply is `(s * g) >> 15`, and with `Sample` and `Gain` on the operands the
+result is provably a `Sample`.
+
+```mettle
+type Sample = int32 where value >= -32768 && value <= 32767;
+type Gain = int32 where value >= 0 && value <= 32768;
+
+@noalloc fn scale(s: Sample, g: Gain) -> Sample {
+  return (Sample)((s * g) >> 15);
+}
+```
+
+One bit wider and it is refused, with the range it computed:
+
+```text
+error[P0001]: cannot prove `value <= 32767` for `s * s >> 15`, which 'Sample'
+requires (its range here is -32767..32768)
+```
+
+Three more facts reach further, and each is inferred:
 
 **What a call returns.** A function's body exports what it proved about the
 value it returns, gathered at every `return` under the guards that reach it. A
@@ -754,7 +776,10 @@ fn tick(seed: int32) -> int32 where cycles < 400 { ... }
 ```
 
 `where cycles < N` reads the same way `where value >= 0` does. It is a claim
-the compiler proves or refuses, never a hint. The cost of one instruction
+the compiler proves or refuses, never a hint. It is a clause like the effect
+clauses and sits on either side of them: `fn tick() where cycles < 400
+requires Frame` and `fn tick() requires Frame where cycles < 400` are the same
+function. The cost of one instruction
 comes from the target description, the cost of a call is the callee's own
 longest path plus the description's call cost, and the cost of a loop is its
 body times a trip count taken from the loop's own bound: the induction
@@ -786,6 +811,21 @@ machine it was costed against.
 The model costs the IR as lowered, before the optimizer runs, so the number is
 an upper bound on the work the program asked for and not a prediction of one
 machine's cycles.
+
+A nest costs its inner loop once for every turn of its outer one, and the
+calls the compiler itself put in the function are costed too: the trap a
+bounds check branches to (which ends the program, so it costs one call and
+nothing after), the counters `--check-deadlines` keeps, the lines
+`--record-trace` writes, the shadow map behind `--safe`.
+
+That last point is why a checked build is reported rather than refused. A
+build carrying `--safe`, `--record-trace`, `--check-overflow`, `--check-tasks`,
+`--check-effects`, `--check-proofs` or `--verify` is not the build the deadline
+was declared against, and the extra work is on the path. The cost is counted
+and printed, so the number is what that build costs; the miss comes out as
+`warning[D0001]` and the binary is still produced. Build without the checks, or
+declare what the checked build costs. `mettle test` generates no code at all
+and so asks no question about generated code: no deadline is checked there.
 
 A path with no bound the compiler can find is `D0002`, and it is a refusal
 rather than a silence, because a deadline that cannot be proven is not a

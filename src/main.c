@@ -6768,7 +6768,11 @@ int compile_file(const char *input_filename, const char *output_filename,
     goto cleanup;
   }
 
-  {
+  /* A deadline is a claim about the code that ships. `mettle test` ships none:
+   * it interprets an image carrying every belief re-check the mode adds, and
+   * costing that image would report a miss against a binary nobody built. The
+   * Machine rules sit out the same mode for the same reason. */
+  if (!options->test_mode) {
     IRDeadlineStats deadline_stats;
     IRDeadlineCosts deadline_costs;
     const MtlcTargetDescription *machine = mtlc_target_current_description();
@@ -6784,8 +6788,12 @@ int compile_file(const char *input_filename, const char *output_filename,
     deadline_costs.call = machine ? machine->cost_call : 4;
     deadline_costs.allocate = machine ? machine->cost_allocate : 120;
     deadline_costs.described = options->target_desc_path != NULL;
+    int deadline_instrumented =
+        options->record_trace || options->check_overflow ||
+        options->check_tasks || options->check_effects ||
+        options->check_proofs || options->safe || ir_verify_enabled();
     if (!ir_deadline_run(ir_program, error_reporter, &deadline_costs,
-                         options->check_deadlines && !options->test_mode,
+                         options->check_deadlines, deadline_instrumented,
                          options->report_deadlines ? stdout : NULL,
                          &deadline_stats)) {
       if (error_reporter_has_errors(error_reporter)) {

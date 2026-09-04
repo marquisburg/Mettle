@@ -3316,6 +3316,14 @@ static int ir_lower_cast_expression(IRLoweringContext *context,
   instruction.dest = destination;
   instruction.lhs = operand;
   instruction.text = (char *)ir_backend_type_name(cast_expr->type_name);
+  /* A cast into a declared type is named by the declared type, and its width
+   * lives in what that type refines. Baking the resolved type here is what
+   * lets the compile-time interpreter run the same conversion, so a `@test`
+   * over an audio path built out of declared types is interpretable. */
+  instruction.value_type = expression->resolved_type
+                               ? mtlc_type_from_frontend(
+                                     expression->resolved_type)
+                               : NULL;
   instruction.is_float = ir_expression_is_floating(context, cast_operand);
   /* is_unsigned on a CAST records that the SOURCE is an unsigned integer,
    * the same way float_bits records the source's float width. x86-64 and

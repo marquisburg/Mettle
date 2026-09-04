@@ -70,7 +70,9 @@ effects.
 
 Compile-time functions marked `@test` and the rules themselves are not in
 `p.functions`. They never ship, so no property of the shipped program depends
-on them.
+on them. For the same reason a rule carries none of the run-time checks a
+build asks for: `--safe` instruments the program and leaves the rules alone,
+because there is nothing in a rule for a checked access to protect.
 
 ## The verdict
 

@@ -123,7 +123,10 @@ divergence. See [ML-driven IR optimization](ml-opt.md).
 
 `--explain` needs `-O` or `--release`, because there are no decisions to
 report without the optimizer. A repeat run leads with what changed since the
-last build, regressions first.
+last build, regressions first. It reports the build it is on and does not
+change it: the same source with and without `--explain` gets the same
+optimizations, and a report that said otherwise would be a report about a
+program nobody built.
 
 Four of its sections are not optimizer decisions. **types proven** lists every
 conversion into a declared type, the route that proved it, and the pass that

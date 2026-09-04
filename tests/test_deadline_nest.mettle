@@ -1,0 +1,34 @@
+// A nest costs its inner loop once for every turn of its outer one, and an
+// array access under a bounds check does not make the path unbounded: the trap
+// the compiler put there ends the program, so it costs one call and nothing
+// after. Both were wrong at once, and the second hid the first.
+import "std/io";
+
+var g_buf: int32[256];
+
+@noinline fn inner_only() where cycles < 1000000 {
+  var n: int64 = 0;
+  while (n < 64) {
+    g_buf[n] = (int32)(n * 3 + 1);
+    n = n + 1;
+  }
+}
+
+@noinline fn nested() where cycles < 1000000 {
+  var c: int64 = 0;
+  while (c < 4) {
+    var n: int64 = 0;
+    while (n < 64) {
+      g_buf[c * 64 + n] = (int32)(c + n);
+      n = n + 1;
+    }
+    c = c + 1;
+  }
+}
+
+fn main() -> int32 {
+  inner_only();
+  nested();
+  println("nest {g_buf[7]} {g_buf[200]}");
+  return 0;
+}

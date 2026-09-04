@@ -1744,6 +1744,27 @@ static int ii_integer_cast_width(const char *type, int *size_out,
   return 0;
 }
 
+/* A declared type is a base type and a proof about it, so a cast into one is
+ * named by the declared type and moves the base. The proof is checked where
+ * the conversion is written; here the width is all that is wanted. */
+static int ii_mtlc_integer_width(const MtlcType *type, int *size,
+                                 int *is_unsigned) {
+  if (!type) {
+    return 0;
+  }
+  switch (type->kind) {
+  case MTLC_TYPE_INT8: *size = 1; *is_unsigned = 0; return 1;
+  case MTLC_TYPE_INT16: *size = 2; *is_unsigned = 0; return 1;
+  case MTLC_TYPE_INT32: *size = 4; *is_unsigned = 0; return 1;
+  case MTLC_TYPE_INT64: *size = 8; *is_unsigned = 0; return 1;
+  case MTLC_TYPE_UINT8: *size = 1; *is_unsigned = 1; return 1;
+  case MTLC_TYPE_UINT16: *size = 2; *is_unsigned = 1; return 1;
+  case MTLC_TYPE_UINT32: *size = 4; *is_unsigned = 1; return 1;
+  case MTLC_TYPE_UINT64: *size = 8; *is_unsigned = 1; return 1;
+  default: return 0;
+  }
+}
+
 static int ii_cast(IRInterpMachine *machine, const IRInstruction *insn,
                    const IRInterpValue *in, IRInterpValue *out) {
   const char *type = insn->text ? insn->text : "";
@@ -1809,6 +1830,22 @@ static int ii_cast(IRInterpMachine *machine, const IRInstruction *insn,
                 insn->value_type->kind == MTLC_TYPE_FUNCTION_POINTER ||
                 insn->value_type->kind == MTLC_TYPE_STRING)) {
       *out = ii_int_value(ii_as_int(in));
+      return 1;
+    } else if (ii_mtlc_integer_width(insn->value_type, &size,
+                                     &target_unsigned)) {
+      /* a declared type over an integer; the base carries the value */
+    } else if (insn->value_type &&
+               (insn->value_type->kind == MTLC_TYPE_FLOAT64 ||
+                insn->value_type->kind == MTLC_TYPE_FLOAT32)) {
+      double d = (!in->is_float && insn->is_unsigned)
+                     ? (double)(unsigned long long)in->i
+                     : ii_as_float(in);
+      *out = ii_float_value(insn->value_type->kind == MTLC_TYPE_FLOAT32
+                                ? (double)(float)d
+                                : d);
+      return 1;
+    } else if (insn->value_type && insn->value_type->kind == MTLC_TYPE_BOOL) {
+      *out = ii_int_value(in->is_float ? in->f != 0.0 : in->i != 0);
       return 1;
     } else {
       ii_fail(machine, IR_INTERP_UNSUPPORTED, "cast target type");
@@ -3097,6 +3134,17 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     return ii_effects_call(machine, name, args, arg_count);
   }
 
+  /* The checks a build carries are the compiler's own, and the interpreter
+   * already enforces what they enforce: an access out of range traps here
+   * whether or not `--safe` put a call in front of it. Running one is
+   * therefore a no-op, and refusing to run one would mean a rule could not be
+   * checked in a build that asked for the checks. */
+  if (strncmp(name, "mettle_safety_", 14) == 0 ||
+      strncmp(name, "mettle_trace_", 13) == 0) {
+    *result = ii_int_value(0);
+    return 1;
+  }
+
   /* assert()/assert_eq() builtins: interpreted natively by `mettle test`. */
   if (strcmp(name, "assert_eq") == 0 && arg_count == 2) {
     if (!ii_value_matches(&args[0], &args[1])) {
@@ -3328,6 +3376,12 @@ static int ii_exec_memory(IRInterpMachine *machine, IIFrame *frame,
   switch (insn->op) {
   case IR_OP_PREFETCH:
     /* Advisory cache hint: no architectural effect, nothing to interpret. */
+    return 1;
+  case IR_OP_SAFETY_CHECK:
+    /* `--safe` puts this in front of an access the compiler could not prove
+     * in range. The interpreter already traps on an access out of range, so
+     * there is nothing here it is not doing anyway; a rule stays runnable in
+     * a build that asked for the checks. */
     return 1;
   case IR_OP_MEMCPY_INLINE: {
     unsigned long long dst, src;

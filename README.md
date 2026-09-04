@@ -260,7 +260,13 @@ To build the backend alone, the archive another frontend links against:
 See [Mettle and libmtlc](docs/mettle-and-libmtlc.md) for the line between the
 frontend and the backend.
 
-Samples live in [examples/](examples/). The benchmark suites pair Mettle against
+Samples live in [examples/](examples/). [examples/desk/](examples/desk/) is a
+four-channel mixing desk that carries the whole surface in one program: a
+schedule the two threads meet on, fixed point over declared types that deletes
+its own overflow checks, two blocks that declare what they may cost and are
+proven against the target's cost model, an indirect call the effect system
+still bounds, and seven rules that run over the checked program, over what it
+became and over a recording of a run. The benchmark suites pair Mettle against
 C:
 
 ```powershell

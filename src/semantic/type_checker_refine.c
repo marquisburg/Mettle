@@ -38,6 +38,25 @@ static Range range_exact(long long v) {
   return r;
 }
 
+static long long shift_right_floor(long long value, int bits) {
+  unsigned long long magnitude;
+  unsigned long long shifted;
+  unsigned long long lost;
+  if (bits <= 0) {
+    return value;
+  }
+  if (value >= 0) {
+    return value >> bits;
+  }
+  magnitude = (unsigned long long)(-(value + 1)) + 1ULL;
+  shifted = magnitude >> bits;
+  lost = magnitude & ((1ULL << bits) - 1ULL);
+  if (lost != 0ULL) {
+    shifted += 1ULL;
+  }
+  return -(long long)shifted;
+}
+
 static Range range_of_type(const Type *type) {
   Range r = range_unknown();
   long long min = 0;
@@ -571,13 +590,13 @@ static int range_of(TypeChecker *checker, ASTNode *expr, Range *out,
                                             : (l.has_max ? l.max : r.max);
         }
       } else if (strcmp(op, ">>") == 0 && have_l && have_r && l.has_min &&
-                 l.min >= 0 && r.has_min && r.has_max && r.min == r.max &&
-                 r.min >= 0 && r.min < 63) {
+                 r.has_min && r.has_max && r.min == r.max && r.min >= 0 &&
+                 r.min < 63) {
         out->has_min = 1;
-        out->min = l.min >> r.min;
+        out->min = shift_right_floor(l.min, (int)r.min);
         if (l.has_max) {
           out->has_max = 1;
-          out->max = l.max >> r.min;
+          out->max = shift_right_floor(l.max, (int)r.min);
         }
       }
     }

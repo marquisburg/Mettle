@@ -50,6 +50,21 @@ declines to declare one, because it takes a spin lock and a spin lock has no
 bound, which is `error[D0002]` rather than a deadline nobody proved. See
 [`engine/README.md`](engine/README.md).
 
+[`desk/`](desk/) is a four-channel mixing desk, and it is where the surface is
+carried by a program that does something. The frame is three rows of
+`std/schedule` with `joins: true`, so the two threads meet at every phase
+boundary and the scheduled run prints exactly what the one-thread offline
+bounce prints. The audio path is fixed point over declared types, so
+`--check-overflow` deletes nineteen checks and `--explain` names the type that
+earned each one. Two blocks declare `where cycles < N` and are proven against
+the target's cost model; `board.mettle` beside them is that description with
+four numbers changed, and the same source is refused on it. The channel shaper
+is a function pointer whose type carries `with Dsp`, which is how the mix stage
+forbids `alloc` across an indirect call. Seven `@rule`s run: three over the
+checked program, one over what it became in codegen, and three over a run
+recorded with `--record-trace`, where the rule that gaps under `mettle test`
+proves something over the recording. See [`desk/README.md`](desk/README.md).
+
 ## A machine described as data
 
 [`machine/`](machine/) describes an eight-register machine with six

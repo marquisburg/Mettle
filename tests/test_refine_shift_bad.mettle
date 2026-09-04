@@ -1,0 +1,15 @@
+// The same shape one bit too wide. A square shifted by 15 reaches 32768, which
+// is one past what 'Sample' holds, and the prover says so instead of rounding
+// the answer in the program's favour.
+import "std/io";
+
+type Sample = int32 where value >= -32768 && value <= 32767;
+
+@noalloc fn square(s: Sample) -> Sample {
+  return (Sample)((s * s) >> 15);
+}
+
+fn main() -> int32 {
+  println("square {square(-32768)}");
+  return 0;
+}

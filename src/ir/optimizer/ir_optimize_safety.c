@@ -2906,6 +2906,13 @@ int ir_safety_resolve_program(IRProgram *program, IRSafetyStats *stats) {
     if (!function) {
       continue;
     }
+    /* A rule is not part of the program: it runs in the compile-time
+     * interpreter and never reaches a binary, so there is nothing for a
+     * checked access to protect. Instrumenting one only hands the interpreter
+     * code it cannot run. */
+    if (function->is_rule) {
+      continue;
+    }
     int resolved =
         safety_function_is_allocator(function, allocator_source)
             ? safety_strip_function(function, stats)

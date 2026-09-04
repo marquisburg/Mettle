@@ -1162,37 +1162,38 @@ $cases = @(
     # "your store address did not match" message used to fire for all of
     # them, telling a writer who had already written `a[i]` to write `a[i]`.
     # The last function proves the stack-array advice: same loop, pointer
-    # bound once, and it vectorizes.
+    # bound once, and it vectorizes. The two-destination loop is here to hold
+    # the report to the build: it vectorizes, and it has to be reported that
+    # way under --explain as well, because a flag that asks what the compiler
+    # did may not change what it does.
     Name          = "explain_fill_causes"
     Path          = "tests/explain_fill_causes.mettle"
     ShouldSucceed = $true
     Args          = @("--release", "--explain=loops")
     Env           = @{ METTLE_EXPLAIN_REPORT_LINES = "0" }
     OutputMustMatch = @(
-      'the body writes 2 destinations; the fill kernel fills one region per loop',
-      'fix: split it into one loop per destination',
+      'two_regions \(loop @ line \d+\): vectorized',
       'the loop fills 1-byte elements, and the fill kernel covers 2-, 4- and 8-byte elements only',
       # a compiler gap is a note, not a fix: it must not be ranked as work
       'note: nothing to change here: this is a gap in the compiler',
       'the loop fills the stack array `a`, whose address is retaken on every iteration',
       'fix: bind the array to a pointer once before the loop \(`var p: float32\* = &a\[0\];`\)',
       'local_fill_bound \(loop @ line \d+\): vectorized',
-      # three loops miss the kernel; only two of them have work to do,
+      # two loops miss the kernel; only one of them has work to do,
       # because the byte-width gap is the compiler's and not the code's
-      'where to start \(2 of 3 missed optimizations have a fix',
+      'where to start \(1 of 2 missed optimizations has a fix',
       # the stack-array advice is not believed, it is checked: the
       # compiler binds the pointer on a clone and re-runs, and the kernel
       # it names is the one local_fill_bound actually gets below
       'verified: simulated that fix and re-ran the optimizer: this loop then vectorizes -> 16-byte splat stores',
-      # so it leads the triage, ahead of the unproven split advice; and
-      # the two live side by side rather than folding, because one code
-      # here covers three different causes with three different fixes
-      '1\. proven local_fill:\d+  bind the array to a pointer once',
-      '2\.        two_regions:\d+  split it into one loop per destination'
+      # so it leads the triage, and it is the only entry with work in it
+      '1\. proven local_fill:\d+  bind the array to a pointer once'
     )
     OutputMustNotMatch = @(
       # the advice that could not be followed
-      'its store address did not match the fill vectorizer'
+      'its store address did not match the fill vectorizer',
+      # the loop that does vectorize must not be reported as a refusal
+      'the body writes 2 destinations'
     )
   },
   @{
@@ -4720,6 +4721,177 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "a_proof_deletes_an_overlap_test" -Passed $false -Reason $_.Exception.Message
+}
+
+# A nest costs its inner loop once for every turn of its outer one, and a trap
+# the compiler put there ends the path rather than opening it. Enforce: the
+# nested function costs at least four times the single loop, both prove, and
+# the program runs. Before this, the outer loop was picked as the smaller of
+# the two, its body was walked with the inner loop counted once, and a nest
+# was priced at a fraction of what it costs.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "deadline_nest.exe"
+  $out = & $CompilerPath --build "tests/test_deadline_nest.mettle" -o $exe --report-deadlines 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the nested deadline build failed: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "deadline inner_only: (\d+) of") { throw "the single loop was not costed: $out" }
+  $inner = [int]$Matches[1]
+  if ($flat -notmatch "deadline nested: (\d+) of") { throw "the nest was not costed: $out" }
+  $nest = [int]$Matches[1]
+  if ($nest -lt $inner * 4) { throw "the nest cost $nest against a single loop at $inner; the outer trip count was not applied" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "nest 7 11") { throw "the nested program gave the wrong answer: $run" }
+
+  # An array access under a bounds check must not make a path unbounded.
+  if ($flat -match "D0002") { throw "a bounds-checked access was read as a call the compiler cannot see into: $out" }
+
+  # The checks a build carries are counted, and the same nest costs more with
+  # them on. `--safe` is a checked build, so a miss there is said, not enforced.
+  $out = & $CompilerPath --build "tests/test_deadline_nest.mettle" -o (Join-Path $tmpDir "deadline_nest_safe.exe") --safe --report-deadlines 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the checked nest build failed: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "deadline nested: (\d+) of") { throw "the checked nest was not costed: $out" }
+  if ([int]$Matches[1] -le $nest) { throw "the checks cost nothing on the report, which cannot be right" }
+
+  $exe = Join-Path $tmpDir "deadline_checked.exe"
+  $out = & $CompilerPath --build "tests/test_deadline_checked.mettle" -o $exe --report-deadlines 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the tight deadline did not hold without the checks: $out" }
+  $out = & $CompilerPath --build "tests/test_deadline_checked.mettle" -o $exe --check-overflow --report-deadlines 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a checked build was refused over a deadline it was not declared against: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "warning\[D0001\]") { throw "the checked build did not say what the checks cost: $out" }
+  if ($flat -match "error\[D0001\]") { throw "the checked build was refused rather than reported: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "total 9841") { throw "the checked binary did not run: $run" }
+
+  # `mettle test` generates no code, so it asks no question about generated code.
+  $out = & $CompilerPath test "tests/test_deadline_checked.mettle" 2>&1 | Out-String
+  if ($out -match "D000[12]") { throw "a deadline was asked of an interpreted run: $out" }
+
+  Write-CaseResult -Name "a_nest_costs_its_inner_loop_every_time" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "a_nest_costs_its_inner_loop_every_time" -Passed $false -Reason $_.Exception.Message
+}
+
+# Fixed point is a multiply and a shift, and the shift is where the range comes
+# back. Enforce: a declared type survives an arithmetic right shift of a
+# negative interval, one bit too wide is still refused, the same conversion is
+# something the compile-time interpreter can run, and a deadline parses on
+# either side of the effect clauses.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "refine_shift.exe"
+  $out = & $CompilerPath --build "tests/test_refine_shift.mettle" -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a Q15 multiply could not carry a declared type: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "scale -32768 -500 knee 24575 -24576") { throw "the fixed-point path gave the wrong answer: $run" }
+
+  $out = & $CompilerPath --build "tests/test_refine_shift_bad.mettle" -o (Join-Path $tmpDir "refine_shift_bad.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a shift one bit too wide for the declared type was accepted" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "P0001") { throw "the shift that does not fit was refused for the wrong reason: $out" }
+  if ($flat -notmatch "-32767\.\.32768") { throw "the refusal does not name the range it computed: $out" }
+
+  # A cast into a declared type is the base plus a proof, and the interpreter
+  # has to be able to run it or a `@test` over such a path is skipped.
+  $out = & $CompilerPath test "tests/test_refine_shift.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the compile-time test failed: $out" }
+  if ($out -match "skipped") { throw "a conversion into a declared type was not interpretable: $out" }
+  if ($out -notmatch "1 passed") { throw "the compile-time test did not run: $out" }
+
+  $exe = Join-Path $tmpDir "clause_order.exe"
+  $out = & $CompilerPath --build "tests/test_clause_order.mettle" -o $exe --report-deadlines 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a deadline after the effect clauses did not parse: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "deadline before: (\d+) of 4000") { throw "the first order was not costed: $out" }
+  $one = [int]$Matches[1]
+  if ($flat -notmatch "deadline after: (\d+) of 4000") { throw "the second order was not costed: $out" }
+  if ([int]$Matches[1] -ne $one) { throw "the two clause orders produced different functions" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "total 19682") { throw "the clause-order program gave the wrong answer: $run" }
+
+  Write-CaseResult -Name "a_declared_type_survives_a_shift" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "a_declared_type_survives_a_shift" -Passed $false -Reason $_.Exception.Message
+}
+
+# The mixing desk: one program carrying effects, declared types, a schedule,
+# deadlines, tasks, rules over three different images, and a vectorizer that
+# tests what it cannot prove. Enforce: it builds, the live run and the offline
+# bounce agree, every rule passes over the program, over what it became and
+# over a recording of it, both deadlines prove, and the overlap test is where
+# a proof is missing and gone where there is one.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "desk.exe"
+  $out = & $CompilerPath --build "examples/desk/desk.mettle" -o $exe --release --report-deadlines --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the desk did not build: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "deadlines: 2 declared, 2 proven") { throw "the block deadlines were not proven: $out" }
+  if ($flat -notmatch "rule the_meter_has_one_lock: pass") { throw "the meter rule did not run: $out" }
+  if ($flat -notmatch "rule the_kernels_keep_their_registers: pass") { throw "the machine rule did not run: $out" }
+  if ($flat -match "0 failed, 0 gaps, 0 steps") { throw "the rules cost nothing, so they cannot have run: $out" }
+
+  $live = & $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the desk did not run: $live" }
+  $offline = & $exe offline 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the offline bounce did not run: $offline" }
+  if ($live -ne $offline) { throw "the scheduled run and the offline bounce disagree:`n$live`n$offline" }
+  if ($live -notmatch "desk 6 frames, peak 7598, checksum 4904") { throw "the desk gave the wrong answer: $live" }
+  if ($live -notmatch "ramp apart 15\.75, overlapped 0\.5") { throw "the overlap test did not take the loop: $live" }
+
+  $out = & $CompilerPath --build "examples/desk/desk.mettle" -o (Join-Path $tmpDir "desk_effects.exe") --release --report-effects 2>&1 | Out-String
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "shared g_peak: .*ordered by an effect both require") { throw "the meter was not seen as shared and ordered: $out" }
+
+  $obj = Join-Path $tmpDir "desk.obj"
+  $out = & $CompilerPath --dump-ir "examples/desk/desk.mettle" -o $obj --release 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the desk IR dump failed: $out" }
+  $ir = Get-Content ($obj + ".ir") -Raw
+  $handed = [regex]::Match($ir, "(?ms)^function dsp_ramp \{.*?^\}").Value
+  $owned = [regex]::Match($ir, "(?ms)^function calibrate \{.*?^\}").Value
+  if (-not $handed) { throw "the IR has no 'dsp_ramp'" }
+  if ($handed -notmatch "\.ovl") { throw "the ramp over pointers it was handed carries no overlap test" }
+  if ($owned -match "\.ovl") { throw "a proof did not delete the overlap test in 'calibrate'" }
+  if (($owned -split "simd_vloop").Count -lt 3) { throw "the proven loop did not become kernels" }
+
+  $out = & $CompilerPath expand "examples/desk/desk.mettle" 2>&1 | Out-String
+  if ($out -notmatch "fn DESK_thread_1\(arg: cstring\)") { throw "the schedule generated no dispatcher: $out" }
+  if ($out -notmatch "DESK_wait_capture") { throw "the joins generated no meeting point: $out" }
+
+  $out = & $CompilerPath test "examples/desk/desk.mettle" --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the desk's compile-time tests failed: $out" }
+  if ($out -notmatch "3 passed") { throw "the desk's compile-time tests did not run: $out" }
+  if ($out -notmatch "rule every_lock_is_released: gap") { throw "a run that took no lock did not say so: $out" }
+
+  $rec = Join-Path $tmpDir "desk_recorded.exe"
+  $trace = Join-Path $tmpDir "desk.trace"
+  $out = & $CompilerPath --build "examples/desk/desk.mettle" -o $rec --record-trace 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the recording build failed: $out" }
+  $env:METTLE_TRACE = $trace
+  & $rec offline | Out-Null
+  Remove-Item Env:METTLE_TRACE
+  if (-not (Test-Path $trace)) { throw "the run wrote no trace" }
+  $out = & $CompilerPath check-trace "examples/desk/desk.mettle" $trace --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the rules did not hold over the recording: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "rule the_audio_path_never_allocates: pass") { throw "the allocation rule proved nothing over the recording: $out" }
+  if ($flat -notmatch "rule every_lock_is_released: pass") { throw "the lock rule was still a gap over a run that took locks: $out" }
+
+  Write-CaseResult -Name "the_desk_holds_together" -Passed $true
+}
+catch {
+  $failed++
+  if (Test-Path Env:METTLE_TRACE) { Remove-Item Env:METTLE_TRACE }
+  Write-CaseResult -Name "the_desk_holds_together" -Passed $false -Reason $_.Exception.Message
 }
 
 # Signed arithmetic that does not fit, and the ranges that say it will.

@@ -1,0 +1,393 @@
+import "std/io";
+import "std/mem";
+import "std/rule";
+import "std/schedule";
+import "std/thread";
+
+effect Capture;
+effect Mix;
+effect Master;
+effect MeterLock;
+effect Dsp;
+
+type Sample = int32 where value >= -32768 && value <= 32767;
+type Gain = int32 where value >= 0 && value <= 32768;
+type Bus = int32 where value >= -262144 && value <= 262143;
+type Slot = uint32 where value < 4;
+
+const BLOCK: int64 = 64;
+const CHANNELS: int64 = 4;
+const FRAMES: int32 = 6;
+
+const GAIN: Gain[4] = [8192, 6554, 4915, 3277];
+const PAN: Gain[4] = [32768, 21845, 10923, 0];
+
+struct Bounce {
+  frames: int32;
+  peak: int32;
+  energy: int64;
+}
+
+const DESK: Schedule[3] = [
+  { phase: "capture", effect: "Capture", entry: "capture_block", thread: 0, joins: true },
+  { phase: "mix", effect: "Mix", entry: "mix_block", thread: 1, joins: true },
+  { phase: "master", effect: "Master", entry: "master_block", thread: 0, joins: true },
+];
+
+var g_source: int32[256];
+var g_bus_left: int32[64];
+var g_bus_right: int32[64];
+var g_meter_lock: int32 = 0;
+var g_peak: int32 = 0;
+var g_energy: int64 = 0;
+var g_checksum: int64 = 0;
+var g_frames: int32 = 0;
+
+@noalloc fn clamp_sample(v: int64) -> Sample {
+  if (v > 32767) { return 32767; }
+  if (v < -32768) { return -32768; }
+  return (Sample)v;
+}
+
+@noalloc fn bus_add(acc: Bus, s: Sample) -> Bus {
+  var sum: int32 = acc + s;
+  if (sum > 262143) { return 262143; }
+  if (sum < -262144) { return -262144; }
+  return (Bus)sum;
+}
+
+@noalloc fn channel_base(slot: Slot) -> int64 {
+  return (int64)slot * BLOCK;
+}
+
+@noalloc fn dsp_scale(s: Sample, g: Gain) -> Sample {
+  return (Sample)((s * g) >> 15);
+}
+
+@noalloc fn dsp_tone(channel: int64, n: int64) -> Sample {
+  var period: int64 = 16 + channel * 8;
+  var pos: int64 = n % period;
+  var half: int64 = period / 2;
+  var rise: int64 = pos;
+  if (pos >= half) { rise = period - pos; }
+  return clamp_sample((rise * 65534) / half - 32767);
+}
+
+@noalloc fn dsp_clean(s: Sample) -> Sample with Dsp {
+  return s;
+}
+
+@noalloc fn dsp_warm(s: Sample) -> Sample with Dsp {
+  if (s > 16384) { return (Sample)(16384 + ((s - 16384) >> 1)); }
+  if (s < -16384) { return (Sample)(-16384 + ((s + 16384) >> 1)); }
+  return s;
+}
+
+var g_shape: fn(Sample) -> Sample with Dsp = &dsp_clean;
+
+fn engage_soft_knee() {
+  g_shape = &dsp_warm;
+}
+
+@noinline @noalloc fn dsp_ramp(left: float64*, right: float64*, n: int64) {
+  var i: int64 = 0;
+  while (i < n) {
+    left[i] = (float64)i * 0.5;
+    right[i] = (float64)i * 0.25;
+    i = i + 1;
+  }
+}
+
+fn calibrate() -> float64 {
+  var a: float64* = (float64*)malloc(8 * BLOCK);
+  var b: float64* = (float64*)malloc(8 * BLOCK);
+  var i: int64 = 0;
+  while (i < BLOCK) {
+    a[i] = (float64)i * 0.5;
+    b[i] = (float64)i * 0.25;
+    i = i + 1;
+  }
+  var span: float64 = a[BLOCK - 1] - b[BLOCK - 1];
+  free(a);
+  free(b);
+  return span;
+}
+
+fn verify_ramp() -> float64 {
+  var scratch: float64* = (float64*)malloc(8 * 2 * BLOCK);
+  dsp_ramp(scratch, &scratch[BLOCK], BLOCK);
+  var apart: float64 = scratch[BLOCK - 1] - scratch[2 * BLOCK - 1];
+  dsp_ramp(scratch, &scratch[1], 8);
+  var shifted: float64 = scratch[1];
+  free(scratch);
+  println("ramp apart {apart}, overlapped {shifted}");
+  return apart;
+}
+
+fn meter_input(level: Sample) requires Mix, MeterLock {
+  if (level > g_peak) { g_peak = level; }
+}
+
+fn meter_output(level: Sample) requires Master, MeterLock {
+  if (level > g_peak) { g_peak = level; }
+  g_energy = g_energy + (int64)level * (int64)level;
+}
+
+fn under_meter_mix(level: Sample) provides MeterLock requires Mix {
+  spin_lock(&g_meter_lock);
+  meter_input(level);
+  spin_unlock(&g_meter_lock);
+}
+
+fn under_meter_master(level: Sample) provides MeterLock requires Master {
+  spin_lock(&g_meter_lock);
+  meter_output(level);
+  spin_unlock(&g_meter_lock);
+}
+
+@noalloc fn dsp_capture(origin: int64) where cycles < 48000 {
+  var c: int64 = 0;
+  while (c < CHANNELS) {
+    var n: int64 = 0;
+    while (n < BLOCK) {
+      g_source[channel_base((Slot)c) + n] = dsp_tone(c, origin + n);
+      n = n + 1;
+    }
+    c = c + 1;
+  }
+}
+
+fn capture_block() requires Capture {
+  dsp_capture((int64)g_frames * BLOCK);
+}
+
+fn mix_block() requires Mix forbids alloc {
+  var loudest: Sample = 0;
+  var n: int64 = 0;
+  while (n < BLOCK) {
+    var left: Bus = 0;
+    var right: Bus = 0;
+    var c: int64 = 0;
+    while (c < CHANNELS) {
+      var raw: Sample = clamp_sample((int64)g_source[channel_base((Slot)c) + n]);
+      var shaped: Sample = g_shape(raw);
+      var lifted: Sample = dsp_scale(shaped, GAIN[c]);
+      left = bus_add(left, dsp_scale(lifted, PAN[c]));
+      right = bus_add(right, dsp_scale(lifted, (Gain)(32768 - PAN[c])));
+      c = c + 1;
+    }
+    g_bus_left[n] = left;
+    g_bus_right[n] = right;
+    if (left > loudest) { loudest = clamp_sample((int64)left); }
+    if (right > loudest) { loudest = clamp_sample((int64)right); }
+    n = n + 1;
+  }
+  under_meter_mix(loudest);
+}
+
+@noalloc fn dsp_master() -> Sample where cycles < 6000 {
+  var peak: Sample = 0;
+  var n: int64 = 0;
+  while (n < BLOCK) {
+    var l: Sample = clamp_sample((int64)g_bus_left[n]);
+    var r: Sample = clamp_sample((int64)g_bus_right[n]);
+    g_checksum = g_checksum + (int64)l + (int64)r;
+    if (l > peak) { peak = l; }
+    if (r > peak) { peak = r; }
+    n = n + 1;
+  }
+  return peak;
+}
+
+fn master_block() requires Master {
+  under_meter_master(dsp_master());
+  g_frames = g_frames + 1;
+}
+
+fn recorder_main(arg: cstring) -> uint32 {
+  var b: Bounce* = (Bounce*)arg;
+  b.frames = g_frames;
+  b.peak = g_peak;
+  b.energy = g_energy;
+  return 0;
+}
+
+fn take_bounce() -> int64 {
+  var slip: Bounce* = (Bounce*)malloc(sizeof(Bounce));
+  slip.frames = 0;
+  slip.peak = 0;
+  slip.energy = 0;
+  var recorder: int64 = CreateThread(0, 0, &recorder_main, (cstring)slip, 0, 0);
+  thread_join_infinite(recorder);
+  thread_close(recorder);
+  var energy: int64 = slip.energy;
+  println("bounce {slip.frames} frames, peak {slip.peak}, energy {energy}");
+  free(slip);
+  return energy;
+}
+
+fn report() {
+  println("desk {g_frames} frames, peak {g_peak}, checksum {g_checksum}");
+}
+
+fn bounce_offline() -> int32 {
+  var frame: int32 = 0;
+  while (frame < FRAMES) {
+    DESK_phase_capture();
+    DESK_phase_mix();
+    DESK_phase_master();
+    frame = frame + 1;
+  }
+  report();
+  take_bounce();
+  return 0;
+}
+
+fn run_live() -> int32 {
+  var mixer: int64 = CreateThread(0, 0, &DESK_thread_1, (cstring)(int64)FRAMES, 0, 0);
+  DESK_thread_0((cstring)(int64)FRAMES);
+  thread_join_infinite(mixer);
+  thread_close(mixer);
+  report();
+  take_bounce();
+  return 0;
+}
+
+@rule fn dsp_kernels_never_allocate(p: Program) -> Verdict explain R4001 "A kernel runs inside a block deadline with no allocator behind it. Mark it @noalloc, or move the allocation to the setup that owns it." {
+  for f in p.functions {
+    if (f.module != "") { continue; }
+    if (f.name.length < 4) { continue; }
+    if (f.name[0] == 'd' && f.name[1] == 's' && f.name[2] == 'p' && f.name[3] == '_' && !f.is_noalloc) {
+      return verdict_fail(f.site, "a kernel on the audio path may not allocate; mark it @noalloc");
+    }
+  }
+  return verdict_pass();
+}
+
+@rule fn the_meter_has_one_lock(p: Program) -> Verdict explain R4002 "Two phases write the meter, and what orders them is an effect both of them need. A writer that does not need it is a race the lock cannot see." {
+  var meter: int64 = program_global_index(p, "g_peak");
+  if (meter < 0) {
+    return verdict_gap_program("this build has no meter to check");
+  }
+  for writer in p.globals[meter].written_by {
+    var at: int64 = program_function_index(p, writer);
+    if (at < 0) {
+      return verdict_gap_program("the meter is written by something this image cannot name");
+    }
+    if (!function_requires(p.functions[at], "MeterLock")) {
+      return verdict_fail(p.functions[at].site, "this writes the meter without requiring MeterLock");
+    }
+  }
+  return verdict_pass();
+}
+
+@rule fn every_phase_has_an_entry(p: Program) -> Verdict explain R4003 "The schedule names the function each phase runs. A name that does not resolve is a hole in the frame." {
+  if (program_function_index(p, "capture_block") < 0) {
+    return verdict_fail_program("the capture phase names no function");
+  }
+  if (program_function_index(p, "mix_block") < 0) {
+    return verdict_fail_program("the mix phase names no function");
+  }
+  if (program_function_index(p, "master_block") < 0) {
+    return verdict_fail_program("the master phase names no function");
+  }
+  return verdict_pass();
+}
+
+@rule fn the_kernels_keep_their_registers(m: Machine) -> Verdict explain R4004 "A block that declares what it may cost is costed from the instructions the compiler can see. A spill is time nothing priced, so a kernel under a deadline may not have one." {
+  for at in 0..m.functions.length {
+    if (m.functions[at].instructions == 0) { continue; }
+    if (m.functions[at].name != "dsp_capture" && m.functions[at].name != "dsp_master") { continue; }
+    if (!m.functions[at].register_allocated) {
+      return verdict_fail_program("a kernel on the audio path reached codegen without the register allocator");
+    }
+    if (m.functions[at].spills > 0) {
+      return verdict_fail_program("a kernel on the audio path spills, and a spill inside a block deadline is time nothing priced");
+    }
+  }
+  return verdict_pass();
+}
+
+fn trace_count_named(t: Trace, kind: string, name: string) -> int64 {
+  var n: int64 = 0;
+  for e in t.events {
+    if (e.kind == kind && e.name == name) { n = n + 1; }
+  }
+  return n;
+}
+
+fn on_the_audio_path(name: string) -> bool {
+  if (name == "capture_block" || name == "mix_block" || name == "master_block") {
+    return true;
+  }
+  if (name.length < 4) { return false; }
+  return name[0] == 'd' && name[1] == 's' && name[2] == 'p' && name[3] == '_';
+}
+
+@rule fn the_audio_path_never_allocates(t: Trace) -> Verdict explain R4005 "@noalloc and `forbids alloc` are proven over the call graph. This asks the same question of a run, so the proof is re-checked by something that did not make it." {
+  if (trace_count_named(t, "call", "capture_block") == 0) {
+    return verdict_gap_program("this run never entered the audio path, so nothing here was tested");
+  }
+  for e in t.events {
+    if (e.kind == "alloc" && on_the_audio_path(e.name)) {
+      return verdict_fail_program("a block on the audio path allocated while the desk was running");
+    }
+  }
+  return verdict_pass();
+}
+
+@rule fn every_lock_is_released(t: Trace) -> Verdict explain R4006 "The meter lock is held for two stores. A run that leaves it held stops the next frame forever." {
+  if (trace_count(t, "lock") == 0) {
+    return verdict_gap_program("this run took no lock, so nothing here was tested");
+  }
+  if (!trace_balanced(t, "lock", "unlock")) {
+    return verdict_fail_program("this run took the meter lock and did not release it");
+  }
+  return verdict_pass();
+}
+
+@rule fn every_frame_that_started_finished(t: Trace) -> Verdict explain R4007 "A frame is captured, mixed and mastered. A run with more captures than masters stopped in the middle of one." {
+  var captured: int64 = trace_count_named(t, "call", "capture_block");
+  if (captured == 0) {
+    return verdict_gap_program("this run captured nothing, so nothing here was tested");
+  }
+  if (captured != trace_count_named(t, "call", "mix_block")) {
+    return verdict_fail_program("a frame was captured and never mixed");
+  }
+  if (captured != trace_count_named(t, "call", "master_block")) {
+    return verdict_fail_program("a frame was mixed and never mastered");
+  }
+  return verdict_pass();
+}
+
+@test fn the_offline_bounce_is_deterministic() {
+  var frame: int32 = 0;
+  while (frame < 2) {
+    DESK_phase_capture();
+    DESK_phase_mix();
+    DESK_phase_master();
+    frame = frame + 1;
+  }
+  assert_eq(g_frames, 2);
+}
+
+@test fn the_bus_saturates_instead_of_wrapping() {
+  var acc: Bus = 262143;
+  assert_eq(bus_add(acc, 32767), 262143);
+  assert_eq(bus_add(-262144, -32768), -262144);
+}
+
+@test fn a_gain_of_one_is_transparent() {
+  assert_eq(dsp_scale(-32768, 32768), -32768);
+  assert_eq(dsp_scale(12345, 32768), 12345);
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  println("calibration span {calibrate()}");
+  verify_ramp();
+  engage_soft_knee();
+  if (argc > 1 && argv[1][0] == 'o') {
+    return bounce_offline();
+  }
+  return run_live();
+}

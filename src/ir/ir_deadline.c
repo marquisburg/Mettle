@@ -73,10 +73,31 @@ static long long op_cost(const IRDeadlineCosts *costs,
 
 static long long function_cost(Ctx *ctx, IRFunction *fn);
 
+/* Some of the calls in a function are the compiler's own: the trap a bounds
+ * check branches to, the counters `--check-deadlines` keeps, the lines
+ * `--record-trace` writes, the frames `--check-effects` pushes. Each does a
+ * fixed amount of work and returns (a trap ends the program, which is less
+ * still), so each costs one call. Reading them as opaque would make every
+ * deadline in a checked build unbounded, and the point of a deadline is to
+ * say what the checks cost. */
+static int deadline_is_helper(const char *name) {
+  if (!name) {
+    return 0;
+  }
+  return strstr(name, "crash_trap") != NULL ||
+         strncmp(name, "mettle_effects_", 15) == 0 ||
+         strncmp(name, "mettle_refine_", 14) == 0 ||
+         strncmp(name, "mettle_safety_", 14) == 0 ||
+         strncmp(name, "mettle_trace_", 13) == 0;
+}
+
 static long long call_cost(Ctx *ctx, const IRInstruction *insn) {
   IRFunction *callee = NULL;
   if (!insn->text) {
     return DEADLINE_UNBOUNDED;
+  }
+  if (deadline_is_helper(insn->text)) {
+    return ctx->costs->call;
   }
   callee = ir_program_find_function(ctx->program, insn->text);
   if (!callee || !callee->instruction_count) {
@@ -91,11 +112,23 @@ static long long call_cost(Ctx *ctx, const IRInstruction *insn) {
   }
 }
 
+/* The natural loop of a back edge u -> h is h together with everything that
+ * can still reach u without passing through h. The search has to follow every
+ * edge, back edges included: an inner body reaches the outer latch only by
+ * going round its own loop, and a walk that refused to do that would leave the
+ * inner loop out of the outer one, pick the outer loop as the smaller of the
+ * two, and cost a nest at one trip of its inner half. */
 static int reaches(const IRBasicBlock *blocks, size_t count, size_t from,
-                   size_t to, const int *back, char *seen) {
+                   size_t to, size_t avoid, char *seen) {
   size_t stack[DEADLINE_MAX_BLOCKS];
   size_t depth = 0;
   memset(seen, 0, count);
+  if (from == to) {
+    return 1;
+  }
+  if (from == avoid) {
+    return 0;
+  }
   stack[depth++] = from;
   seen[from] = 1;
   while (depth) {
@@ -105,7 +138,7 @@ static int reaches(const IRBasicBlock *blocks, size_t count, size_t from,
     }
     for (size_t e = 0; e < blocks[at].successor_count; e++) {
       size_t next = blocks[at].successors[e];
-      if (next >= count || back[at * count + next] || seen[next]) {
+      if (next >= count || next == avoid || seen[next]) {
         continue;
       }
       seen[next] = 1;
@@ -279,6 +312,22 @@ static const IRInstruction *defines_temp(const IRBasicBlock *block,
   return NULL;
 }
 
+/* A temp has one definition, so where it was written does not have to be the
+ * block that reads it. A checked increment puts the add and the store either
+ * side of the branch that tests it, and a walk that only looked in one block
+ * would lose the induction variable and call the loop unbounded. */
+static const IRInstruction *defines_temp_anywhere(const IRBasicBlock *blocks,
+                                                  size_t count,
+                                                  const IROperand *temp) {
+  for (size_t b = 0; b < count; b++) {
+    const IRInstruction *found = defines_temp(&blocks[b], temp);
+    if (found) {
+      return found;
+    }
+  }
+  return NULL;
+}
+
 static long long iv_step(const IRBasicBlock *blocks, size_t count,
                          const char *member, const char *iv, int *found) {
   long long step = 0;
@@ -293,10 +342,11 @@ static long long iv_step(const IRBasicBlock *blocks, size_t count,
       if (!operand_is(&insn->dest, iv)) {
         continue;
       }
-      source = insn->op == IR_OP_ASSIGN ? defines_temp(&blocks[b], &insn->lhs)
-                                        : insn;
+      source = insn->op == IR_OP_ASSIGN
+                   ? defines_temp_anywhere(blocks, count, &insn->lhs)
+                   : insn;
       while (source && source->op == IR_OP_CAST) {
-        source = defines_temp(&blocks[b], &source->lhs);
+        source = defines_temp_anywhere(blocks, count, &source->lhs);
       }
       if (!source || source->op != IR_OP_BINARY || !source->text ||
           source->is_float) {
@@ -465,7 +515,14 @@ static long long trips_for(Ctx *ctx, IRFunction *fn,
 static long long compute_cost(Ctx *ctx, IRFunction *fn, int *evidence,
                               FILE *report) {
   size_t count = 0;
-  const IRBasicBlock *blocks = ir_function_blocks(fn, &count);
+  const IRBasicBlock *blocks = NULL;
+  /* Rebuild rather than trust the cached graph. A pass that rewrote an
+   * instruction in place left cfg_valid set, and the block pointers went
+   * stale the moment one of them grew the instruction array. Costing a
+   * function through stale blocks reads instructions that are no longer
+   * there, which is how a checked build came to price a loop at nothing. */
+  ir_function_clear_cfg(fn);
+  blocks = ir_function_blocks(fn, &count);
   long long *weight = NULL;
   int *back = NULL;
   char *member = NULL;
@@ -507,13 +564,12 @@ static long long compute_cost(Ctx *ctx, IRFunction *fn, int *evidence,
     size_t best_size = (size_t)-1;
     for (size_t u = 0; u < count; u++) {
       for (size_t h = 0; h < count; h++) {
-        size_t size = 0;
+        size_t size = 1;
         if (back[u * count + h] != 1) {
           continue;
         }
         for (size_t b = 0; b < count; b++) {
-          if (reaches(blocks, count, h, b, back, seen) &&
-              reaches(blocks, count, b, u, back, seen)) {
+          if (b != h && reaches(blocks, count, b, u, h, seen)) {
             size++;
           }
         }
@@ -535,9 +591,10 @@ static long long compute_cost(Ctx *ctx, IRFunction *fn, int *evidence,
                                   ? blocks[best_header].instructions[0].location
                                   : fn->location;
       memset(member, 0, count);
+      member[best_header] = 1;
       for (size_t b = 0; b < count; b++) {
-        if (reaches(blocks, count, best_header, b, back, seen) &&
-            reaches(blocks, count, b, best_source, back, seen)) {
+        if (b != best_header &&
+            reaches(blocks, count, b, best_source, best_header, seen)) {
           member[b] = 1;
         }
       }
@@ -700,8 +757,10 @@ static int instrument_function(Ctx *ctx, IRFunction *fn, long long proven) {
   }
   {
     size_t count = 0;
-    const IRBasicBlock *blocks = ir_function_blocks(fn, &count);
+    const IRBasicBlock *blocks = NULL;
     long long *weight = NULL;
+    ir_function_clear_cfg(fn);
+    blocks = ir_function_blocks(fn, &count);
     if (!blocks || count == 0) {
       return 1;
     }
@@ -739,7 +798,8 @@ static int instrument_function(Ctx *ctx, IRFunction *fn, long long proven) {
 }
 
 int ir_deadline_run(IRProgram *program, ErrorReporter *reporter,
-                    const IRDeadlineCosts *costs, int instrument, FILE *report,
+                    const IRDeadlineCosts *costs, int instrument,
+                    int instrumented, FILE *report,
                     IRDeadlineStats *stats) {
   Ctx ctx;
   IRDeadlineStats local;
@@ -808,6 +868,19 @@ int ir_deadline_run(IRProgram *program, ErrorReporter *reporter,
                "'%s' declares a deadline of %lld cycles, and its longest path "
                "costs %lld on this target",
                fn->name ? fn->name : "?", fn->deadline_cycles, proven);
+      if (instrumented) {
+        if (reporter) {
+          error_reporter_add_warning_with_suggestion(
+              reporter, ERROR_SEMANTIC, fn->location, message,
+              "this build carries run-time checks the deadline was not "
+              "declared against, and they are on the path; build without "
+              "them, or declare what the checked build costs");
+          error_reporter_set_last_code(reporter, "D0001");
+        } else {
+          fprintf(stderr, "warning[D0001]: %s\n", message);
+        }
+        continue;
+      }
       if (reporter) {
         error_reporter_add_error_with_suggestion(
             reporter, ERROR_SEMANTIC, fn->location, message,

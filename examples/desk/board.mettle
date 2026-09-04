@@ -1,0 +1,29 @@
+import "std/target";
+
+export const TARGET: TargetDesc = {
+  name: "x86_64-windows",
+  arch: "x86_64",
+  os: "windows",
+  format: "coff",
+  pointer_bits: 64,
+  stack_alignment: 16,
+  shadow_space: 32,
+  red_zone: 0,
+  int_args: ["rcx", "rdx", "r8", "r9"],
+  float_args: ["xmm0", "xmm1", "xmm2", "xmm3"],
+  indirect_return: "rcx",
+  separate_classes: false,
+  widths: [8, 16, 32, 64],
+  vector_width: 256,
+  address_spaces: [],
+  cost_op: 1,
+  cost_load: 12,
+  cost_store: 1,
+  cost_branch: 1,
+  cost_multiply: 8,
+  cost_multiply_float: 4,
+  cost_divide: 60,
+  cost_divide_float: 14,
+  cost_call: 10,
+  cost_allocate: 120
+};

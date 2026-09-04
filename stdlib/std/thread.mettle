@@ -12,18 +12,18 @@ export fn WAIT_FAILED() -> uint32 { return 0xFFFFFFFF; }
 // Thread creation and synchronization
 // lpStartAddress: Win32 thread proc fn(LPVOID) -> DWORD
 export extern fn CreateThread(lpThreadAttributes: cstring, dwStackSize: uint64, lpStartAddress: fn(cstring) -> uint32, lpParameter: cstring, dwCreationFlags: uint32, lpThreadId: uint32*) -> int64 = "CreateThread";
-export extern fn CloseHandle(hObject: int64) -> int32 = "CloseHandle";
-export extern fn WaitForSingleObject(hHandle: int64, dwMilliseconds: uint32) -> uint32 = "WaitForSingleObject";
-export extern fn GetCurrentThreadId() -> uint32 = "GetCurrentThreadId";
-export extern fn Sleep(dwMilliseconds: uint32) = "Sleep";
+export extern fn CloseHandle(hObject: int64) -> int32 with none = "CloseHandle";
+export extern fn WaitForSingleObject(hHandle: int64, dwMilliseconds: uint32) -> uint32 with none = "WaitForSingleObject";
+export extern fn GetCurrentThreadId() -> uint32 with none = "GetCurrentThreadId";
+export extern fn Sleep(dwMilliseconds: uint32) with none = "Sleep";
 export extern fn CreateMutexA(lpMutexAttributes: cstring, bInitialOwner: int32, lpName: cstring) -> int64 = "CreateMutexA";
-export extern fn ReleaseMutex(hMutex: int64) -> int32 = "ReleaseMutex";
+export extern fn ReleaseMutex(hMutex: int64) -> int32 with none = "ReleaseMutex";
 
 // Interlocked atomics
-export extern fn InterlockedCompareExchange(target: int32*, exchange: int32, comparand: int32) -> int32 = "mettle_atomic_compare_exchange_i32";
-export extern fn InterlockedExchange(target: int32*, value: int32) -> int32 = "mettle_atomic_exchange_i32";
-export extern fn InterlockedIncrement(target: int32*) -> int32 = "mettle_atomic_inc_i32";
-export extern fn InterlockedDecrement(target: int32*) -> int32 = "mettle_atomic_dec_i32";
+export extern fn InterlockedCompareExchange(target: int32*, exchange: int32, comparand: int32) -> int32 with none = "mettle_atomic_compare_exchange_i32";
+export extern fn InterlockedExchange(target: int32*, value: int32) -> int32 with none = "mettle_atomic_exchange_i32";
+export extern fn InterlockedIncrement(target: int32*) -> int32 with none = "mettle_atomic_inc_i32";
+export extern fn InterlockedDecrement(target: int32*) -> int32 with none = "mettle_atomic_dec_i32";
 
 export fn thread_close(handle: int64) -> int32 {
   return CloseHandle(handle);
