@@ -4476,6 +4476,90 @@ catch {
   Write-CaseResult -Name "abstraction_examples" -Passed $false -Reason $_.Exception.Message
 }
 
+# A calling convention chosen entirely in data, on a real architecture.
+# Enforce: an aarch64 description may reorder the integer argument registers
+# and shorten the list, a description naming a register that cannot carry an
+# argument or naming one twice is refused, the emitted code actually differs
+# from the architecture's own order, and every version gives the same answer
+# under an emulated AArch64 CPU.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $convDir = Join-Path $tmpDir "arm64conv"
+  New-Item -ItemType Directory -Force -Path $convDir | Out-Null
+  $plain = Join-Path $convDir "plain.elf"
+  $reversed = Join-Path $convDir "reversed.elf"
+  $narrow = Join-Path $convDir "narrow.elf"
+  $out = & $CompilerPath --emit-arm64 "tests/arm64_convention_probe.mettle" -o $plain 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the built-in convention failed to emit: $out" }
+  $out = & $CompilerPath --emit-arm64 "tests/arm64_convention_probe.mettle" -o $reversed --target "tests/arm64_reversed_target.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a reversed argument order was refused: $out" }
+  $out = & $CompilerPath --emit-arm64 "tests/arm64_convention_probe.mettle" -o $narrow --target "tests/arm64_narrow_target.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a four-register convention was refused: $out" }
+
+  $a = [System.IO.File]::ReadAllBytes($plain)
+  $b = [System.IO.File]::ReadAllBytes($reversed)
+  $c = [System.IO.File]::ReadAllBytes($narrow)
+  $differs = $false
+  for ($i = 0; $i -lt [Math]::Min($a.Length, $b.Length); $i++) {
+    if ($a[$i] -ne $b[$i]) { $differs = $true; break }
+  }
+  if (-not $differs) { throw "a described argument order changed nothing in the emitted code" }
+  $differs = $false
+  for ($i = 0; $i -lt [Math]::Min($a.Length, $c.Length); $i++) {
+    if ($a[$i] -ne $c[$i]) { $differs = $true; break }
+  }
+  if (-not $differs) { throw "a four-register convention changed nothing in the emitted code" }
+
+  $broken = Join-Path $convDir "outside.mettle"
+  $source = Get-Content "tests/arm64_reversed_target.mettle" -Raw
+  Set-Content -Path $broken -Value ($source -replace '"x7", "x6"', '"x9", "x6"') -Encoding UTF8
+  $out = & $CompilerPath --emit-arm64 "tests/arm64_convention_probe.mettle" -o (Join-Path $convDir "outside.elf") --target $broken 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a register that cannot carry an argument was accepted" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "cannot carry an integer argument") { throw "the bad register was not named: $out" }
+
+  $twice = Join-Path $convDir "twice.mettle"
+  Set-Content -Path $twice -Value ($source -replace '"x7", "x6"', '"x7", "x7"') -Encoding UTF8
+  $out = & $CompilerPath --emit-arm64 "tests/arm64_convention_probe.mettle" -o (Join-Path $convDir "twice.elf") --target $twice 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a register listed twice was accepted" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "listed twice") { throw "the repeated register was not named: $out" }
+
+  $xr = Join-Path $convDir "xr.mettle"
+  Set-Content -Path $xr -Value ($source -replace 'indirect_return: "x8"', 'indirect_return: "x0"') -Encoding UTF8
+  $out = & $CompilerPath --emit-arm64 "tests/arm64_convention_probe.mettle" -o (Join-Path $convDir "xr.elf") --target $xr 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "an indirect return the architecture fixes was rewritten" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "which the architecture fixes") { throw "the indirect return was not defended: $out" }
+
+  Set-Content -Path (Join-Path $convDir "manifest.txt") -Value "plain 42`nreversed 42`nnarrow 42" -Encoding ASCII
+  $wsl = Get-Command wsl -ErrorAction SilentlyContinue
+  if ($wsl -and $convDir -match '^[A-Za-z]:\\') {
+    $toWsl = {
+      param($p)
+      "/mnt/" + $p.Substring(0, 1).ToLower() + ($p.Substring(2) -replace '\\', '/')
+    }
+    $wslScript = & $toWsl (Resolve-Path (Join-Path $PSScriptRoot "arm64_qemu_run.sh")).Path
+    $runOut = & wsl bash $wslScript (& $toWsl $convDir) 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    if ($code -eq 0) {
+      Write-Host ($runOut.Trim())
+    }
+    elseif ($code -eq 64) {
+      Write-Host "[SKIP] arm64 convention execution (qemu-aarch64 not found; the descriptions were checked and the code differs)"
+    }
+    else {
+      throw "a described convention gave the wrong answer under qemu:`n$runOut"
+    }
+  }
+  Write-CaseResult -Name "arm64_convention_described_in_data" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "arm64_convention_described_in_data" -Passed $false -Reason $_.Exception.Message
+}
+
 # A machine that does not exist, described in Mettle, assembled to its own
 # encoding and run. Enforce: `mettle machine` prints the description, `mettle
 # emulate` assembles the program, decodes it back, runs each instruction's

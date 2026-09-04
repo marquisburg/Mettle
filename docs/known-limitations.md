@@ -53,6 +53,22 @@ mismatch against `fn(...)`.
 Omitted struct fields and short array literals leave the rest zero. Extra
 elements, unknown field names, and repeated field names are errors.
 
+## Described calling conventions
+
+A freestanding x86_64 or aarch64 target chooses its integer argument
+registers. Nothing else about the convention is chosen: the float argument
+registers, the callee-saved set, the indirect-return register, the stack
+slot size and the frame layout are the emitter's, and a description that
+tries to rewrite one is refused rather than ignored. A hosted target chooses
+nothing at all, because the code on the other side of every `extern` call
+never read the description.
+
+A described convention is proven to reach the code by the emitted bytes
+differing and the program still giving the right answer under an emulated
+CPU. That is evidence about this compiler's output, not a claim that the
+convention interoperates with anything else: a program built with one is
+self-consistent and calls nothing built with another.
+
 ## Described machines
 
 A described machine is one a program is written for and run on. It is not one

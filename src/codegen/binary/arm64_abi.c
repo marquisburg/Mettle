@@ -40,7 +40,55 @@ static const Arm64Abi AAPCS64 = {
     ARM64_X18,          /* platform (reserved) */
 };
 
-const Arm64Abi *arm64_aapcs64(void) { return &AAPCS64; }
+static Arm64Reg g_gp_args[8] = {ARM64_X0, ARM64_X1, ARM64_X2, ARM64_X3,
+                                ARM64_X4, ARM64_X5, ARM64_X6, ARM64_X7};
+static Arm64Abi g_abi;
+static int g_abi_ready;
+
+static const Arm64Abi *arm64_abi(void) {
+  if (!g_abi_ready) {
+    g_abi = AAPCS64;
+    g_abi.gp_arg_regs = g_gp_args;
+    g_abi.gp_arg_count = COUNT(g_gp_args);
+    g_abi_ready = 1;
+  }
+  return &g_abi;
+}
+
+const Arm64Abi *arm64_aapcs64(void) { return arm64_abi(); }
+
+int arm64_abi_set_gp_args(const Arm64Reg *regs, int count) {
+  int i;
+  int j;
+  if (!regs || count < 1 || count > COUNT(g_gp_args)) {
+    return 0;
+  }
+  for (i = 0; i < count; i++) {
+    if (regs[i] > ARM64_X7) {
+      return 0;
+    }
+    for (j = 0; j < i; j++) {
+      if (regs[j] == regs[i]) {
+        return 0;
+      }
+    }
+  }
+  (void)arm64_abi();
+  for (i = 0; i < count; i++) {
+    g_gp_args[i] = regs[i];
+  }
+  g_abi.gp_arg_count = count;
+  return 1;
+}
+
+void arm64_abi_reset(void) {
+  int i;
+  (void)arm64_abi();
+  for (i = 0; i < COUNT(g_gp_args); i++) {
+    g_gp_args[i] = (Arm64Reg)i;
+  }
+  g_abi.gp_arg_count = COUNT(g_gp_args);
+}
 
 int arm64_reg_is_callee_saved(Arm64Reg r) {
   return (r >= ARM64_X19 && r <= ARM64_X28) || r == ARM64_X29;
@@ -54,8 +102,12 @@ int arm64_reg_is_volatile(Arm64Reg r) {
 }
 
 int arm64_reg_arg_index(Arm64Reg r) {
-  if (r >= ARM64_X0 && r <= ARM64_X7) {
-    return (int)r;
+  const Arm64Abi *abi = arm64_abi();
+  int i;
+  for (i = 0; i < abi->gp_arg_count; i++) {
+    if (abi->gp_arg_regs[i] == r) {
+      return i;
+    }
   }
   return -1;
 }
@@ -76,7 +128,7 @@ int arm64_compute_arg_layout(const int *is_float, int count,
     return 0;
   }
 
-  const Arm64Abi *abi = &AAPCS64;
+  const Arm64Abi *abi = arm64_abi();
   int gp_used = 0;
   int vec_used = 0;
   int stack_cursor = 0;

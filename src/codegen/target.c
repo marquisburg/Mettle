@@ -1,5 +1,6 @@
 #include "target.h"
 #include "binary/internal.h"
+#include "binary/arm64.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -450,7 +451,9 @@ int mtlc_target_describe(const MtlcTargetDescription *description, char *error,
              "GPU targets, which are not described this way");
     return 0;
   }
-  if (entry->os != MTLC_TARGET_OS_NONE || entry->arch != MTLC_TARGET_ARCH_X86_64) {
+  if (entry->os != MTLC_TARGET_OS_NONE ||
+      (entry->arch != MTLC_TARGET_ARCH_X86_64 &&
+       entry->arch != MTLC_TARGET_ARCH_AARCH64)) {
     if (!convention_matches(description, &builtin)) {
       snprintf(error, error_size,
                entry->os != MTLC_TARGET_OS_NONE
@@ -549,6 +552,62 @@ int mtlc_target_describe(const MtlcTargetDescription *description, char *error,
                  triple, builtin.red_zone, description->red_zone);
         return 0;
       }
+    }
+    if (entry->arch == MTLC_TARGET_ARCH_AARCH64) {
+      Arm64Reg gp[MTLC_TARGET_DESC_MAX_REGS];
+      if (description->int_arg_count == 0 || description->int_arg_count > 8) {
+        snprintf(error, error_size,
+                 "an aarch64 convention passes between 1 and 8 integer "
+                 "arguments in registers; the description lists %zu",
+                 description->int_arg_count);
+        return 0;
+      }
+      for (i = 0; i < description->int_arg_count; i++) {
+        const char *name = description->int_args[i];
+        int value = -1;
+        if (name[0] == 'x' && name[1] >= '0' && name[1] <= '7' && !name[2]) {
+          value = name[1] - '0';
+        }
+        if (value < 0) {
+          snprintf(error, error_size,
+                   "`%s` cannot carry an integer argument: the argument "
+                   "registers are drawn from x0 to x7",
+                   name);
+          return 0;
+        }
+        gp[i] = (Arm64Reg)value;
+        for (j = 0; j < i; j++) {
+          if (gp[j] == gp[i]) {
+            snprintf(error, error_size,
+                     "`%s` is listed twice among the integer argument "
+                     "registers",
+                     name);
+            return 0;
+          }
+        }
+      }
+      if (!names_equal(description->float_args, description->float_arg_count,
+                       builtin.float_args, builtin.float_arg_count)) {
+        snprintf(error, error_size,
+                 "the aarch64 emitter passes floats in v0 to v7 and does not "
+                 "vary that; only the integer argument registers are chosen "
+                 "here");
+        return 0;
+      }
+      if (strcmp(description->indirect_return, builtin.indirect_return) != 0) {
+        snprintf(error, error_size,
+                 "an aarch64 indirect return is `%s`, which the architecture "
+                 "fixes; the description says `%s`",
+                 builtin.indirect_return, description->indirect_return);
+        return 0;
+      }
+      if (!arm64_abi_set_gp_args(gp, (int)description->int_arg_count)) {
+        snprintf(error, error_size,
+                 "the emitter would not take this integer argument order");
+        return 0;
+      }
+    } else {
+      arm64_abi_reset();
     }
     g_target.arch = entry->arch;
     g_target.os = entry->os;

@@ -5988,7 +5988,13 @@ int load_target_description(CompilerOptions *options) {
     fprintf(stderr, "Error: target description '%s': %s\n", path, error);
     goto done;
   }
-  if (mtlc_target()->arch == MTLC_TARGET_ARCH_AARCH64) {
+  /* A described aarch64 target reaches the emitter as an object by default,
+   * which is what it could do before a description could choose anything
+   * about the convention. `--emit-arm64` asks for the self-contained
+   * executable instead, and that is now a choice worth honouring: it is what
+   * lets a described argument order be run rather than only inspected. */
+  if (mtlc_target()->arch == MTLC_TARGET_ARCH_AARCH64 &&
+      !options->emit_arm64) {
     options->emit_arm64_obj = 1;
   }
   ok = 1;

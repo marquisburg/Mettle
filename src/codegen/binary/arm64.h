@@ -202,6 +202,12 @@ typedef struct {
 } Arm64Abi;
 
 const Arm64Abi *arm64_aapcs64(void);
+/* The integer argument registers a described target chose, as a permutation
+ * or a prefix of x0..x7. Returns 0 for a list with a duplicate, a register
+ * outside x0..x7, or a length outside 1..8. arm64_abi_reset() puts the
+ * built-in AAPCS64 order back, which is what every undescribed build uses. */
+int arm64_abi_set_gp_args(const Arm64Reg *regs, int count);
+void arm64_abi_reset(void);
 
 int arm64_reg_is_callee_saved(Arm64Reg r);
 int arm64_reg_is_volatile(Arm64Reg r);

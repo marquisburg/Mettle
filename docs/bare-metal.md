@@ -312,6 +312,28 @@ described.
 `--report-target` prints the description in effect, built-in or described, so
 a build can be read back as the machine it was made for.
 
+A freestanding aarch64 target chooses its integer argument registers the same
+way, as a reordering, a shortening, or both:
+
+```mettle
+int_args: ["x3", "x2", "x1", "x0"],
+```
+
+That is a convention no ARM document describes: four registers, reversed, with
+everything past the fourth on the stack. It reaches the emitted code, which is
+the whole of the claim and is checked rather than asserted. The build with the
+described order and the build with the architecture's own order are different
+bytes, and both give the same answer under an emulated AArch64 CPU, which is
+what `arm64_convention_described_in_data` runs on every build where a
+`qemu-aarch64` is reachable and reports as skipped where one is not.
+
+A register outside x0 to x7 cannot carry an integer argument, no register may
+appear twice, and the indirect-return register is `x8` because the
+architecture fixes it; each is refused and told which fact it contradicted.
+The float argument registers are `v0` to `v7` and the callee-saved set is per
+architecture; neither is chosen here, and a description that tries is refused
+rather than quietly ignored.
+
 This is the reachable half of a larger claim. Handing out the description
 keeps the machinery, and every concept above arrived by editing that
 machinery: `kernel`, `@interrupt`, the 16-bit mode, a new object format. A

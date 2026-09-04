@@ -1,0 +1,19 @@
+import "std/target";
+
+export const TARGET: TargetDesc = {
+  name: "aarch64-none",
+  arch: "aarch64",
+  os: "none",
+  format: "elf",
+  pointer_bits: 64,
+  stack_alignment: 16,
+  shadow_space: 0,
+  red_zone: 0,
+  int_args: ["x3", "x2", "x1", "x0"],
+  float_args: ["v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"],
+  indirect_return: "x8",
+  separate_classes: true,
+  widths: [8, 16, 32, 64],
+  vector_width: 128,
+  address_spaces: []
+};

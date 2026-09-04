@@ -927,8 +927,10 @@ only where proven.
   it back to check the description agrees with itself, and running it through
   the semantics functions the description names, `--target desc.mettle` builds for a
   described one, and a printed description fed back reproduces the built-in
-  target byte for byte on every triple. A freestanding x86_64 target chooses
-  its calling convention; a hosted one cannot rewrite the platform's, and a
+  target byte for byte on every triple. A freestanding x86_64 or aarch64 target chooses
+  its integer argument registers, and the aarch64 choice is proven to reach
+  the code by the bytes differing and the program still answering correctly
+  on an emulated CPU; a hosted one cannot rewrite the platform's, and a
   description that claims what the emitter cannot honour is refused and told
   which fact it contradicted. Whether a description is enough for a genuinely
   new machine remains unproven, and is said to be.
