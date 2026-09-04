@@ -272,6 +272,17 @@ happened.
 Unreachable-code analysis is block-local and conservative. Some dead paths in
 complex control flow are not diagnosed.
 
+Mettle emits no integer overflow check, so a declared range has none to delete;
+what a range earns is the bounds check and the divide. Two pointers cannot be
+declared disjoint, so a vectorizer that refuses over a possible overlap cannot
+be given a proof to proceed on; it refuses rather than emitting a run-time
+overlap test, so there is no test for a proof to remove either.
+
+A float accumulator carries a declared bound only where the compiler bounded
+the loop's trip count, which means a counter with a constant initialiser, a
+constant step and a constant limit. A loop over a runtime length gives the
+accumulator no bound, so a declared type on it is refused.
+
 The interpreter watches every declared-`@pure` and every inferred read-only
 frame under `mettle test` and traps on a write inside one, but that watch can
 only confirm the static proof: purity is proven by refusing every operation

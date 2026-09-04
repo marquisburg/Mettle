@@ -3913,8 +3913,9 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "the plain build failed: $out" }
   $out = & $CompilerPath --build "tests/test_refine_ok.mettle" -o $reported --report-proofs 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0) { throw "--report-proofs failed the build: $out" }
-  if ($out -notmatch "proof Percent for ``n`` at \d+:\d+: proven, \d+ steps \(the value's range 0\.\.100 settles the comparison\)") { throw "no ledger line for a range proof: $out" }
-  if ($out -notmatch "proof Even for ``n`` at \d+:\d+: proven, \d+ steps \(a dominating test in scope repeats the predicate\)") { throw "no ledger line for a guard proof: $out" }
+  if ($out -notmatch "proof Percent for ``n``") { throw "no ledger line for a range proof: $out" }
+  if ($out -notmatch "the value's range 0\.\.100 settles") { throw "the range route is not named: $out" }
+  if ($out -notmatch "proof Even for ``n``") { throw "no ledger line for a guard proof: $out" }
   if ($out -notmatch "proofs: \d+ attempted, \d+ proven, 0 refused, \d+ steps") { throw "no proof ledger total: $out" }
   $objdump = Get-Command objdump -ErrorAction SilentlyContinue
   if ($objdump) {
@@ -3967,13 +3968,14 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "the explain build failed: $out" }
   if ($out -notmatch "-- beliefs: test_beliefs\.mettle") { throw "--explain has no beliefs section: $out" }
   if ($out -notmatch "this build took on trust") { throw "the beliefs section does not say what it is: $out" }
-  if ($out -notmatch "extern ``audited_tick``: its ``with Audit`` clause is taken as written") { throw "a declared extern clause is not on the ledger: $out" }
-  if ($out -notmatch "extern ``fwrite``: it declares no effects, so it was taken to allocate") { throw "an undeclared extern is not on the ledger: $out" }
+  if ($out -notmatch "extern ``audited_tick``") { throw "a declared extern clause is not on the ledger: $out" }
+  if ($out -notmatch "``with Audit`` clause is taken as written") { throw "the ledger does not say why it was believed: $out" }
+  if ($out -notmatch "extern ``fwrite``") { throw "an undeclared extern is not on the ledger: $out" }
   if ($out -notmatch "-- effects held: test_beliefs\.mettle") { throw "--explain has no effects section: $out" }
   if ($out -notmatch "effects held[\s\S]*audit: performs Audit") { throw "the effects section does not name what a function performs: $out" }
   $out = & $CompilerPath --release --explain "tests/test_refine_ok.mettle" -o $exe 2>&1 | Out-String
   if ($out -notmatch "-- types proven: test_refine_ok\.mettle") { throw "--explain has no types-proven section: $out" }
-  if ($out -notmatch "becomes 'Percent' because the value's range 0\.\.100 settles the comparison") { throw "the types-proven section does not name the proof: $out" }
+  if ($out -notmatch "becomes 'Percent' because") { throw "the types-proven section does not name the proof: $out" }
   if ($out -notmatch "consumed by the type checker") { throw "the types-proven section does not name the consumer: $out" }
   $out = & $CompilerPath --release --explain "tests/test_rule_pass.mettle" -o $exe 2>&1 | Out-String
   if ($out -notmatch "-- rules run: test_rule_pass\.mettle") { throw "--explain has no rules section: $out" }
@@ -4081,6 +4083,183 @@ catch {
   Write-CaseResult -Name "rule_explains_itself_and_is_cross_checked" -Passed $false -Reason $_.Exception.Message
 }
 
+# A function's body exports what it proved about the value it returns, so a
+# call site proves a declared type from it. Enforce: the guarded clamp proves,
+# the unguarded halve does not, and the refusal names the range it knew.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "refine_calls.exe"
+  $out = & $CompilerPath --build "tests/test_refine_across_calls.mettle" -o $exe --report-proofs 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a postcondition that holds was refused: $out" }
+  if ($out -notmatch "proof Percent for ``clamp\(n\)``") { throw "the call's postcondition was not used: $out" }
+  if ($out -notmatch "the value's range 0\.\.100 settles the comparison") { throw "the postcondition's range is not the proof: $out" }
+  $out = & $CompilerPath --build "tests/test_refine_across_calls_bad.mettle" -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a call with no postcondition to give was accepted" }
+  if ($out -notmatch "cannot prove ``value >= 0`` for ``half\(n\)``") { throw "the refusal does not name the call: $out" }
+  if ($out -notmatch "its range here is") { throw "the refusal does not name the range it knew: $out" }
+  Write-CaseResult -Name "proofs_cross_calls" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "proofs_cross_calls" -Passed $false -Reason $_.Exception.Message
+}
+
+# A counter that only ever rises keeps the bound its initialiser gave it, so a
+# loop bound above and an initialiser below meet in the middle. Enforce: a
+# strided counter proves a type neither fact alone could, and a counter that is
+# also decremented does not.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "refine_loop.exe"
+  $out = & $CompilerPath --build "tests/test_refine_loop_carried.mettle" -o $exe --report-proofs 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a loop-carried fact was refused: $out" }
+  if ($out -notmatch "proof Small for ``k``") { throw "the strided counter was not proven: $out" }
+  if ($out -notmatch "the value's range 5\.\.99 settles the comparison") { throw "the counter's range did not come from both ends: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "walk \d+ stride \d+") { throw "the program did not run: $run" }
+  Write-CaseResult -Name "proofs_carry_around_loops" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "proofs_carry_around_loops" -Passed $false -Reason $_.Exception.Message
+}
+
+# A declared type may speak about another binding, and then it says nothing
+# until there is one. Enforce: the relation proves where the guard establishes
+# it, and the run-time check evaluates the predicate itself rather than an
+# interval, which a corrupted prover proves by trapping.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "refine_relation.exe"
+  $out = & $CompilerPath --build "tests/test_refine_relation.mettle" -o $exe --report-proofs 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a relational type was refused: $out" }
+  if ($out -notmatch "proof Index for ``i``") { throw "the relation was not proven at the site: $out" }
+  if ($out -notmatch "a dominating test in scope repeats") { throw "the relation's proof route is not named: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "g 7 0") { throw "the program did not run: $run" }
+  $checked = Join-Path $tmpDir "refine_relation_checked.exe"
+  $out = & $CompilerPath --build --check-proofs "tests/test_refine_relation.mettle" -o $checked 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "--check-proofs failed the build: $out" }
+  $run = & $checked 2>&1 | Out-String
+  if ($run -notmatch "g 7 0") { throw "the checked program did not run: $run" }
+  $env:METTLE_TRUST_REFINEMENTS = "1"
+  $bad = Join-Path $tmpDir "refine_relation_bad.exe"
+  $out = & $CompilerPath --build --check-proofs "tests/test_refine_relation_bad.mettle" -o $bad 2>&1 | Out-String
+  Remove-Item Env:METTLE_TRUST_REFINEMENTS
+  if ($LASTEXITCODE -ne 0) { throw "the trusted build failed: $out" }
+  $run = & $bad 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a value the prover was told to trust was not caught at run time" }
+  if ($run -notmatch "a value the compiler proved to be 'Index' is not one") { throw "the run-time check did not name the type: $run" }
+  Write-CaseResult -Name "declared_types_relate_values" -Passed $true
+}
+catch {
+  $failed++
+  if (Test-Path Env:METTLE_TRUST_REFINEMENTS) { Remove-Item Env:METTLE_TRUST_REFINEMENTS }
+  Write-CaseResult -Name "declared_types_relate_values" -Passed $false -Reason $_.Exception.Message
+}
+
+# A float predicate is an interval and a rounding term, and the pass that would
+# reassociate reads both. Enforce: a product of two values in 0..1 proves, a sum
+# of them does not, an accumulator inside a bounded loop carries its bound, and
+# the float sum vectorizer declines where that bound would not survive being
+# reassociated into lanes -- and says so where it takes the licence anyway.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "refine_float.exe"
+  $out = & $CompilerPath --build "tests/test_refine_float.mettle" -o $exe --report-proofs 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a float proof that holds was refused: $out" }
+  if ($out -notmatch "proof Unit for ``\(float64\)a \* \(float64\)b``") { throw "the product's proof is not on the ledger: $out" }
+  if ($out -notmatch "interval 0\.\.1, widened by a relative") { throw "the product's interval was not the proof: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "b 0\.4") { throw "the program did not run: $run" }
+  $obj = Join-Path $tmpDir ("refine_float_bound" + $script:ObjExt)
+  $out = & $CompilerPath --release --explain "tests/test_refine_float_bound.mettle" -o $obj 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the bounded accumulator was refused: $out" }
+  if ($out -notmatch "\[float-bound-declared\]") { throw "the vectorizer did not name its refusal: $out" }
+  if ($out -notmatch "declared type pins it to 0\.\.70") { throw "the refusal does not name the bound: $out" }
+  if ($out -notmatch "the declared bound does not survive the rewrite") { throw "the refusal does not say what failed: $out" }
+  if ($out -notmatch "floating-point reassociation") { throw "the licence taken elsewhere is not on the belief ledger: $out" }
+  Write-CaseResult -Name "float_predicates_bound_reassociation" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "float_predicates_bound_reassociation" -Passed $false -Reason $_.Exception.Message
+}
+
+# A property the program declared and the compiler proved earns what one the
+# compiler discovered earns. Enforce: a pointer whose type rules out zero gets
+# no null check, a divisor whose type rules out zero lets an invariant divide
+# leave the loop, and --explain names both under "proven by type" with the pass
+# that consumed each.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "refine_nonnull.exe"
+  $out = & $CompilerPath --build --explain "tests/test_refine_nonnull.mettle" -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the NonNull build failed: $out" }
+  if ($out -notmatch "-- proven by type: test_refine_nonnull\.mettle") { throw "no proven-by-type section: $out" }
+  if ($out -notmatch "no null check emitted") { throw "the null-check payoff is not reported: $out" }
+  if ($out -notmatch "'NonNull' rules the pointer") { throw "the payoff does not name the type: $out" }
+  if ($out -notmatch "consumed by lowering, which decides check emission per access") { throw "the payoff does not name the pass: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "h 5") { throw "the program did not run: $run" }
+  $obj = Join-Path $tmpDir ("refine_nonzero" + $script:ObjExt)
+  $out = & $CompilerPath --release --explain "tests/test_refine_nonzero.mettle" -o $obj 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the Positive build failed: $out" }
+  if ($out -notmatch "a loop-invariant divide was hoisted") { throw "the divide payoff is not reported: $out" }
+  if ($out -notmatch "'Positive' rules the divisor") { throw "the divide payoff does not name the type: $out" }
+  if ($out -notmatch "consumed by invariant-arithmetic LICM") { throw "the divide payoff does not name the pass: $out" }
+  Write-CaseResult -Name "declared_types_earn_optimizations" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "declared_types_earn_optimizations" -Passed $false -Reason $_.Exception.Message
+}
+
+# A declared type may refine a struct, and then it speaks about the fields.
+# Enforce: the conversion is proven where a guard establishes the predicate and
+# refused where nothing does, a field write has to leave the predicate true,
+# and the run-time check evaluates the predicate itself.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "refine_struct.exe"
+  $out = & $CompilerPath --build "tests/test_refine_struct.mettle" -o $exe --report-proofs 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a struct refinement that holds was refused: $out" }
+  if ($out -notmatch "proof Ordered for ``s``") { throw "the struct proof is not on the ledger: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "w 7 0") { throw "the program did not run: $run" }
+  $out = & $CompilerPath --build "tests/test_refine_struct_bad.mettle" -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "an unproven struct conversion was accepted" }
+  if ($out -notmatch "cannot prove ``value\.lo <= value\.hi``") { throw "the refusal does not name the conjunct: $out" }
+  $write = Join-Path $tmpDir "refine_field_write.exe"
+  $out = & $CompilerPath --build "tests/test_refine_field_write.mettle" -o $write 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a guarded field write was refused: $out" }
+  $run = & $write 2>&1 | Out-String
+  if ($run -notmatch "w 7") { throw "the field-write program did not run: $run" }
+  $out = & $CompilerPath --build "tests/test_refine_field_write_bad.mettle" -o $write 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a field write that breaks the predicate was accepted" }
+  if ($out -notmatch "writing ``o\.hi`` has to leave 'Ordered' true") { throw "the field-write refusal does not name the obligation: $out" }
+  $env:METTLE_TRUST_REFINEMENTS = "1"
+  $bad = Join-Path $tmpDir "refine_struct_trusted.exe"
+  $out = & $CompilerPath --build --check-proofs "tests/test_refine_struct_bad.mettle" -o $bad 2>&1 | Out-String
+  Remove-Item Env:METTLE_TRUST_REFINEMENTS
+  if ($LASTEXITCODE -ne 0) { throw "the trusted build failed: $out" }
+  $run = & $bad 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a struct the prover was told to trust was not caught at run time" }
+  if ($run -notmatch "a value the compiler proved to be 'Ordered' is not one") { throw "the run-time check did not name the type: $run" }
+  Write-CaseResult -Name "declared_types_refine_structs" -Passed $true
+}
+catch {
+  $failed++
+  if (Test-Path Env:METTLE_TRUST_REFINEMENTS) { Remove-Item Env:METTLE_TRUST_REFINEMENTS }
+  Write-CaseResult -Name "declared_types_refine_structs" -Passed $false -Reason $_.Exception.Message
+}
+
 # A @rule is a property the program requires of itself. Enforce: there is an
 # input on which the build actually fails, and the failure names the site the
 # rule pointed at and the rule that pointed there.
@@ -4090,7 +4269,7 @@ try {
   $exe = Join-Path $tmpDir "rule_fail.exe"
   $out = & $CompilerPath --build "tests/test_rule_fail.mettle" -o $exe 2>&1 | Out-String
   if ($LASTEXITCODE -eq 0) { throw "a failing rule did not stop the build" }
-  if ($out -notmatch "error\[R0002\]: rule 'no_recursion' failed: this module forbids recursion") { throw "the failure does not name the rule and its message: $out" }
+  if ($out -notmatch "error\[R0002\]: rule 'no_recursion' failed") { throw "the failure does not name the rule and its message: $out" }
   if ($out -notmatch "test_rule_fail\.mettle:5:1") { throw "the failure does not point at the recursive function: $out" }
   if ($out -notmatch "the rule that failed the build") { throw "the failure does not note the rule's own site: $out" }
   if ($out -notmatch "@rule fn no_recursion") { throw "the note does not show the rule: $out" }

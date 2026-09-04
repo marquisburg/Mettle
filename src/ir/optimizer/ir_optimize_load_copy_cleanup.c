@@ -1,4 +1,5 @@
 #include "ir_optimize_internal.h"
+#include "../ir_explain_ledger.h"
 
 /* Reads of `sym` in one instruction: lhs/rhs/arguments, plus dest on a STORE
  * (a store's dest is the address operand, which is read, not written). */
@@ -964,10 +965,29 @@ static int ir_row_operand_invariant(const IRFunction *function, size_t lo,
  * Divide and remainder are excluded: they trap on a zero divisor, and hoisting
  * one runs it on iterations the loop would never have taken. The definition
  * moves to the preheader, which dominates every point the original dominated.
- * A header reachable only by a jump has no preheader and is skipped. */
+ * A header reachable only by a jump has no preheader and is skipped.
+ *
+ * A divisor whose declared type rules out zero is the exception, and it is the
+ * only one: the trap the exclusion exists for cannot happen, so the divide
+ * moves like any other arithmetic. The proof is the type's, established by the
+ * prover before any of this ran. */
 #define IR_LICM_MAX_PER_LOOP 8
 
-static int ir_licm_op_is_pure_arith(const IRInstruction *ins) {
+static int ir_licm_divisor_never_zero(const IRFunction *function,
+                                      const IRInstruction *ins) {
+  const char *declared;
+  if (ins->rhs.kind == IR_OPERAND_INT) {
+    return ins->rhs.int_value != 0;
+  }
+  if (ins->rhs.kind != IR_OPERAND_SYMBOL || !ins->rhs.name) {
+    return 0;
+  }
+  declared = ir_function_local_declared_type(function, ins->rhs.name);
+  return ir_type_is_nonzero(declared);
+}
+
+static int ir_licm_op_is_pure_arith(const IRFunction *function,
+                                    const IRInstruction *ins) {
   if (!ins) {
     return 0;
   }
@@ -977,7 +997,22 @@ static int ir_licm_op_is_pure_arith(const IRInstruction *ins) {
   if (ins->op != IR_OP_BINARY || !ins->text) {
     return 0;
   }
-  return strcmp(ins->text, "/") != 0 && strcmp(ins->text, "%") != 0;
+  if (strcmp(ins->text, "/") != 0 && strcmp(ins->text, "%") != 0) {
+    return 1;
+  }
+  if (!ir_licm_divisor_never_zero(function, ins)) {
+    return 0;
+  }
+  if (ir_explain_enabled()) {
+    ir_explain_type_payoff(
+        ins->location.filename, ins->location.line,
+        function ? function->name : NULL,
+        ir_function_local_declared_type(function, ins->rhs.name),
+        "a loop-invariant divide was hoisted out of the loop",
+        "rules the divisor out of being zero, so the trap that keeps a divide "
+        "in place cannot happen; consumed by invariant-arithmetic LICM");
+  }
+  return 1;
 }
 
 static int ir_licm_operand_named(const IROperand *op, const char **name) {
@@ -1107,7 +1142,7 @@ int ir_hoist_invariant_arith_pass(IRFunction *function, int *changed) {
       const char *operands[2];
       size_t operand_count = 0;
       int ok = 1;
-      if (!ir_licm_op_is_pure_arith(ins) ||
+      if (!ir_licm_op_is_pure_arith(function, ins) ||
           ins->dest.kind != IR_OPERAND_TEMP || !ins->dest.name) {
         continue;
       }

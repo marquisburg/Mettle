@@ -1263,6 +1263,7 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
         return 0;
       }
 
+      type_checker_note_return_range(checker, value);
       if (checker->current_function) {
         if (!(func_return_type->kind == TYPE_POINTER &&
               type_checker_is_null_pointer_constant(value)) &&
@@ -1354,12 +1355,16 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
     type_checker_push_loop_label(checker, while_stmt->label);
     {
       size_t guard_depth = type_checker_guard_depth(checker);
+      size_t trip_depth = type_checker_loop_trip_depth(checker);
       int body_ok = 1;
       type_checker_push_guard(checker, while_stmt->condition, 0);
+      type_checker_push_loop_trip(checker, while_stmt->condition,
+                                  while_stmt->body);
       if (while_stmt->body &&
           !type_checker_check_statement(checker, while_stmt->body)) {
         body_ok = 0;
       }
+      type_checker_pop_loop_trip(checker, trip_depth);
       type_checker_pop_guards(checker, guard_depth);
       if (!body_ok) {
         type_checker_pop_loop_label(checker);

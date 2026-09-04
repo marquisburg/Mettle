@@ -1,0 +1,34 @@
+import "std/io";
+
+type Slot = uint32 where value < 64;
+
+fn walk(n: uint32) -> int32 {
+  var total: int32 = 0;
+  var i: uint32 = 0;
+  while (i < n) {
+    if (i < 64) {
+      var s: Slot = (Slot)i;
+      total = total + (int32)s;
+    }
+    i = i + 1;
+  }
+  return total;
+}
+
+type Small = int32 where value >= 5 && value < 100;
+
+fn stride() -> int32 {
+  var total: int32 = 0;
+  var k: int32 = 5;
+  while (k < 100) {
+    var s: Small = (Small)k;
+    total = total + (int32)s;
+    k = k + 7;
+  }
+  return total;
+}
+
+fn main() -> int32 {
+  print("walk {walk(200)} stride {stride()}");
+  return 0;
+}

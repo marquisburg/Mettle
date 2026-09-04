@@ -1,0 +1,23 @@
+import "std/io";
+
+type Positive = int32 where value > 0;
+
+fn scale(a: int32*, n: int64, raw: int32) -> int32 {
+  var total: int32 = 0;
+  var i: int64 = 0;
+  var base: int32 = 1000;
+  if (raw > 0) {
+    var d: Positive = (Positive)raw;
+    while (i < n) {
+      total = total + a[i] + base / d;
+      i = i + 1;
+    }
+  }
+  return total;
+}
+
+fn main() -> int32 {
+  var buf: int32[8];
+  print("s {scale(&buf[0], 8, 4)}");
+  return 0;
+}

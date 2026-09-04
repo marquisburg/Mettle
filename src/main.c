@@ -5963,8 +5963,11 @@ int compile_file(const char *input_filename, const char *output_filename,
    * optimizer runs; lowering then brackets every loop with report-only markers
    * for the verifier to report on. */
   if (options->explain && !options->optimize) {
-    fprintf(stderr, "note: --explain has no effect without -O/--release (it "
-                    "reports optimization decisions)\n");
+    fprintf(stderr,
+            "note: --explain without -O/--release reports only what does not "
+            "depend on the optimizer: the types proven, the effects held, the "
+            "rules run, the checks a declared type deleted, and the beliefs "
+            "the build rested on\n");
   }
   ir_lowering_set_explain(options->explain && options->optimize &&
                           !options->emit_ptx && !options->emit_spirv);
@@ -6540,6 +6543,9 @@ int compile_file(const char *input_filename, const char *output_filename,
   }
 
 cleanup:
+  if (options && options->explain && !options->optimize) {
+    ir_explain_ledger_standalone(input_filename);
+  }
   ir_twins_snapshots_free(twin_snapshots);
   twin_snapshots = NULL;
   // Clean up resources

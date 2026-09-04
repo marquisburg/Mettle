@@ -1,0 +1,33 @@
+import "std/io";
+
+type Unit = float64 where value >= 0.0 && value <= 1.0;
+type Total = float64 where value >= 0.0 && value <= 70.0;
+
+fn bounded(a: Unit*) -> float64 {
+  var s: Total = (Total)0.0;
+  var i: int64 = 0;
+  while (i < 64) {
+    s = s + a[i];
+    i = i + 1;
+  }
+  return (float64)s;
+}
+
+fn plain(a: float64*) -> float64 {
+  var s: float64 = 0.0;
+  var i: int64 = 0;
+  while (i < 64) {
+    s = s + a[i];
+    i = i + 1;
+  }
+  return s;
+}
+
+fn main() -> int32 {
+  var buf: Unit[64];
+  var raw: float64[64];
+  var i: int64 = 0;
+  while (i < 64) { buf[i] = (Unit)0.5; raw[i] = 0.5; i = i + 1; }
+  print("b {bounded(&buf[0])} p {plain(&raw[0])}");
+  return 0;
+}

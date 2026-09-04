@@ -1,0 +1,20 @@
+import "std/io";
+
+type Unit = float64 where value >= 0.0 && value <= 1.0;
+
+fn blend(a: Unit, b: Unit) -> Unit {
+  return (Unit)((float64)a * (float64)b);
+}
+
+fn from_guard(x: float64) -> float64 {
+  if (x >= 0.0 && x <= 1.0) {
+    var u: Unit = (Unit)x;
+    return (float64)blend(u, (Unit)0.5);
+  }
+  return 0.0;
+}
+
+fn main() -> int32 {
+  print("b {from_guard(0.8)}");
+  return 0;
+}

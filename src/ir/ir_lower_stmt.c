@@ -1,6 +1,7 @@
 // AST->IR lowering: statement lowering (with defer scopes).
 #include "ir_lowering_internal.h"
 #include "frontend/mtlc_frontend.h"
+#include "string_intern.h"
 
 static int ir_lower_multi_return_value(IRLoweringContext *context,
                                        IRFunction *function,
@@ -625,6 +626,21 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
     local.location = statement->location;
     local.dest = ir_operand_symbol(local_name);
     local.text = (char *)ir_backend_type_name(declaration->type_name);
+    {
+      double bound_lo = 0.0;
+      double bound_hi = 0.0;
+      double bound_err = 0.0;
+      if (declaration->type_name && decl_type &&
+          type_checker_float_bound(decl_type, &bound_lo, &bound_hi,
+                                   &bound_err)) {
+        ir_declare_float_bound(string_intern(declaration->type_name), bound_lo,
+                               bound_hi);
+      }
+      if (declaration->type_name && decl_type &&
+          type_checker_type_excludes_zero(decl_type)) {
+        ir_declare_nonzero_type(string_intern(declaration->type_name));
+      }
+    }
     local.value_type = mtlc_type_from_frontend(decl_type);
     if (declaration->address_space != AST_ADDRESS_SPACE_DEFAULT) {
       int is_static_storage =

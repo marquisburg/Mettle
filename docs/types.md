@@ -585,6 +585,137 @@ it: every proven conversion is checked as the interpreter runs, and a value
 that violates its type stops the run naming the type. The prover is code, and
 code is not trusted on its own authority.
 
+## What the compiler proves from
+
+The prover establishes a predicate from a constant, from the value's own type,
+from arithmetic it can bound, from a `for` range, from a dominating test, from
+an early exit, and from a guard that repeats the predicate. Three more facts
+reach further, and each is inferred:
+
+**What a call returns.** A function's body exports what it proved about the
+value it returns, gathered at every `return` under the guards that reach it. A
+`clamp` that returns 0 below zero, 100 above it, and its argument in between
+exports 0..100, and `(Percent)clamp(n)` is proven at the call site with no
+guard there at all. A return the interval engine cannot bound defeats the
+export, because a fact has to hold on every path or it is not one.
+
+**What a loop carries.** A counter that only ever rises keeps the bound its
+initialiser gave it, so a `while (k < 100)` bounds `k` above and `var k: int32
+= 5;` bounds it below, and `k` is a `Small` inside the body even though it is
+never 5 again. A write anywhere in the function that moves the counter the
+other way, or by an amount the compiler cannot bound, ends it. A float
+accumulator inside a loop whose trip count the compiler bounded gets the same
+treatment, widened over the whole run and not to the value it ends with.
+
+**A relation to another value.** A predicate may name a binding that is not in
+scope where the type is declared:
+
+```mettle
+type Index = int64 where value >= 0 && value < buf.length;
+
+fn get(buf: int32[], i: int64) -> int32 {
+  if (i >= 0 && i < buf.length) {
+    var at: Index = (Index)i;
+    return buf[(int64)at];
+  }
+  return 0;
+}
+```
+
+`Index` says nothing until there is a `buf`. Every fact it carries is read at
+the site, in that scope, and refused there when the name is not in it. A
+relational type has no interval of its own, so `--check-proofs` re-checks it by
+evaluating the predicate itself at the site, with the binding standing for the
+value that was proven.
+
+## Floats
+
+A float predicate is two facts: an interval and the rounding a value inside it
+may have accumulated.
+
+```mettle
+type Unit = float64 where value >= 0.0 && value <= 1.0;
+
+fn blend(a: Unit, b: Unit) -> Unit {
+  return (Unit)((float64)a * (float64)b);
+}
+```
+
+The product of two values in 0..1 is proven; their sum is not, and the refusal
+prints the interval it computed and the relative rounding term it carried.
+Endpoints are computed in the widest arithmetic the host has and rounded
+outward only where the result is not exactly representable, so a bound the
+arithmetic cannot cross is not widened past it. A subtraction, or an addition
+of values that can have opposite signs, sets the rounding term to one: after
+cancellation there is no relative bound left, and the prover refuses rather
+than speaking past what it knows.
+
+There is a pass that reads it. Adding a run of floats four lanes at a time is a
+different sum from adding them one at a time, and the two answers differ by a
+rounding the compiler cannot bound without knowing how many terms there are.
+Where the accumulator carries a declared bound, the float sum vectorizer
+refuses the rewrite and `--explain` prints why. Where it does not, the licence
+is real, and `--explain` lists it under **beliefs** rather than leaving it
+silent.
+
+## Structs
+
+A declared type may refine a struct, and then its predicate speaks about the
+fields:
+
+```mettle
+struct Span { lo: int32; hi: int32; }
+
+type Ordered = Span where value.lo <= value.hi;
+```
+
+An `Ordered` is a `Span` everywhere one is read, and a `Span` becomes an
+`Ordered` only where the predicate is proven, the same as any other declared
+type. What a struct adds is the second obligation: **a write into a field has
+to leave the predicate true.**
+
+```mettle
+fn widen(o: Ordered, more: int32) -> int32 {
+  if (o.lo <= o.hi + more) {
+    o.hi = o.hi + more;
+  }
+  return o.hi - o.lo;
+}
+```
+
+The predicate is taken as it will read after the write, with the written field
+standing for the value being assigned and every other field for what it already
+holds, and that condition has to hold at the write. Nothing is carried over
+from the conversion that made the value: a write is a new obligation, and it is
+discharged where it happens. A write the compiler cannot prove is refused,
+naming the conjunct it could not establish.
+
+`--check-proofs` re-checks a struct refinement by evaluating the predicate
+itself, in the scope where the value was proven.
+
+## What a declared type earns
+
+A property the program declared and the compiler proved earns the treatment one
+the compiler discovered earns, and no more. `--explain` lists each under
+**proven by type**, naming the type that proved it and the pass that consumed
+the proof:
+
+- An index whose declared type pins its range inside the array carries no
+  bounds check, in debug, release and `--safe` builds alike. Consumed by
+  lowering.
+- A pointer whose declared type rules out zero carries no null check, because
+  the check could never fire. Consumed by lowering.
+- A divisor whose declared type rules out zero lets a loop-invariant divide
+  leave the loop; without the proof it stays, because a divide that traps must
+  not run on an iteration the loop would never have taken. Consumed by
+  invariant-arithmetic LICM.
+- A float accumulator whose declared bound would not survive being reassociated
+  into lanes stops that rewrite. Consumed by the float sum vectorizer.
+
+Since these are not optimizer decisions, `--explain` reports them without
+`-O`, which is where the checks a declared type deleted are visible at all:
+`--release` emits no such check for anyone.
+
 `mettle why app.mettle 15 Percent` answers the other half of the question: it
 prints the chain and the range for a conversion that succeeded, in the same
 words the refusal would have used.

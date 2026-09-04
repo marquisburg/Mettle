@@ -1,0 +1,23 @@
+import "std/io";
+
+struct Span {
+  lo: int32;
+  hi: int32;
+}
+
+type Ordered = Span where value.lo <= value.hi;
+
+fn shrink(o: Ordered, less: int32) -> int32 {
+  o.hi = o.hi - less;
+  return o.hi - o.lo;
+}
+
+fn main() -> int32 {
+  var s: Span;
+  s.lo = 1;
+  s.hi = 5;
+  if (s.lo <= s.hi) {
+    print("s {shrink((Ordered)s, 9)}");
+  }
+  return 0;
+}

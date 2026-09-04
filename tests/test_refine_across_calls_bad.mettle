@@ -1,0 +1,17 @@
+import "std/io";
+
+type Percent = int32 where value >= 0 && value <= 100;
+
+fn half(n: int32) -> int32 {
+  return n / 2;
+}
+
+fn from_call(n: int32) -> Percent {
+  return (Percent)half(n);
+}
+
+fn main() -> int32 {
+  var p: Percent = from_call(500);
+  print("p {(int32)p}");
+  return 0;
+}

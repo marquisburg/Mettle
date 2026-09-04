@@ -1,5 +1,6 @@
 // AST->IR lowering: lvalue address, symbol assignment, pointer arithmetic.
 #include "ir_lowering_internal.h"
+#include "ir_explain_ledger.h"
 #include "ir_explain_safety.h"
 #include "frontend/mtlc_frontend.h" // mtlc_type_from_frontend
 
@@ -1304,7 +1305,19 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
           array_type->array_size);
     }
     if (!context->emit_safety_checks) {
+      int base_never_null = type_checker_type_excludes_zero(array_type);
+      if (base_never_null) {
+        ir_explain_type_payoff(
+            expression->location.filename, expression->location.line,
+            function ? function->name : NULL,
+            array_type->name ? array_type->name : "?",
+            "no null check emitted",
+            "rules the pointer out of being zero, so the check could never "
+            "fire; consumed by lowering, which decides check emission per "
+            "access");
+      }
       if (array_type->kind == TYPE_POINTER && !is_address_space_allocation &&
+          !base_never_null &&
           !ir_emit_null_check(context, function, expression->location, &base)) {
         ir_operand_destroy(&base);
         ir_operand_destroy(&index);

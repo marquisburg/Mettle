@@ -2256,13 +2256,15 @@ static void ir_explain_typed_flush(void) {
     }
     ir_explain_json_raw("],");
   }
-  if (!g_explain || g_typed_total == 0) {
+  if (!g_explain || (g_typed_total == 0 && ir_explain_payoff_total() == 0)) {
     return;
   }
   ir_explain_print_header("proven by type");
-  ir_explain_emit("  %zu bounds check%s not emitted: the index's declared "
-                  "type already proves it in range\n",
-                  g_typed_total, g_typed_total == 1 ? "" : "s");
+  if (g_typed_total > 0) {
+    ir_explain_emit("  %zu bounds check%s not emitted: the index's declared "
+                    "type already proves it in range\n",
+                    g_typed_total, g_typed_total == 1 ? "" : "s");
+  }
   for (size_t i = 0; i < g_typed_count; i++) {
     const IRExplainTypedNote *n = &g_typed[i];
     ir_explain_emit("  %sline %zu%s%s%s: '%s' holds %lld..%lld, inside an "
@@ -2278,6 +2280,7 @@ static void ir_explain_typed_flush(void) {
     ir_explain_emit("  %s(%zu more not listed)%s\n", clr(EXPLAIN_DIM),
                     g_typed_total - g_typed_count, clr(EXPLAIN_RESET));
   }
+  ir_explain_payoff_rows();
   ir_explain_emit("\n");
 }
 
@@ -2314,6 +2317,7 @@ static MTLC_THREAD_LOCAL size_t g_ledger_rule_total = 0;
 
 void ir_explain_ledger_set_collect(int enabled) { g_ledger_collect = enabled; }
 
+
 static IRExplainLedgerRow *ledger_push(IRExplainLedgerRow **table,
                                        size_t *count, size_t *total) {
   IRExplainLedgerRow *grown;
@@ -2332,6 +2336,56 @@ static IRExplainLedgerRow *ledger_push(IRExplainLedgerRow **table,
 
 static char *ledger_dup(const char *text) {
   return text ? strdup(text) : NULL;
+}
+
+static MTLC_THREAD_LOCAL IRExplainLedgerRow *g_payoffs = NULL;
+static MTLC_THREAD_LOCAL size_t g_payoff_count = 0;
+static MTLC_THREAD_LOCAL size_t g_payoff_total = 0;
+
+void ir_explain_type_payoff(const char *file, size_t line,
+                            const char *function_name, const char *type_name,
+                            const char *what, const char *detail) {
+  IRExplainLedgerRow *row;
+  if (file && g_explain_focus_file &&
+      strcmp(ir_explain_path_basename(file),
+             ir_explain_path_basename(g_explain_focus_file)) != 0) {
+    return;
+  }
+  row = ledger_push(&g_payoffs, &g_payoff_count, &g_payoff_total);
+  if (!row) {
+    return;
+  }
+  row->a = ledger_dup(type_name);
+  row->b = ledger_dup(what);
+  row->c = ledger_dup(detail);
+  row->d = ledger_dup(function_name);
+  row->line = line;
+}
+
+static void ledger_more(size_t total, size_t shown) {
+  if (total > shown) {
+    ir_explain_emit("  %s(%zu more not listed)%s\n", clr(EXPLAIN_DIM),
+                    total - shown, clr(EXPLAIN_RESET));
+  }
+}
+size_t ir_explain_payoff_total(void) { return g_payoff_total; }
+
+void ir_explain_payoff_rows(void) {
+  if (g_payoff_total == 0) {
+    return;
+  }
+  ir_explain_emit("  %zu optimization%s a declared type earned; a property the "
+                  "program declared and the compiler proved gets the treatment "
+                  "one the compiler discovered gets, and no more\n",
+                  g_payoff_total, g_payoff_total == 1 ? "" : "s");
+  for (size_t i = 0; i < g_payoff_count; i++) {
+    const IRExplainLedgerRow *r = &g_payoffs[i];
+    ir_explain_emit("  %sline %zu%s%s%s: %s, because '%s' %s\n",
+                    clr(EXPLAIN_BOLD), r->line, clr(EXPLAIN_RESET),
+                    r->d ? " in " : "", r->d ? r->d : "", r->b ? r->b : "?",
+                    r->a ? r->a : "?", r->c ? r->c : "?");
+  }
+  ledger_more(g_payoff_total, g_payoff_count);
 }
 
 void ir_explain_belief(const char *what, const char *why) {
@@ -2388,12 +2442,6 @@ void ir_explain_rule_ran(const char *rule, const char *verdict,
   row->steps = steps;
 }
 
-static void ledger_more(size_t total, size_t shown) {
-  if (total > shown) {
-    ir_explain_emit("  %s(%zu more not listed)%s\n", clr(EXPLAIN_DIM),
-                    total - shown, clr(EXPLAIN_RESET));
-  }
-}
 
 void ir_explain_ledger_flush(void) {
   if (!g_explain) {
@@ -2468,6 +2516,28 @@ void ir_explain_ledger_flush(void) {
   ir_explain_emit("\n");
 }
 
+/* The ledger sections are not optimizer decisions, so they mean the same thing
+ * in a build the optimizer never ran. --explain without -O prints these and
+ * says so, which is where a check a declared type deleted is visible: --release
+ * emits no such check for anyone. */
+void ir_explain_ledger_standalone(const char *focus_file) {
+  int saved = g_explain;
+  const char *saved_focus = g_explain_focus_file;
+  g_explain = 1;
+  g_explain_focus_file = focus_file;
+  if (g_payoff_total > 0) {
+    ir_explain_print_header("proven by type");
+    ir_explain_payoff_rows();
+    ir_explain_emit("\n");
+  }
+  ir_explain_ledger_flush();
+  if (g_report_len > 0) {
+    fwrite(g_report_buf, 1, g_report_len, stderr);
+    g_report_len = 0;
+  }
+  g_explain = saved;
+  g_explain_focus_file = saved_focus;
+}
 static void ledger_free(IRExplainLedgerRow **table, size_t *count,
                         size_t *total) {
   for (size_t i = 0; i < *count; i++) {
@@ -2483,6 +2553,7 @@ static void ledger_free(IRExplainLedgerRow **table, size_t *count,
 }
 
 void ir_explain_ledger_release(void) {
+  ledger_free(&g_payoffs, &g_payoff_count, &g_payoff_total);
   ledger_free(&g_beliefs, &g_belief_count, &g_belief_total);
   ledger_free(&g_proofs, &g_proof_count, &g_proof_total);
   ledger_free(&g_effects, &g_effect_count, &g_effect_total);

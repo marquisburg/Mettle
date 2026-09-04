@@ -15,7 +15,10 @@ frontend can drive instead. The documentation is organized the same way.
 
 - [Lexical structure](lexical-structure.md): comments, names, literals,
   keywords.
-- [Types](types.md): the type system, sizes, and conversions.
+- [Types](types.md): the type system, sizes, and conversions, and what a
+  declared type's predicate is proven from: a call's postcondition, a loop's
+  carried bound, a relation to another binding, and a float interval with its
+  rounding term.
 - [Declarations](declarations.md): functions, variables, structs, enums,
   methods, closures, decorators.
 - [Expressions](expressions.md): operators, precedence, casts, interpolation.

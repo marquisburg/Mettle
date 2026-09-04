@@ -817,8 +817,7 @@ int type_checker_process_type_declaration(TypeChecker *checker,
                                        decl->base_type, decl->name);
     return 0;
   }
-  if (base->kind == TYPE_VOID || base->kind == TYPE_ARRAY ||
-      base->kind == TYPE_STRUCT || base->kind == TYPE_ENUM ||
+  if (base->kind == TYPE_VOID || base->kind == TYPE_ENUM ||
       base->kind == TYPE_TAGGED_ENUM || base->kind == TYPE_FUNCTION_POINTER ||
       type_is_comptime_only(base)) {
     type_checker_set_error_at_location(
@@ -842,6 +841,16 @@ int type_checker_process_type_declaration(TypeChecker *checker,
   refined->view_rank = base->view_rank;
   refined->is_volatile = base->is_volatile;
   refined->refined_base = base;
+  /* A refined struct or array is the same layout under a new name, so the
+     fields come with it: `s.hi` on an `Ordered` reads what it reads on a
+     `Span`, and the predicate that speaks about `value.lo` has something to
+     speak about. */
+  refined->field_names = base->field_names;
+  refined->field_types = base->field_types;
+  refined->field_offsets = base->field_offsets;
+  refined->field_bit_offsets = base->field_bit_offsets;
+  refined->field_bit_widths = base->field_bit_widths;
+  refined->field_count = base->field_count;
   refined->refinement = decl->predicate;
   refined->refine_binding =
       decl->binding ? string_intern(decl->binding) : "value";
@@ -865,6 +874,46 @@ int type_checker_process_type_declaration(TypeChecker *checker,
   return 1;
 }
 
+/* An identifier in the predicate that is neither the binding nor anything the
+ * declaration's own scope knows. There is nothing wrong with it: it is the
+ * relation, and it resolves where the type is used. */
+static int predicate_free_name(TypeChecker *checker, ASTNode *node,
+                               const char *binding, const char **out_name) {
+  if (!node) {
+    return 0;
+  }
+  if (node->type == AST_IDENTIFIER) {
+    const Identifier *identifier = (const Identifier *)node->data;
+    if (identifier && identifier->name &&
+        strcmp(identifier->name, binding ? binding : "value") != 0 &&
+        !symbol_table_lookup(checker->symbol_table, identifier->name)) {
+      *out_name = identifier->name;
+      return 1;
+    }
+  }
+  for (size_t i = 0; i < node->child_count; i++) {
+    if (predicate_free_name(checker, node->children[i], binding, out_name)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int type_checker_predicate_is_relational(TypeChecker *checker,
+                                         ASTNode *predicate,
+                                         const char *binding, Type *refined) {
+  const char *name = NULL;
+  if (!checker || !predicate || !refined) {
+    return 0;
+  }
+  if (!predicate_free_name(checker, predicate, binding, &name)) {
+    return 0;
+  }
+  refined->refine_relational = 1;
+  refined->refine_relation_name = string_intern(name);
+  return 1;
+}
+
 int type_checker_check_type_predicate(TypeChecker *checker,
                                       ASTNode *type_decl_node) {
   TypeDeclaration *decl =
@@ -879,6 +928,12 @@ int type_checker_check_type_predicate(TypeChecker *checker,
     return 1;
   }
   base = refined->refined_base;
+  if (decl->predicate &&
+      type_checker_predicate_is_relational(checker, decl->predicate,
+                                           refined->refine_binding, refined)) {
+    return 1;
+  }
+
   if (decl->predicate) {
     Type *predicate_type;
     Symbol *value_symbol;
@@ -2254,6 +2309,9 @@ static int type_checker_process_function(TypeChecker *checker,
                                          func_symbol, return_type)) {
       return 0;
     }
+    if (func_symbol && func_symbol->post_state == 1) {
+      func_symbol->post_state = 2;
+    }
 
     type_checker_init_tracker_exit_scope(checker);
     type_checker_init_tracker_reset(checker);
@@ -2417,6 +2475,12 @@ static int type_checker_check_member_assignment(
     type_checker_report_assign_mismatch(checker, assignment->value,
                                         assignment->value->location,
                                         field_type, value_type);
+    return 0;
+  }
+
+  if (!type_checker_check_field_write(checker, member->object, member->member,
+                                      assignment->value,
+                                      assignment->target->location)) {
     return 0;
   }
 

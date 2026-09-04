@@ -2476,11 +2476,21 @@ int ir_lower_expression(IRLoweringContext *context, IRFunction *function,
     return 0;
   }
   if (context && context->emit_refinement_checks && expression &&
-      expression->proven_refinement &&
-      expression->proven_refinement->refine_has_range &&
-      !ir_emit_refinement_check(context, function, expression->location,
-                                out_value, expression->proven_refinement)) {
-    return 0;
+      expression->proven_refinement) {
+    if (expression->proven_predicate) {
+      if (!ir_emit_refinement_predicate(context, function,
+                                        expression->location, out_value,
+                                        expression->proven_refinement,
+                                        expression->proven_predicate,
+                                        expression->proven_binding)) {
+        return 0;
+      }
+    } else if (expression->proven_refinement->refine_has_range &&
+               !ir_emit_refinement_check(context, function,
+                                         expression->location, out_value,
+                                         expression->proven_refinement)) {
+      return 0;
+    }
   }
   return 1;
 }
@@ -2560,6 +2570,11 @@ static int ir_lower_expression_inner(IRLoweringContext *context,
     if (!identifier || !identifier->name) {
       ir_set_error(context, "Malformed identifier expression");
       return 0;
+    }
+    if (context->refine_binding_active && context->refine_binding_name &&
+        strcmp(identifier->name, context->refine_binding_name) == 0) {
+      *out_value = ir_operand_copy(&context->refine_binding_value);
+      return 1;
     }
     Symbol *symbol =
         context->symbol_table

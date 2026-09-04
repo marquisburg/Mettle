@@ -79,6 +79,11 @@ typedef struct ASTNode {
   void *data;                 // Node-specific data
   struct Type *resolved_type; // Cached type from semantic analysis
   struct Type *proven_refinement;
+  /* A relational declared type has no interval to test at run time, so the
+     proof records the predicate itself, type-checked in this scope with the
+     binding standing for this value. Lowering emits it as the check. */
+  struct ASTNode *proven_predicate;
+  const char *proven_binding;
 } ASTNode;
 
 typedef struct {

@@ -169,6 +169,19 @@ typedef struct {
   size_t struct_placeholder_capacity;
   /* The proof ledger: what the declared-type prover spent and what it
      settled. `--report-proofs` prints it, `--proof-budget=N` bounds it. */
+  /* Guards the monotone-variable widening against re-entering the interval
+     engine through a declaration's own initialiser. */
+  int monotone_busy;
+  /* Loops whose trip count the compiler could bound, innermost last. An
+     accumulator inside one of these can be widened: a value that starts
+     somewhere and takes at most this many steps of a bounded size has a bound
+     of its own, which is the fact a loop carries. */
+  struct {
+    struct ASTNode *body;
+    long long trips;
+  } *loop_trips;
+  size_t loop_trip_count;
+  size_t loop_trip_capacity;
   long long proof_steps;
   size_t proofs_attempted;
   size_t proofs_proven;
@@ -178,6 +191,27 @@ typedef struct {
   size_t proof_log_capacity;
 } TypeChecker;
 
+int type_checker_predicate_is_relational(TypeChecker *checker,
+                                         struct ASTNode *predicate,
+                                         const char *binding,
+                                         struct Type *refined);
+int type_checker_float_bound(const struct Type *type, double *min, double *max,
+                             double *err);
+/* A declared type whose predicate rules the value out of being zero: a pointer
+   that is never null, a divisor that never divides by zero. */
+int type_checker_type_excludes_zero(const struct Type *type);
+int type_checker_check_field_write(TypeChecker *checker, struct ASTNode *object,
+                                   const char *field, struct ASTNode *value,
+                                   SourceLocation location);
+void type_checker_bind_predicate_check(TypeChecker *checker,
+                                       struct Type *refined,
+                                       struct ASTNode *expr);
+int type_checker_push_loop_trip(TypeChecker *checker,
+                                struct ASTNode *condition,
+                                struct ASTNode *body);
+void type_checker_pop_loop_trip(TypeChecker *checker, size_t depth);
+size_t type_checker_loop_trip_depth(const TypeChecker *checker);
+void type_checker_note_return_range(TypeChecker *checker, struct ASTNode *value);
 void type_checker_report_proofs(const TypeChecker *checker, FILE *out);
 long long type_checker_proof_steps(const TypeChecker *checker);
 int type_checker_why_proof(const TypeChecker *checker, const char *site,

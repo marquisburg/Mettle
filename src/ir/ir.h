@@ -888,6 +888,12 @@ IROperand ir_operand_label(const char *name);
 IROperand ir_operand_copy(const IROperand *operand);
 void ir_operand_destroy(IROperand *operand);
 
+void ir_declare_float_bound(const char *type_name, double lo, double hi);
+void ir_declare_nonzero_type(const char *type_name);
+int ir_type_is_nonzero(const char *type_name);
+int ir_lookup_float_bound(const char *type_name, double *lo, double *hi);
+int ir_has_float_bounds(void);
+
 IRFunction *ir_function_create(const char *name);
 /* The name a source type carries into the IR. `char` is a byte with a
  * printing convention, and everything below this line -- the optimizer's width

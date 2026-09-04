@@ -1,0 +1,25 @@
+import "std/io";
+
+struct Span {
+  lo: int32;
+  hi: int32;
+}
+
+type Ordered = Span where value.lo <= value.hi;
+
+fn widen(o: Ordered, more: int32) -> int32 {
+  if (o.lo <= o.hi + more) {
+    o.hi = o.hi + more;
+  }
+  return o.hi - o.lo;
+}
+
+fn main() -> int32 {
+  var s: Span;
+  s.lo = 1;
+  s.hi = 5;
+  if (s.lo <= s.hi) {
+    print("w {widen((Ordered)s, 3)}");
+  }
+  return 0;
+}

@@ -1,0 +1,21 @@
+import "std/io";
+
+type NonNull = int32* where value != 0;
+
+fn head(p: NonNull) -> int32 {
+  return p[0];
+}
+
+fn use_it(q: int32*) -> int32 {
+  if (q != 0) {
+    return head((NonNull)q);
+  }
+  return 0;
+}
+
+fn main() -> int32 {
+  var a: int32[2];
+  a[0] = 5;
+  print("h {use_it(&a[0])}");
+  return 0;
+}

@@ -68,6 +68,11 @@ typedef struct {
    * than by dropping the checks. */
   int emit_safety_checks;
   int emit_refinement_checks;
+  /* While a relational predicate is being lowered as a run-time check, the
+     binding it speaks about stands for this operand. */
+  const char *refine_binding_name;
+  IROperand refine_binding_value;
+  int refine_binding_active;
   /* Declared return type name of the function currently being lowered. Used
    * to give a width-less float literal in `return <lit>;` the correct
    * single/double precision (literals always infer to float64 otherwise). */
@@ -308,6 +313,11 @@ int ir_emit(IRLoweringContext *context, IRFunction *function,
                    const IRInstruction *instruction);
 
 extern int g_ir_lowering_refinement_checks;
+int ir_emit_refinement_predicate(IRLoweringContext *context,
+                                 IRFunction *function, SourceLocation location,
+                                 const IROperand *value, const Type *refined,
+                                 struct ASTNode *predicate,
+                                 const char *binding);
 int ir_emit_refinement_check(IRLoweringContext *context, IRFunction *function,
                              SourceLocation location, const IROperand *value,
                              const Type *refined);

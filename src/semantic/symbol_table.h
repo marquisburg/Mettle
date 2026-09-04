@@ -114,6 +114,22 @@ typedef struct Type {
   int refine_has_range;
   long long refine_min;
   long long refine_max;
+  /* The predicate names a binding that is not in scope where the type is
+     declared, so it speaks about a relation between this value and something
+     the use site supplies: `type Index = uint32 where value < buf.length;`.
+     A relational type has no static interval; every fact it carries is read at
+     the site, in that scope, and refused there when the name is not in it. */
+  int refine_relational;
+  const char *refine_relation_name;
+  /* A float predicate carries an interval and the rounding it admits. The
+     error term is what makes the interval usable by a pass that reassociates:
+     a rewrite is allowed only where the bound still holds once the term is
+     added, so a declared bound is a licence the compiler earns instead of one
+     it takes. */
+  int refine_has_frange;
+  double refine_fmin;
+  double refine_fmax;
+  double refine_ferr;
 } Type;
 
 typedef enum { SCOPE_GLOBAL, SCOPE_FUNCTION, SCOPE_BLOCK } ScopeType;
@@ -180,6 +196,26 @@ typedef struct Symbol {
   int constant_is_float;
   long long constant_integer_value;
   double constant_float_value;
+  /* What this function's body proved about the value it returns, gathered at
+     every `return` under the guards in force there. `post_state` is 0 for a
+     function whose returns have not been seen, 1 while its body is being
+     checked, 2 when the union below is final, and 3 when a return defeated
+     the union and nothing can be said. Read at call sites by the
+     declared-type prover; never written by an annotation. */
+  int post_state;
+  int post_has_min;
+  int post_has_max;
+  long long post_min;
+  long long post_max;
+  /* How this binding moves, worked out once. The scan behind it walks the
+     whole function body, and the prover asks about the same binding many
+     times, so the answer is kept here and not recomputed. 0 = not yet asked,
+     1 = answered. */
+  int move_computed;
+  int move_direction;
+  long long move_step;
+  struct ASTNode *move_declaration;
+  struct ASTNode *move_addend;
   /* Folded compile-time value, including TypeRef / FieldRef. Numeric consts
    * also keep the fields above so existing integer/float folders stay simple. */
   ComptimeValue comptime_value;

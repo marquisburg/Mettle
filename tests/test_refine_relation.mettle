@@ -1,0 +1,18 @@
+import "std/io";
+
+type Index = int64 where value >= 0 && value < buf.length;
+
+fn get(buf: int32[], i: int64) -> int32 {
+  if (i >= 0 && i < buf.length) {
+    var at: Index = (Index)i;
+    return buf[(int64)at];
+  }
+  return 0;
+}
+
+fn main() -> int32 {
+  var b: int32[8];
+  b[3] = 7;
+  print("g {get(b, 3)} {get(b, 99)}");
+  return 0;
+}

@@ -1,0 +1,19 @@
+import "std/io";
+
+type Percent = int32 where value >= 0 && value <= 100;
+
+fn clamp(n: int32) -> int32 {
+  if (n < 0) { return 0; }
+  if (n > 100) { return 100; }
+  return n;
+}
+
+fn from_call(n: int32) -> Percent {
+  return (Percent)clamp(n);
+}
+
+fn main() -> int32 {
+  var p: Percent = from_call(500);
+  print("p {(int32)p}");
+  return 0;
+}

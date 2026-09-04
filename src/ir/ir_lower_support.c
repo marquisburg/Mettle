@@ -350,6 +350,109 @@ static int ir_emit_refinement_side(IRLoweringContext *context,
   return 1;
 }
 
+/* The whole predicate, run at the site the proof was made, with the binding
+ * standing for the value that was proven. A relational type has no interval to
+ * compare against, so this is what "re-checked at run time like every other
+ * proof" means for one. Nothing here trusts the prover: it evaluates the same
+ * condition the program wrote and traps when it does not hold. */
+int ir_emit_refinement_predicate(IRLoweringContext *context,
+                                 IRFunction *function, SourceLocation location,
+                                 const IROperand *value, const Type *refined,
+                                 ASTNode *predicate, const char *binding) {
+  IROperand held = ir_operand_none();
+  char message[192];
+  char *trap_label;
+  char *ok_label;
+  const char *saved_name;
+  IROperand saved_value;
+  int saved_active;
+  int ok;
+  if (!context || !function || !value || !predicate) {
+    return 1;
+  }
+  saved_name = context->refine_binding_name;
+  saved_value = context->refine_binding_value;
+  saved_active = context->refine_binding_active;
+  if (binding) {
+    context->refine_binding_name = binding;
+    context->refine_binding_value = *value;
+    context->refine_binding_active = 1;
+  }
+  ok = ir_lower_expression(context, function, predicate, &held);
+  context->refine_binding_name = saved_name;
+  context->refine_binding_value = saved_value;
+  context->refine_binding_active = saved_active;
+  if (!ok) {
+    return 0;
+  }
+  trap_label = ir_new_label_name(context, "trap_refine");
+  ok_label = ir_new_label_name(context, "refine_holds");
+  if (!trap_label || !ok_label) {
+    free(trap_label);
+    free(ok_label);
+    ir_operand_destroy(&held);
+    return 0;
+  }
+  snprintf(message, sizeof(message),
+           "Fatal error: a value the compiler proved to be '%s' is not one",
+           refined && refined->name ? refined->name : "?");
+  {
+    IRInstruction branch = {0};
+    branch.op = IR_OP_BRANCH_ZERO;
+    branch.location = location;
+    branch.lhs = held;
+    branch.text = trap_label;
+    if (!ir_emit(context, function, &branch)) {
+      free(trap_label);
+      free(ok_label);
+      ir_operand_destroy(&held);
+      return 0;
+    }
+  }
+  {
+    IRInstruction jump = {0};
+    jump.op = IR_OP_JUMP;
+    jump.location = location;
+    jump.text = ok_label;
+    if (!ir_emit(context, function, &jump)) {
+      free(trap_label);
+      free(ok_label);
+      ir_operand_destroy(&held);
+      return 0;
+    }
+  }
+  {
+    IRInstruction trap = {0};
+    trap.op = IR_OP_LABEL;
+    trap.location = location;
+    trap.text = trap_label;
+    if (!ir_emit(context, function, &trap) ||
+        !ir_emit_runtime_trap_ex(context, function, location, 5u, message,
+                                 value, NULL)) {
+      free(trap_label);
+      free(ok_label);
+      ir_operand_destroy(&held);
+      return 0;
+    }
+  }
+  {
+    IRInstruction done = {0};
+    done.op = IR_OP_LABEL;
+    done.location = location;
+    done.text = ok_label;
+    if (!ir_emit(context, function, &done)) {
+      free(trap_label);
+      free(ok_label);
+      ir_operand_destroy(&held);
+      return 0;
+    }
+  }
+  free(trap_label);
+  free(ok_label);
+  ir_operand_destroy(&held);
+  return 1;
+}
+
 int ir_emit_refinement_check(IRLoweringContext *context, IRFunction *function,
                              SourceLocation location, const IROperand *value,
                              const Type *refined) {

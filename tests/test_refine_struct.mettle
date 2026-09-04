@@ -1,0 +1,27 @@
+import "std/io";
+
+struct Span {
+  lo: int32;
+  hi: int32;
+}
+
+type Ordered = Span where value.lo <= value.hi;
+
+fn width(s: Ordered) -> int32 {
+  return s.hi - s.lo;
+}
+
+fn make(a: int32, b: int32) -> int32 {
+  var s: Span;
+  s.lo = a;
+  s.hi = b;
+  if (s.lo <= s.hi) {
+    return width((Ordered)s);
+  }
+  return 0;
+}
+
+fn main() -> int32 {
+  print("w {make(2, 9)} {make(9, 2)}");
+  return 0;
+}

@@ -1,5 +1,7 @@
 #include "type_checker_internal.h"
 #include "../ir/ir_explain_ledger.h"
+#include <float.h>
+#include <string.h>
 
 struct TypeCheckerGuard {
   ASTNode *condition;
@@ -64,6 +66,126 @@ static Range range_of_type(const Type *type) {
     r.max = (long long)max;
   }
   return r;
+}
+
+typedef struct {
+  int has_min;
+  int has_max;
+  double min;
+  double max;
+  double err;
+} FRange;
+
+static FRange frange_unknown(void) {
+  FRange r;
+  r.has_min = 0;
+  r.has_max = 0;
+  r.min = 0.0;
+  r.max = 0.0;
+  r.err = 0.0;
+  return r;
+}
+
+static FRange frange_exact(double v) {
+  FRange r;
+  r.has_min = 1;
+  r.has_max = 1;
+  r.min = v;
+  r.max = v;
+  r.err = 0.0;
+  return r;
+}
+
+static double frange_eps(const Type *type) {
+  if (type && type->name && strcmp(type->name, "float32") == 0) {
+    return 1.1920929e-07;
+  }
+  return 2.220446049250313e-16;
+}
+
+static double frange_magnitude(const FRange *r) {
+  double lo = r->has_min ? (r->min < 0 ? -r->min : r->min) : 0.0;
+  double hi = r->has_max ? (r->max < 0 ? -r->max : r->max) : 0.0;
+  return lo > hi ? lo : hi;
+}
+
+/* The rounding term is relative, because IEEE rounding is. A product of two
+ * values in 0..1 stays in 0..1: the endpoints move by a fraction of
+ * themselves, and zero does not move at all. Adding an absolute epsilon to a
+ * bound the arithmetic cannot cross would refuse proofs that hold.
+ *
+ * Cancellation is where a relative bound stops being one, so a subtraction, or
+ * an addition of values that can have opposite signs, sets the term to 1: the
+ * value could be anything of that magnitude, and the prover then refuses
+ * rather than speaking past what it knows. */
+#define FRANGE_NO_BOUND 1.0
+
+static double frange_slack(double endpoint, double rel) {
+  double magnitude = endpoint < 0 ? -endpoint : endpoint;
+  return magnitude * rel;
+}
+
+/* IEEE rounding is monotone, so a computed result never leaves the interval
+ * the exact operation would have produced, once that interval's own endpoints
+ * are rounded outward. The endpoints are computed in the widest type the host
+ * has and stepped one place outward only where the double they land in is not
+ * the value itself. That is why a product of two values in 0..1 stays in 0..1:
+ * one is representable, the arithmetic that produced it did not round, and
+ * nothing needs widening. Where the host has nothing wider than double, every
+ * endpoint is stepped, because there is no way to tell. */
+static double frange_step(double value, int up) {
+  unsigned long long bits;
+  if (value == 0.0) {
+    bits = 1;
+    if (!up) {
+      bits |= 0x8000000000000000ull;
+    }
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+  }
+  memcpy(&bits, &value, sizeof(bits));
+  if ((value > 0.0) == (up != 0)) {
+    bits++;
+  } else {
+    bits--;
+  }
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+static double frange_outward(long double exact, int up) {
+  double landed = (double)exact;
+#if defined(LDBL_MANT_DIG) && defined(DBL_MANT_DIG) &&                        \
+    LDBL_MANT_DIG > DBL_MANT_DIG
+  if ((long double)landed == exact) {
+    return landed;
+  }
+#endif
+  return frange_step(landed, up);
+}
+
+static int frange_same_sign(const FRange *a, const FRange *b) {
+  if (!a->has_min || !a->has_max || !b->has_min || !b->has_max) {
+    return 0;
+  }
+  if (a->min >= 0.0 && b->min >= 0.0) {
+    return 1;
+  }
+  return a->max <= 0.0 && b->max <= 0.0;
+}
+
+static void frange_meet(FRange *r, const FRange *other) {
+  if (other->has_min && (!r->has_min || other->min > r->min)) {
+    r->has_min = 1;
+    r->min = other->min;
+  }
+  if (other->has_max && (!r->has_max || other->max < r->max)) {
+    r->has_max = 1;
+    r->max = other->max;
+  }
+  if (other->err > r->err) {
+    r->err = other->err;
+  }
 }
 
 static void range_meet(Range *r, const Range *other) {
@@ -298,6 +420,11 @@ static int mul_checked(long long a, long long b, long long *out) {
   return !__builtin_mul_overflow(a, b, out);
 }
 
+static void narrow_by_monotone(TypeChecker *checker, const char *name,
+                               Range *out, int depth);
+static void narrow_by_relation(TypeChecker *checker, const Type *declared,
+                               Range *out, int depth);
+
 static int range_of(TypeChecker *checker, ASTNode *expr, Range *out,
                     int depth) {
   if (checker) {
@@ -343,7 +470,11 @@ static int range_of(TypeChecker *checker, ASTNode *expr, Range *out,
       *out = range_of_type(type);
     }
     if (identifier && identifier->name) {
+      Type *declared = expr->resolved_type ? expr->resolved_type
+                                           : (symbol ? symbol->type : NULL);
       narrow_by_guards(checker, identifier->name, out, depth);
+      narrow_by_monotone(checker, identifier->name, out, depth);
+      narrow_by_relation(checker, declared, out, depth);
     }
     return out->has_min || out->has_max;
   }
@@ -517,10 +648,865 @@ static int range_of(TypeChecker *checker, ASTNode *expr, Range *out,
     *out = range_of_type(expr->resolved_type);
     return out->has_min || out->has_max;
   }
+  case AST_FUNCTION_CALL: {
+    CallExpression *call = (CallExpression *)expr->data;
+    Symbol *callee = NULL;
+    *out = range_of_type(expr->resolved_type);
+    if (checker && call && call->function_name && !call->object) {
+      callee = symbol_table_lookup(checker->symbol_table, call->function_name);
+    }
+    if (callee && callee->kind == SYMBOL_FUNCTION && callee->post_state == 2 &&
+        callee->post_has_min && callee->post_has_max) {
+      Range post;
+      post.has_min = 1;
+      post.has_max = 1;
+      post.min = callee->post_min;
+      post.max = callee->post_max;
+      range_meet(out, &post);
+    }
+    return out->has_min || out->has_max;
+  }
   default:
     *out = range_of_type(expr->resolved_type);
     return out->has_min || out->has_max;
   }
+}
+
+/* A relational declared type carries no interval of its own: `value <
+ * buf.length` says nothing until there is a `buf`. Where a value of the type is
+ * read, the predicate is narrowed in that scope, so the fact the type asserts
+ * becomes the fact the prover uses at the site that supplied the other half. */
+static void narrow_by_relation(TypeChecker *checker, const Type *declared,
+                               Range *out, int depth) {
+  const Type *layer;
+  if (!checker || !declared || depth > 8) {
+    return;
+  }
+  for (layer = declared; layer && layer->refined_base;
+       layer = layer->refined_base) {
+    NarrowContext ctx;
+    if (!layer->refine_relational || !layer->refinement) {
+      continue;
+    }
+    ctx.checker = checker;
+    ctx.name = layer->refine_binding ? layer->refine_binding : "value";
+    ctx.range = out;
+    ctx.depth = depth;
+    visit_atoms(layer->refinement, 0, narrow_visit, &ctx, 0);
+  }
+}
+
+/* Every write to `name` anywhere in `node`, classified. Returns 1 while the
+ * variable stays monotone in `direction` (+1 rising, -1 falling, 0 undecided),
+ * 0 the moment a write is found that moves it either way or by an amount the
+ * compiler cannot bound. Taking the address of the variable also ends it: a
+ * store through the pointer is a write this walk cannot see. */
+static int monotone_scan(const ASTNode *node, const char *name,
+                         int *direction) {
+  if (!node) {
+    return 1;
+  }
+  if (node->type == AST_UNARY_EXPRESSION) {
+    const char *op = NULL;
+    ASTNode *operand = NULL;
+    if (unary_parts((ASTNode *)node, &op, &operand) && strcmp(op, "&") == 0 &&
+        identifier_name(operand) &&
+        strcmp(identifier_name(operand), name) == 0) {
+      return 0;
+    }
+  }
+  if (node->type == AST_ASSIGNMENT) {
+    const Assignment *assign = (const Assignment *)node->data;
+    if (assign && assign->variable_name && !assign->target &&
+        strcmp(assign->variable_name, name) == 0) {
+      const char *op = NULL;
+      ASTNode *left = NULL;
+      ASTNode *right = NULL;
+      const NumberLiteral *step = NULL;
+      int step_direction = 0;
+      if (!assign->value || !binary_parts(assign->value, &op, &left, &right)) {
+        return 0;
+      }
+      if (strcmp(op, "+") != 0 && strcmp(op, "-") != 0) {
+        return 0;
+      }
+      if (!identifier_name(left) || strcmp(identifier_name(left), name) != 0) {
+        return 0;
+      }
+      if (!right || right->type != AST_NUMBER_LITERAL) {
+        return 0;
+      }
+      step = (const NumberLiteral *)right->data;
+      if (!step || step->is_float || step->int_value == 0) {
+        return 0;
+      }
+      step_direction = (step->int_value > 0) ? 1 : -1;
+      if (strcmp(op, "-") == 0) {
+        step_direction = -step_direction;
+      }
+      if (*direction != 0 && *direction != step_direction) {
+        return 0;
+      }
+      *direction = step_direction;
+    }
+  }
+  for (size_t i = 0; i < node->child_count; i++) {
+    if (!monotone_scan(node->children[i], name, direction)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/* The one constant step every write to `name` in `node` moves it by. Returns 0
+ * where the writes disagree or there are none. */
+static int monotone_step(const ASTNode *node, const char *name,
+                         long long *step) {
+  if (!node) {
+    return 1;
+  }
+  if (node->type == AST_ASSIGNMENT) {
+    const Assignment *assign = (const Assignment *)node->data;
+    if (assign && assign->variable_name && !assign->target &&
+        strcmp(assign->variable_name, name) == 0) {
+      const char *op = NULL;
+      ASTNode *left = NULL;
+      ASTNode *right = NULL;
+      const NumberLiteral *literal = NULL;
+      long long moved;
+      if (!assign->value || !binary_parts(assign->value, &op, &left, &right) ||
+          !identifier_name(left) ||
+          strcmp(identifier_name(left), name) != 0 || !right ||
+          right->type != AST_NUMBER_LITERAL) {
+        return 0;
+      }
+      literal = (const NumberLiteral *)right->data;
+      if (!literal || literal->is_float) {
+        return 0;
+      }
+      moved = strcmp(op, "-") == 0 ? -literal->int_value : literal->int_value;
+      if (*step != 0 && *step != moved) {
+        return 0;
+      }
+      *step = moved;
+    }
+  }
+  for (size_t i = 0; i < node->child_count; i++) {
+    if (!monotone_step(node->children[i], name, step)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/* The declaration of `name` in `node`, with its initialiser. A name declared
+ * more than once in the function is two bindings sharing a spelling, and the
+ * walk cannot tell which one a use meant, so it answers with nothing. */
+static const ASTNode *monotone_declaration_scan(const ASTNode *node,
+                                                const char *name,
+                                                size_t *seen) {
+  const ASTNode *found = NULL;
+  if (!node) {
+    return NULL;
+  }
+  if (node->type == AST_VAR_DECLARATION) {
+    const VarDeclaration *decl = (const VarDeclaration *)node->data;
+    if (decl && decl->name && strcmp(decl->name, name) == 0 &&
+        decl->initializer) {
+      (*seen)++;
+      found = node;
+    }
+  }
+  for (size_t i = 0; i < node->child_count; i++) {
+    const ASTNode *deeper =
+        monotone_declaration_scan(node->children[i], name, seen);
+    if (deeper && !found) {
+      found = deeper;
+    }
+  }
+  return found;
+}
+
+static const ASTNode *monotone_declaration(const ASTNode *node,
+                                           const char *name) {
+  size_t seen = 0;
+  const ASTNode *found = monotone_declaration_scan(node, name, &seen);
+  return seen == 1 ? found : NULL;
+}
+
+/* A counter that only ever rises keeps the bound its initialiser gave it, and
+ * one that only ever falls keeps its ceiling. That is the fact a loop carries:
+ * `while (i < n)` bounds `i` above inside the body, and this bounds it below,
+ * so an index built from a counter is provable where the two meet. The walk is
+ * over the whole function, which is stronger than it needs to be and easier to
+ * believe: a write anywhere that breaks the direction ends it everywhere. */
+/* The addend of the one `name = name + e` in `node`, or NULL when the writes
+ * to `name` are not all of that shape. */
+static ASTNode *accumulator_addend(ASTNode *node, const char *name, int *ok) {
+  ASTNode *found = NULL;
+  if (!node || !*ok) {
+    return NULL;
+  }
+  if (node->type == AST_ASSIGNMENT) {
+    Assignment *assign = (Assignment *)node->data;
+    if (assign && assign->variable_name && !assign->target &&
+        strcmp(assign->variable_name, name) == 0) {
+      const char *op = NULL;
+      ASTNode *left = NULL;
+      ASTNode *right = NULL;
+      if (!assign->value || !binary_parts(assign->value, &op, &left, &right) ||
+          strcmp(op, "+") != 0 || !identifier_name(left) ||
+          strcmp(identifier_name(left), name) != 0) {
+        *ok = 0;
+        return NULL;
+      }
+      found = right;
+    }
+  }
+  for (size_t i = 0; i < node->child_count; i++) {
+    ASTNode *deeper = accumulator_addend(node->children[i], name, ok);
+    if (deeper) {
+      if (found) {
+        *ok = 0;
+        return NULL;
+      }
+      found = deeper;
+    }
+  }
+  return found;
+}
+
+/* A bound that costs nothing to read: a literal, a constant, or a cast of one.
+ * The full interval engine narrows by every guard in scope and each guard's
+ * atoms re-enter it, which is fine for the handful of questions a declared type
+ * asks and ruinous for a question asked of every loop in the program. A trip
+ * count needs a constant bound anyway, so this is what it asks for. */
+static int constant_range(TypeChecker *checker, const ASTNode *expr, Range *out,
+                          int depth) {
+  *out = range_unknown();
+  if (!expr || depth > 8) {
+    return 0;
+  }
+  switch (expr->type) {
+  case AST_NUMBER_LITERAL: {
+    const NumberLiteral *literal = (const NumberLiteral *)expr->data;
+    if (!literal || literal->is_float) {
+      return 0;
+    }
+    *out = range_exact(literal->int_value);
+    return 1;
+  }
+  case AST_IDENTIFIER: {
+    Identifier *identifier = (Identifier *)expr->data;
+    Symbol *symbol = identifier
+                         ? type_checker_resolve_identifier(checker, identifier)
+                         : NULL;
+    if (symbol && symbol->kind == SYMBOL_CONSTANT) {
+      *out = range_exact(symbol->data.constant.value);
+      return 1;
+    }
+    if (symbol && symbol->has_constant_value && !symbol->constant_is_float) {
+      *out = range_exact(symbol->constant_integer_value);
+      return 1;
+    }
+    return 0;
+  }
+  case AST_CAST_EXPRESSION: {
+    const CastExpression *cast = (const CastExpression *)expr->data;
+    return cast && cast->operand &&
+           constant_range(checker, cast->operand, out, depth + 1);
+  }
+  case AST_UNARY_EXPRESSION: {
+    const char *op = NULL;
+    ASTNode *operand = NULL;
+    Range inner;
+    if (!unary_parts((ASTNode *)expr, &op, &operand) || strcmp(op, "-") != 0 ||
+        !constant_range(checker, operand, &inner, depth + 1) ||
+        !inner.has_min || !inner.has_max || inner.min == LLONG_MIN) {
+      return 0;
+    }
+    *out = range_exact(-inner.min);
+    return 1;
+  }
+  default:
+    return 0;
+  }
+}
+
+/* The scan behind every question about how a binding moves, run once per
+ * binding and kept on its symbol. Without this the prover walks the whole
+ * function body for every identifier it looks at, which is quadratic in the
+ * body and was measured making the compiler stop finishing. */
+static Symbol *movement_of(TypeChecker *checker, const char *name) {
+  Symbol *symbol;
+  const ASTNode *body;
+  if (!checker || !name || !checker->symbol_table) {
+    return NULL;
+  }
+  symbol = symbol_table_lookup(checker->symbol_table, name);
+  if (!symbol) {
+    return NULL;
+  }
+  if (symbol->move_computed) {
+    return symbol;
+  }
+  symbol->move_computed = 1;
+  symbol->move_direction = 0;
+  symbol->move_step = 0;
+  symbol->move_declaration = NULL;
+  symbol->move_addend = NULL;
+  body = checker->current_function_decl;
+  if (!body || body->type != AST_FUNCTION_DECLARATION || !body->data) {
+    return symbol;
+  }
+  body = ((const FunctionDeclaration *)body->data)->body;
+  symbol->move_declaration = (ASTNode *)monotone_declaration(body, name);
+  if (!monotone_scan(body, name, &symbol->move_direction)) {
+    symbol->move_direction = 0;
+  }
+  if (!monotone_step(body, name, &symbol->move_step)) {
+    symbol->move_step = 0;
+  }
+  {
+    int ok = 1;
+    ASTNode *addend = accumulator_addend((ASTNode *)body, name, &ok);
+    symbol->move_addend = ok ? addend : NULL;
+  }
+  return symbol;
+}
+
+static void narrow_by_monotone(TypeChecker *checker, const char *name,
+                               Range *out, int depth) {
+  const ASTNode *declaration;
+  const VarDeclaration *decl;
+  Symbol *movement;
+  int direction;
+  Range initial;
+  if (!checker || !name || checker->monotone_busy || depth > 8) {
+    return;
+  }
+  movement = movement_of(checker, name);
+  if (!movement) {
+    return;
+  }
+  declaration = movement->move_declaration;
+  direction = movement->move_direction;
+  if (!declaration) {
+    return;
+  }
+  decl = (const VarDeclaration *)declaration->data;
+  if (direction == 0) {
+    return;
+  }
+  if (!constant_range(checker, decl->initializer, &initial, 0)) {
+    return;
+  }
+  if (direction > 0 && initial.has_min) {
+    Range bound = range_unknown();
+    bound.has_min = 1;
+    bound.min = initial.min;
+    range_meet(out, &bound);
+  } else if (direction < 0 && initial.has_max) {
+    Range bound = range_unknown();
+    bound.has_max = 1;
+    bound.max = initial.max;
+    range_meet(out, &bound);
+  }
+}
+
+/* A `while (i < K)` whose body moves `i` by a constant step runs at most
+ * (K - init + step - 1) / step times. That count is what turns an accumulator
+ * into a bounded value, and it is the only thing here that says anything about
+ * how many times a loop runs. Where the count cannot be established, nothing is
+ * pushed and no accumulator is widened. */
+size_t type_checker_loop_trip_depth(const TypeChecker *checker) {
+  return checker ? checker->loop_trip_count : 0;
+}
+
+void type_checker_pop_loop_trip(TypeChecker *checker, size_t depth) {
+  if (checker && checker->loop_trip_count > depth) {
+    checker->loop_trip_count = depth;
+  }
+}
+
+int type_checker_push_loop_trip(TypeChecker *checker, ASTNode *condition,
+                                ASTNode *body) {
+  const char *op = NULL;
+  ASTNode *left = NULL;
+  ASTNode *right = NULL;
+  const char *counter;
+  const ASTNode *declaration;
+  Range limit;
+  Range initial;
+  int direction = 0;
+  long long step = 0;
+  long long trips;
+  if (!checker || !condition || !body) {
+    return 0;
+  }
+  if (!binary_parts(condition, &op, &left, &right) ||
+      (strcmp(op, "<") != 0 && strcmp(op, "<=") != 0)) {
+    return 0;
+  }
+  counter = identifier_name(left);
+  if (!counter) {
+    return 0;
+  }
+  {
+    Symbol *movement = movement_of(checker, counter);
+    if (!movement || !movement->move_declaration) {
+      return 0;
+    }
+    declaration = movement->move_declaration;
+    direction = movement->move_direction;
+    step = movement->move_step;
+  }
+  if (direction <= 0 || step <= 0) {
+    return 0;
+  }
+  if (!constant_range(checker, right, &limit, 0) || !limit.has_max) {
+    return 0;
+  }
+
+  if (!constant_range(checker,
+                      ((const VarDeclaration *)declaration->data)->initializer,
+                      &initial, 0) ||
+      !initial.has_min) {
+    return 0;
+  }
+  trips = limit.max - initial.min;
+  if (trips < 0) {
+    trips = 0;
+  }
+  trips = (trips + step - 1) / step;
+  if (strcmp(op, "<=") == 0) {
+    trips++;
+  }
+  if (trips < 0 || trips > 1000000000) {
+    return 0;
+  }
+  if (checker->loop_trip_count == checker->loop_trip_capacity) {
+    size_t grown =
+        checker->loop_trip_capacity ? checker->loop_trip_capacity * 2 : 4;
+    void *table = realloc(checker->loop_trips,
+                          grown * sizeof(*checker->loop_trips));
+    if (!table) {
+      return 0;
+    }
+    checker->loop_trips = table;
+    checker->loop_trip_capacity = grown;
+  }
+  checker->loop_trips[checker->loop_trip_count].body = body;
+  checker->loop_trips[checker->loop_trip_count].trips = trips;
+  checker->loop_trip_count++;
+  return 1;
+}
+
+/* One `return` in the function being checked, seen with the guards that reach
+ * it in force. A function that returns 0, 100, or a value a dominating test
+ * pinned to 0..100 exports 0..100 as a postcondition, and a call site proves a
+ * declared type from it the way it would from a literal. A return the interval
+ * engine cannot bound defeats the union: an exported fact has to hold on every
+ * path or it is not a fact. */
+void type_checker_note_return_range(TypeChecker *checker, ASTNode *value) {
+  Symbol *fn = checker ? checker->current_function : NULL;
+  Range r;
+  if (!fn || fn->kind != SYMBOL_FUNCTION || fn->post_state == 3) {
+    return;
+  }
+  if (!value || !range_of(checker, value, &r, 0) || !r.has_min || !r.has_max) {
+    fn->post_state = 3;
+    fn->post_has_min = 0;
+    fn->post_has_max = 0;
+    return;
+  }
+  if (fn->post_state != 1) {
+    fn->post_state = 1;
+    fn->post_has_min = 1;
+    fn->post_has_max = 1;
+    fn->post_min = r.min;
+    fn->post_max = r.max;
+    return;
+  }
+  if (r.min < fn->post_min) {
+    fn->post_min = r.min;
+  }
+  if (r.max > fn->post_max) {
+    fn->post_max = r.max;
+  }
+}
+
+/* ---- float intervals ------------------------------------------------------
+ *
+ * The same shape as the integer engine, with one addition: every arithmetic
+ * step accumulates a bound on the rounding it introduced. A declared float type
+ * is then two facts, an interval and how far a value inside it may have drifted
+ * from the real number it stands for, and a pass that wants to reassociate has
+ * something to check itself against.
+ *
+ * Everything here is conservative in the direction that refuses. */
+
+static FRange frange_of_type(const Type *type) {
+  FRange r = frange_unknown();
+  if (!type) {
+    return r;
+  }
+  if (type->refined_base && type->refine_has_frange) {
+    r.has_min = 1;
+    r.has_max = 1;
+    r.min = type->refine_fmin;
+    r.max = type->refine_fmax;
+    r.err = type->refine_ferr;
+    return r;
+  }
+  if (type->refined_base) {
+    return frange_of_type(type->refined_base);
+  }
+  return r;
+}
+
+static int frange_of(TypeChecker *checker, ASTNode *expr, FRange *out,
+                     int depth);
+static void fnarrow_by_accumulator(TypeChecker *checker, const char *name,
+                                   FRange *out, int depth);
+
+typedef struct {
+  TypeChecker *checker;
+  const char *name;
+  FRange *range;
+  int depth;
+} FNarrowContext;
+
+static void fnarrow_by_comparison(FNarrowContext *ctx, const char *op,
+                                  ASTNode *other) {
+  FRange bound;
+  if (!frange_of(ctx->checker, other, &bound, ctx->depth + 1)) {
+    return;
+  }
+  if ((strcmp(op, "<") == 0 || strcmp(op, "<=") == 0) && bound.has_max) {
+    FRange r = frange_unknown();
+    r.has_max = 1;
+    r.max = bound.max;
+    frange_meet(ctx->range, &r);
+  } else if ((strcmp(op, ">") == 0 || strcmp(op, ">=") == 0) &&
+             bound.has_min) {
+    FRange r = frange_unknown();
+    r.has_min = 1;
+    r.min = bound.min;
+    frange_meet(ctx->range, &r);
+  } else if (strcmp(op, "==") == 0) {
+    frange_meet(ctx->range, &bound);
+  }
+}
+
+static void fnarrow_visit(void *raw, ASTNode *node, int negated) {
+  FNarrowContext *ctx = (FNarrowContext *)raw;
+  const char *op = NULL;
+  ASTNode *left = NULL;
+  ASTNode *right = NULL;
+  const char *left_name;
+  const char *right_name;
+  if (!binary_parts(node, &op, &left, &right) || !is_comparison(op)) {
+    return;
+  }
+  if (negated) {
+    op = negate_operator(op);
+    if (!op) {
+      return;
+    }
+  }
+  left_name = identifier_name(left);
+  right_name = identifier_name(right);
+  if (left_name && strcmp(left_name, ctx->name) == 0) {
+    fnarrow_by_comparison(ctx, op, right);
+  } else if (right_name && strcmp(right_name, ctx->name) == 0) {
+    fnarrow_by_comparison(ctx, flip_operator(op), left);
+  }
+}
+
+static void fnarrow_by_guards(TypeChecker *checker, const char *name,
+                              FRange *range, int depth) {
+  FNarrowContext ctx;
+  ctx.checker = checker;
+  ctx.name = name;
+  ctx.range = range;
+  ctx.depth = depth;
+  for (size_t i = 0; i < checker->guard_count; i++) {
+    struct TypeCheckerGuard *guard = &checker->guards[i];
+    if (guard->condition) {
+      visit_atoms(guard->condition, guard->negated, fnarrow_visit, &ctx, 0);
+    }
+  }
+}
+
+static int frange_of(TypeChecker *checker, ASTNode *expr, FRange *out,
+                     int depth) {
+  const char *op = NULL;
+  ASTNode *left = NULL;
+  ASTNode *right = NULL;
+  ASTNode *operand = NULL;
+  if (checker) {
+    checker->proof_steps++;
+  }
+  *out = frange_unknown();
+  if (!expr || depth > 32) {
+    return 0;
+  }
+  switch (expr->type) {
+  case AST_NUMBER_LITERAL: {
+    NumberLiteral *literal = (NumberLiteral *)expr->data;
+    if (!literal) {
+      return 0;
+    }
+    *out = frange_exact(literal->is_float ? literal->float_value
+                                          : (double)literal->int_value);
+    return 1;
+  }
+  case AST_IDENTIFIER: {
+    Identifier *identifier = (Identifier *)expr->data;
+    Symbol *symbol = identifier
+                         ? type_checker_resolve_identifier(checker, identifier)
+                         : NULL;
+    Type *type = expr->resolved_type ? expr->resolved_type
+                                     : (symbol ? symbol->type : NULL);
+    if (symbol && symbol->has_constant_value && symbol->constant_is_float) {
+      *out = frange_exact(symbol->constant_float_value);
+      return 1;
+    }
+    *out = frange_of_type(type);
+    if (identifier && identifier->name) {
+      fnarrow_by_accumulator(checker, identifier->name, out, depth);
+      fnarrow_by_guards(checker, identifier->name, out, depth);
+    }
+    return out->has_min || out->has_max;
+  }
+  case AST_BINARY_EXPRESSION: {
+    FRange l;
+    FRange r;
+    double eps;
+    if (!binary_parts(expr, &op, &left, &right)) {
+      return 0;
+    }
+    if (!frange_of(checker, left, &l, depth + 1) ||
+        !frange_of(checker, right, &r, depth + 1) || !l.has_min ||
+        !l.has_max || !r.has_min || !r.has_max) {
+      return 0;
+    }
+    eps = frange_eps(expr->resolved_type);
+    if (strcmp(op, "+") == 0) {
+      out->has_min = 1;
+      out->has_max = 1;
+      out->min = frange_outward((long double)l.min + (long double)r.min, 0);
+      out->max = frange_outward((long double)l.max + (long double)r.max, 1);
+      out->err = frange_same_sign(&l, &r) ? l.err + r.err + eps
+                                          : FRANGE_NO_BOUND;
+      return 1;
+    } else if (strcmp(op, "-") == 0) {
+      out->has_min = 1;
+      out->has_max = 1;
+      out->min = frange_outward((long double)l.min - (long double)r.max, 0);
+      out->max = frange_outward((long double)l.max - (long double)r.min, 1);
+      out->err = FRANGE_NO_BOUND;
+      return 1;
+    } else if (strcmp(op, "*") == 0) {
+      long double p[4];
+      long double lo;
+      long double hi;
+      p[0] = (long double)l.min * (long double)r.min;
+      p[1] = (long double)l.min * (long double)r.max;
+      p[2] = (long double)l.max * (long double)r.min;
+      p[3] = (long double)l.max * (long double)r.max;
+      lo = p[0];
+      hi = p[0];
+      for (int i = 1; i < 4; i++) {
+        if (p[i] < lo) {
+          lo = p[i];
+        }
+        if (p[i] > hi) {
+          hi = p[i];
+        }
+      }
+      out->min = frange_outward(lo, 0);
+      out->max = frange_outward(hi, 1);
+      out->has_min = 1;
+      out->has_max = 1;
+      out->err = l.err + r.err + eps;
+      return 1;
+    }
+    return 0;
+  }
+  case AST_UNARY_EXPRESSION: {
+    FRange inner;
+    if (!unary_parts(expr, &op, &operand) || strcmp(op, "-") != 0) {
+      return 0;
+    }
+    if (!frange_of(checker, operand, &inner, depth + 1) || !inner.has_min ||
+        !inner.has_max) {
+      return 0;
+    }
+    out->has_min = 1;
+    out->has_max = 1;
+    out->min = -inner.max;
+    out->max = -inner.min;
+    out->err = inner.err;
+    return 1;
+  }
+  case AST_CAST_EXPRESSION: {
+    CastExpression *cast = (CastExpression *)expr->data;
+    if (cast && cast->operand &&
+        frange_of(checker, cast->operand, out, depth + 1)) {
+      out->err += frange_eps(expr->resolved_type);
+      return out->has_min || out->has_max;
+    }
+    *out = frange_of_type(expr->resolved_type);
+    return out->has_min || out->has_max;
+  }
+  default:
+    *out = frange_of_type(expr->resolved_type);
+    return out->has_min || out->has_max;
+  }
+}
+
+/* A float that starts somewhere and is only ever added to, inside a loop whose
+ * trip count the compiler bounded, has a bound of its own: the start plus the
+ * count times the addend's own interval. That is the loop-carried fact, and it
+ * is what lets a running sum carry a declared type at all. The rounding term
+ * grows with the count, because every one of those additions rounds. */
+static void fnarrow_by_accumulator(TypeChecker *checker, const char *name,
+                                   FRange *out, int depth) {
+  const ASTNode *declaration;
+  ASTNode *addend;
+  FRange initial;
+  FRange step;
+  FRange widened;
+  long long trips;
+  int ok = 1;
+  if (!checker || !name || checker->monotone_busy || depth > 8 ||
+      checker->loop_trip_count == 0) {
+    return;
+  }
+  trips = checker->loop_trips[checker->loop_trip_count - 1].trips;
+  {
+    Symbol *movement = movement_of(checker, name);
+    if (!movement) {
+      return;
+    }
+    declaration = movement->move_declaration;
+    addend = movement->move_addend;
+  }
+  (void)ok;
+  if (!declaration || !addend) {
+    return;
+  }
+  checker->monotone_busy = 1;
+  if (!frange_of(checker, ((const VarDeclaration *)declaration->data)->initializer,
+                 &initial, depth + 1) ||
+      !frange_of(checker, addend, &step, depth + 1)) {
+    checker->monotone_busy = 0;
+    return;
+  }
+  checker->monotone_busy = 0;
+  if (!initial.has_min || !initial.has_max || !step.has_min ||
+      !step.has_max || step.err >= FRANGE_NO_BOUND ||
+      initial.err >= FRANGE_NO_BOUND) {
+    return;
+  }
+  /* Inside the loop the accumulator has taken between zero and `trips` steps,
+   * so the bound is the union over that whole run and not the value it ends
+   * with. Widening to the final value would be a fact that holds only after
+   * the last iteration, which is not where it is read. */
+  widened = frange_unknown();
+  widened.has_min = 1;
+  widened.has_max = 1;
+  widened.min = frange_outward(
+      (long double)initial.min +
+          (step.min < 0.0 ? (long double)trips * (long double)step.min : 0.0L),
+      0);
+  widened.max = frange_outward(
+      (long double)initial.max +
+          (step.max > 0.0 ? (long double)trips * (long double)step.max : 0.0L),
+      1);
+  widened.err = initial.err + (double)trips * (step.err + frange_eps(NULL));
+  if (widened.err >= FRANGE_NO_BOUND) {
+    widened.err = FRANGE_NO_BOUND;
+  }
+  frange_meet(out, &widened);
+}
+
+/* Does the predicate carry an atom that rules the value out of being zero?
+ * `value != 0` says it outright; an interval that excludes zero says it too.
+ * Anything else is unproven, and the check stays. */
+static int predicate_excludes_zero(const ASTNode *node, const char *binding) {
+  const char *op = NULL;
+  ASTNode *left = NULL;
+  ASTNode *right = NULL;
+  const char *name;
+  const NumberLiteral *literal;
+  if (!node) {
+    return 0;
+  }
+  if (binary_parts((ASTNode *)node, &op, &left, &right) &&
+      strcmp(op, "&&") == 0) {
+    return predicate_excludes_zero(left, binding) ||
+           predicate_excludes_zero(right, binding);
+  }
+  if (!binary_parts((ASTNode *)node, &op, &left, &right) ||
+      !is_comparison(op)) {
+    return 0;
+  }
+  name = identifier_name(left);
+  if (!name || strcmp(name, binding ? binding : "value") != 0) {
+    name = identifier_name(right);
+    if (!name || strcmp(name, binding ? binding : "value") != 0) {
+      return 0;
+    }
+    op = flip_operator(op);
+    right = left;
+  }
+  if (!right || right->type != AST_NUMBER_LITERAL) {
+    return 0;
+  }
+  literal = (const NumberLiteral *)right->data;
+  if (!literal || literal->is_float || literal->int_value != 0) {
+    return 0;
+  }
+  return strcmp(op, "!=") == 0 || strcmp(op, ">") == 0 ||
+         strcmp(op, "<") == 0;
+}
+
+int type_checker_type_excludes_zero(const struct Type *type) {
+  const Type *layer = (const Type *)type;
+  for (; layer && layer->refined_base; layer = layer->refined_base) {
+    if (layer->refine_has_range &&
+        (layer->refine_min > 0 || layer->refine_max < 0)) {
+      return 1;
+    }
+    if (layer->refinement &&
+        predicate_excludes_zero(layer->refinement, layer->refine_binding)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int type_checker_float_bound(const struct Type *type, double *min, double *max,
+                             double *err) {
+  const Type *layer = (const Type *)type;
+  for (; layer; layer = layer->refined_base) {
+    if (layer->refine_has_frange) {
+      if (min) {
+        *min = layer->refine_fmin;
+      }
+      if (max) {
+        *max = layer->refine_fmax;
+      }
+      if (err) {
+        *err = layer->refine_ferr;
+      }
+      return 1;
+    }
+  }
+  return 0;
 }
 
 int type_checker_expression_range(TypeChecker *checker, ASTNode *expr,
@@ -911,7 +1897,45 @@ typedef struct {
   int failed_negated;
   long long steps;
   char route[192];
+  int is_float;
+  FRange fvalue;
+  int have_frange;
 } ProveContext;
+
+/* The comparison has to hold for every value the interval admits, once the
+ * rounding the expression could have accumulated is taken off the end that
+ * matters. A bound that only holds for the exact real value is not a bound the
+ * program can rely on. */
+static int fcomparison_holds(const char *op, const FRange *value,
+                             const FRange *bound) {
+  double lo;
+  double hi;
+  if (!value->has_min || !value->has_max) {
+    return 0;
+  }
+  if (value->err >= FRANGE_NO_BOUND) {
+    return 0;
+  }
+  lo = value->min;
+  hi = value->max;
+  if (strcmp(op, "<") == 0) {
+    return bound->has_min && hi < bound->min;
+  }
+  if (strcmp(op, "<=") == 0) {
+    return bound->has_min && hi <= bound->min;
+  }
+  if (strcmp(op, ">") == 0) {
+    return bound->has_max && lo > bound->max;
+  }
+  if (strcmp(op, ">=") == 0) {
+    return bound->has_max && lo >= bound->max;
+  }
+  if (strcmp(op, "==") == 0) {
+    return bound->has_min && bound->has_max && bound->min == bound->max &&
+           lo == bound->min && hi == bound->max;
+  }
+  return 0;
+}
 
 static void prove_visit(void *raw, ASTNode *atom, int negated) {
   ProveContext *ctx = (ProveContext *)raw;
@@ -933,6 +1957,17 @@ static void prove_visit(void *raw, ASTNode *atom, int negated) {
                strcmp(identifier_name(right), ctx->binding) == 0) {
       other = left;
       use = flip_operator(effective);
+    }
+    if (other && use && ctx->is_float && ctx->have_frange) {
+      FRange bound;
+      if (frange_of(ctx->checker, other, &bound, 0) &&
+          fcomparison_holds(use, &ctx->fvalue, &bound)) {
+        snprintf(ctx->route, sizeof(ctx->route),
+                 "the value's interval %g..%g, widened by a relative rounding "
+                 "term of %g, settles the comparison",
+                 ctx->fvalue.min, ctx->fvalue.max, ctx->fvalue.err);
+        return;
+      }
     }
     if (other && use && ctx->have_range) {
       Range bound;
@@ -959,6 +1994,16 @@ static void prove_visit(void *raw, ASTNode *atom, int negated) {
   ctx->failed = 1;
   ctx->failed_atom = atom;
   ctx->failed_negated = negated;
+}
+
+static int type_checker_is_float_base(const Type *type) {
+  const Type *layer = type;
+  while (layer && layer->refined_base) {
+    layer = layer->refined_base;
+  }
+  return layer && layer->name &&
+         (strcmp(layer->name, "float64") == 0 ||
+          strcmp(layer->name, "float32") == 0);
 }
 
 static void set_failure(TypeChecker *checker, const char *text) {
@@ -1083,6 +2128,7 @@ int type_checker_prove_refinement(TypeChecker *checker, Type *refined,
   checker->refine_failure = NULL;
   if (getenv("METTLE_TRUST_REFINEMENTS")) {
     expr->proven_refinement = refined;
+    type_checker_bind_predicate_check(checker, refined, expr);
     return 1;
   }
   memset(&ctx, 0, sizeof(ctx));
@@ -1091,6 +2137,10 @@ int type_checker_prove_refinement(TypeChecker *checker, Type *refined,
   ctx.steps = checker->proof_steps;
   snprintf(ctx.route, sizeof(ctx.route), "the value's own type admits it");
   checker->proofs_attempted++;
+  ctx.is_float = type_checker_is_float_base(refined);
+  if (ctx.is_float) {
+    ctx.have_frange = frange_of(checker, expr, &ctx.fvalue, 0);
+  }
   ctx.have_range = range_of(checker, expr, &ctx.value_range, 0);
   for (layer = refined; layer && layer->refined_base; layer = layer->refined_base) {
     if (expr->resolved_type &&
@@ -1109,7 +2159,14 @@ int type_checker_prove_refinement(TypeChecker *checker, Type *refined,
       char range_text[96] = "";
       describe(ctx.failed_atom, atom_text, sizeof(atom_text), 0);
       describe(expr, expr_text, sizeof(expr_text), 0);
-      if (ctx.have_range && ctx.value_range.has_min && ctx.value_range.has_max) {
+      if (ctx.is_float && ctx.have_frange && ctx.fvalue.has_min &&
+          ctx.fvalue.has_max) {
+        snprintf(range_text, sizeof(range_text),
+                 " (its interval here is %g..%g, with a relative rounding term "
+                 "of %g)",
+                 ctx.fvalue.min, ctx.fvalue.max, ctx.fvalue.err);
+      } else if (ctx.have_range && ctx.value_range.has_min &&
+                 ctx.value_range.has_max) {
         snprintf(range_text, sizeof(range_text), " (its range here is %lld..%lld)",
                  ctx.value_range.min, ctx.value_range.max);
       } else if (ctx.have_range && ctx.value_range.has_min) {
@@ -1153,8 +2210,244 @@ int type_checker_prove_refinement(TypeChecker *checker, Type *refined,
     }
   }
   expr->proven_refinement = refined;
+  type_checker_bind_predicate_check(checker, refined, expr);
   checker->proofs_proven++;
   return 1;
+}
+
+static void predicate_rename(ASTNode *node, const char *from,
+                             const char *to) {
+  if (!node || !from || !to) {
+    return;
+  }
+  if (node->type == AST_IDENTIFIER) {
+    Identifier *identifier = (Identifier *)node->data;
+    if (identifier && identifier->name && strcmp(identifier->name, from) == 0) {
+      identifier->name = (char *)string_intern(to);
+    }
+  }
+  node->resolved_type = NULL;
+  for (size_t i = 0; i < node->child_count; i++) {
+    predicate_rename(node->children[i], from, to);
+  }
+}
+
+typedef struct {
+  TypeChecker *checker;
+  int failed;
+  ASTNode *failed_atom;
+  int failed_negated;
+} HoldsContext;
+
+static void holds_visit(void *raw, ASTNode *atom, int negated) {
+  HoldsContext *ctx = (HoldsContext *)raw;
+  const char *op = NULL;
+  ASTNode *left = NULL;
+  ASTNode *right = NULL;
+  if (ctx->failed) {
+    return;
+  }
+  if (guards_prove_atom(ctx->checker, atom, negated, NULL, NULL)) {
+    return;
+  }
+  if (binary_parts(atom, &op, &left, &right) && is_comparison(op)) {
+    const char *effective = negated ? negate_operator(op) : op;
+    Range l;
+    Range r;
+    if (effective && range_of(ctx->checker, left, &l, 0) &&
+        range_of(ctx->checker, right, &r, 0) &&
+        comparison_holds(effective, &l, &r)) {
+      return;
+    }
+  }
+  ctx->failed = 1;
+  ctx->failed_atom = atom;
+  ctx->failed_negated = negated;
+}
+
+/* Does this condition hold here, on the guards in force and the intervals the
+ * compiler can bound? Used where a predicate has to be re-established rather
+ * than carried: a write into a field of a refined struct. */
+static int condition_holds(TypeChecker *checker, ASTNode *condition,
+                           ASTNode **failed_atom, int *failed_negated) {
+  HoldsContext ctx;
+  ctx.checker = checker;
+  ctx.failed = 0;
+  ctx.failed_atom = NULL;
+  ctx.failed_negated = 0;
+  visit_atoms(condition, 0, holds_visit, &ctx, 0);
+  if (failed_atom) {
+    *failed_atom = ctx.failed_atom;
+  }
+  if (failed_negated) {
+    *failed_negated = ctx.failed_negated;
+  }
+  return !ctx.failed;
+}
+
+/* Replace `object.field` with a copy of `replacement` throughout `node`. Each
+ * occurrence gets its own copy, so the clone owns everything in it and can be
+ * destroyed whole. */
+static int predicate_replace_field(ASTNode *node, const char *object,
+                                   const char *field,
+                                   const ASTNode *replacement) {
+  int replaced = 0;
+  if (!node) {
+    return 0;
+  }
+  for (size_t i = 0; i < node->child_count; i++) {
+    ASTNode *child = node->children[i];
+    if (child && child->type == AST_MEMBER_ACCESS && child->data) {
+      const MemberAccess *member = (const MemberAccess *)child->data;
+      const char *base = member->object ? identifier_name(member->object) : NULL;
+      if (base && member->member && strcmp(base, object) == 0 &&
+          strcmp(member->member, field) == 0) {
+        ASTNode *copy = ast_clone_node((ASTNode *)replacement);
+        if (copy) {
+          ast_destroy_node(child);
+          node->children[i] = copy;
+          replaced = 1;
+          continue;
+        }
+      }
+    }
+    replaced |= predicate_replace_field(child, object, field, replacement);
+  }
+  if (node->type == AST_BINARY_EXPRESSION && node->data &&
+      node->child_count >= 2) {
+    BinaryExpression *binary = (BinaryExpression *)node->data;
+    binary->left = node->children[0];
+    binary->right = node->children[1];
+  }
+  if (node->type == AST_MEMBER_ACCESS && node->data && node->child_count >= 1) {
+    MemberAccess *member = (MemberAccess *)node->data;
+    member->object = node->children[0];
+  }
+  return replaced;
+}
+
+/* A field write into a value whose declared type speaks about its fields has
+ * to leave the predicate true. The predicate is taken as it will read after
+ * the write -- the written field standing for the value being assigned, every
+ * other field for what it already holds -- and has to hold here. Nothing is
+ * carried over from the conversion that made the value: a write is a new
+ * obligation, and this is where it is discharged. */
+int type_checker_check_field_write(TypeChecker *checker, ASTNode *object,
+                                   const char *field, ASTNode *value,
+                                   SourceLocation location) {
+  Type *declared = object ? object->resolved_type : NULL;
+  const char *object_name = identifier_name(object);
+  Type *layer;
+  if (!checker || !declared || !object_name || !field || !value) {
+    return 1;
+  }
+  for (layer = declared; layer && layer->refined_base;
+       layer = layer->refined_base) {
+    ASTNode *clone;
+    ASTNode *failed_atom = NULL;
+    int failed_negated = 0;
+    if (!layer->refinement) {
+      continue;
+    }
+    clone = ast_clone_node(layer->refinement);
+    if (!clone) {
+      return 1;
+    }
+    predicate_rename(clone,
+                     layer->refine_binding ? layer->refine_binding : "value",
+                     object_name);
+    predicate_replace_field(clone, object_name, field, value);
+    if (condition_holds(checker, clone, &failed_atom, &failed_negated)) {
+      ast_destroy_node(clone);
+      continue;
+    }
+    {
+      char atom_text[160] = "";
+      char message[512];
+      describe(failed_atom, atom_text, sizeof(atom_text), 0);
+      snprintf(message, sizeof(message),
+               "writing `%s.%s` has to leave '%s' true, and `%s%s` is not "
+               "proven here",
+               object_name, field, layer->name ? layer->name : "?",
+               failed_negated ? "!" : "", atom_text);
+      type_checker_set_error_at_location(checker, location, "%s", message);
+    }
+    ast_destroy_node(clone);
+    return 0;
+  }
+  return 1;
+}
+
+/* A relational type is proven at the site and re-checked at the site: the
+ * predicate is cloned, type-checked here with the binding standing for this
+ * value, and handed to lowering, which emits it as the run-time test. A type
+ * with a static interval keeps the two comparisons it already had. */
+void type_checker_bind_predicate_check(TypeChecker *checker, Type *refined,
+                                       ASTNode *expr) {
+  Type *layer;
+  if (!checker || !refined || !expr) {
+    return;
+  }
+  for (layer = refined; layer && layer->refined_base;
+       layer = layer->refined_base) {
+    ASTNode *clone;
+    Symbol *value_symbol;
+    if (!layer->refinement || layer->refine_has_range) {
+      continue;
+    }
+    clone = ast_clone_node(layer->refinement);
+    if (!clone) {
+      return;
+    }
+    if (!symbol_table_enter_scope(checker->symbol_table, SCOPE_BLOCK)) {
+      ast_destroy_node(clone);
+      return;
+    }
+    value_symbol = symbol_create(
+        layer->refine_binding ? layer->refine_binding : "value",
+        SYMBOL_PARAMETER, layer->refined_base);
+    if (!value_symbol ||
+        !symbol_table_declare(checker->symbol_table, value_symbol)) {
+      if (value_symbol) {
+        symbol_destroy(value_symbol);
+      }
+      symbol_table_exit_scope(checker->symbol_table);
+      ast_destroy_node(clone);
+      return;
+    }
+    value_symbol->is_initialized = 1;
+    value_symbol->is_used = 1;
+    if (!type_checker_infer_type(checker, clone)) {
+      symbol_table_exit_scope(checker->symbol_table);
+      ast_destroy_node(clone);
+      return;
+    }
+    symbol_table_exit_scope(checker->symbol_table);
+    /* A value with a name has one at run time too, so the check reads the
+     * binding the program wrote and lowering sees ordinary code. That is the
+     * only shape an aggregate can take: there is no operand to stand for a
+     * struct in the middle of an expression. */
+    if (identifier_name(expr)) {
+      predicate_rename(clone,
+                       layer->refine_binding ? layer->refine_binding : "value",
+                       identifier_name(expr));
+      if (!type_checker_infer_type(checker, clone)) {
+        ast_destroy_node(clone);
+        return;
+      }
+      expr->proven_predicate = clone;
+      expr->proven_binding = NULL;
+      return;
+    }
+    if (layer->refined_base && layer->refined_base->kind == TYPE_STRUCT) {
+      ast_destroy_node(clone);
+      return;
+    }
+    expr->proven_predicate = clone;
+    expr->proven_binding =
+        layer->refine_binding ? layer->refine_binding : "value";
+    return;
+  }
 }
 
 void type_checker_compute_refinement_range(TypeChecker *checker,
@@ -1166,6 +2459,22 @@ void type_checker_compute_refinement_range(TypeChecker *checker,
   }
   base = refined->refined_base;
   r = range_of_type(base);
+  if (type_checker_is_float_base(refined) && refined->refinement) {
+    FNarrowContext fctx;
+    FRange fr = frange_unknown();
+    fctx.checker = checker;
+    fctx.name = refined->refine_binding ? refined->refine_binding : "value";
+    fctx.range = &fr;
+    fctx.depth = 0;
+    visit_atoms(refined->refinement, 0, fnarrow_visit, &fctx, 0);
+    if (fr.has_min && fr.has_max) {
+      refined->refine_has_frange = 1;
+      refined->refine_fmin = fr.min;
+      refined->refine_fmax = fr.max;
+      refined->refine_ferr = fr.err;
+    }
+    return;
+  }
   if (!type_checker_is_integer_type(base) || base->kind == TYPE_ENUM) {
     return;
   }

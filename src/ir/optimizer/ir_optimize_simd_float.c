@@ -1,4 +1,5 @@
 #include "ir_optimize_internal.h"
+#include "../ir_explain_ledger.h"
 
 /* -------------------------------------------------------------------------- */
 /* float64/float32 horizontal sum -> IR_OP_SIMD_SUM_F64/F32                    */
@@ -488,6 +489,39 @@ static int ir_try_vectorize_sum_float_at(IRFunction *function,
     return 1;
   }
   sum_type = ir_function_local_declared_type(function, sum_symbol);
+  {
+    /* Adding a run of floats four lanes at a time is a different sum from
+     * adding them one at a time: floating-point addition does not associate,
+     * and the two answers differ by rounding the compiler cannot bound without
+     * knowing how many terms there are. Where the accumulator carries a
+     * declared bound, that is a property the program asked the compiler to
+     * keep, and it is refused here rather than quietly traded for speed. Where
+     * it does not, the licence is real and goes on the belief ledger. */
+    double bound_lo = 0.0;
+    double bound_hi = 0.0;
+    if (ir_lookup_float_bound(sum_type, &bound_lo, &bound_hi)) {
+      if (ir_explain_enabled()) {
+        char reason[256];
+        snprintf(reason, sizeof(reason),
+                 "the accumulator's declared type pins it to %g..%g, and "
+                 "reassociating the sum into lanes moves the answer by a "
+                 "rounding this loop's trip count does not bound; the "
+                 "declared bound does not survive the rewrite",
+                 bound_lo, bound_hi);
+        ir_explain_remark(function->name, "loop body",
+                          function->instructions[header_index].location, 0,
+                          "NOT vectorized", reason, NULL, NULL);
+        ir_explain_remark_code("float-bound-declared");
+      }
+      ir_operand_destroy(&bound);
+      return 1;
+    }
+    ir_explain_belief(
+        "floating-point reassociation",
+        "a float sum was vectorized into lanes, which is a different order of "
+        "addition from the one written; no accumulator in this build carried a "
+        "declared bound to check the difference against");
+  }
   if (!ir_float_sum_type_matches(sum_type, width_bits) ||
       !ir_symbol_is_float_array_base(function, base_symbol) ||
       ir_symbol_live_after_loop(function, jump_index + 1, iv_symbol)) {

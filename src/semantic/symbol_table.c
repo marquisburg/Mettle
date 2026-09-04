@@ -653,7 +653,7 @@ Symbol *symbol_create(const char *name, SymbolKind kind, Type *type) {
   if (!name)
     return NULL;
 
-  Symbol *symbol = malloc(sizeof(Symbol));
+  Symbol *symbol = calloc(1, sizeof(Symbol));
   if (!symbol)
     return NULL;
 

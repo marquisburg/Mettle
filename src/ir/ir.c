@@ -978,6 +978,107 @@ void ir_function_clear_cfg(IRFunction *function) {
   function->cfg_valid = 0;
 }
 
+/* Declared float bounds, keyed by the type name the frontend wrote into a
+ * DECLARE_LOCAL. A pass that wants to reassociate float arithmetic asks here
+ * whether the value it is about to move carries a bound, and the answer is the
+ * program's, established by the prover. The backend never sees the type system;
+ * it sees a name and two numbers. */
+typedef struct {
+  const char *name;
+  double lo;
+  double hi;
+} IRFloatBound;
+
+static IRFloatBound *g_float_bounds;
+static size_t g_float_bound_count;
+static size_t g_float_bound_capacity;
+
+void ir_declare_float_bound(const char *type_name, double lo, double hi) {
+  if (!type_name) {
+    return;
+  }
+  for (size_t i = 0; i < g_float_bound_count; i++) {
+    if (strcmp(g_float_bounds[i].name, type_name) == 0) {
+      return;
+    }
+  }
+  if (g_float_bound_count == g_float_bound_capacity) {
+    size_t grown = g_float_bound_capacity ? g_float_bound_capacity * 2 : 8;
+    IRFloatBound *table =
+        realloc(g_float_bounds, grown * sizeof(IRFloatBound));
+    if (!table) {
+      return;
+    }
+    g_float_bounds = table;
+    g_float_bound_capacity = grown;
+  }
+  g_float_bounds[g_float_bound_count].name = type_name;
+  g_float_bounds[g_float_bound_count].lo = lo;
+  g_float_bounds[g_float_bound_count].hi = hi;
+  g_float_bound_count++;
+}
+
+int ir_lookup_float_bound(const char *type_name, double *lo, double *hi) {
+  if (!type_name) {
+    return 0;
+  }
+  for (size_t i = 0; i < g_float_bound_count; i++) {
+    if (strcmp(g_float_bounds[i].name, type_name) == 0) {
+      if (lo) {
+        *lo = g_float_bounds[i].lo;
+      }
+      if (hi) {
+        *hi = g_float_bounds[i].hi;
+      }
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int ir_has_float_bounds(void) { return g_float_bound_count > 0; }
+
+/* Declared types whose predicate rules the value out of being zero, keyed the
+ * same way. A divisor of one of these cannot trap, which is what lets a pass
+ * move it. */
+static const char **g_nonzero_types;
+static size_t g_nonzero_count;
+static size_t g_nonzero_capacity;
+
+void ir_declare_nonzero_type(const char *type_name) {
+  if (!type_name) {
+    return;
+  }
+  for (size_t i = 0; i < g_nonzero_count; i++) {
+    if (strcmp(g_nonzero_types[i], type_name) == 0) {
+      return;
+    }
+  }
+  if (g_nonzero_count == g_nonzero_capacity) {
+    size_t grown = g_nonzero_capacity ? g_nonzero_capacity * 2 : 8;
+    const char **table =
+        realloc(g_nonzero_types, grown * sizeof(const char *));
+    if (!table) {
+      return;
+    }
+    g_nonzero_types = table;
+    g_nonzero_capacity = grown;
+  }
+  g_nonzero_types[g_nonzero_count++] = type_name;
+}
+
+int ir_type_is_nonzero(const char *type_name) {
+  if (!type_name) {
+    return 0;
+  }
+  for (size_t i = 0; i < g_nonzero_count; i++) {
+    if (strcmp(g_nonzero_types[i], type_name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 IRFunction *ir_function_create(const char *name) {
   IRFunction *function = malloc(sizeof(IRFunction));
   if (!function) {
