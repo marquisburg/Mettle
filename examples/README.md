@@ -36,6 +36,20 @@ jobs are `@noalloc`, jobs are reached from the worker and never from `main`,
 and the phase machine's `step` decides every `Phase`. The build
 fails when any of that stops being true.
 
+[`engine/`](engine/) is that queue with a frame around it, and it is where the
+whole execution-model surface lands in one file. The frame is a `const` of
+`std/schedule`, so the dispatcher for each thread and the `quiesce` at every
+phase boundary are generated from the order the program wrote and printed by
+`mettle expand` as ordinary Mettle. Each phase carries an effect, so a call
+reaching across a phase is `error[F0002]` with the chain landing on the
+schedule's own row. One global is written from two phases, and the lock that
+orders them is an effect both writers require rather than a convention, which
+`--report-effects` prints as a line of its own. The blend declares
+`where cycles < 1200` and the compiler costs its longest path. The drain
+declines to declare one, because it takes a spin lock and a spin lock has no
+bound, which is `error[D0002]` rather than a deadline nobody proved. See
+[`engine/README.md`](engine/README.md).
+
 ## Benchmark examples
 
 Each directory below contains `*.mettle`, `*.c`, `*.rs`, and `build.bat`. They are wired into [`docs/benchmarks/harness.json`](../docs/benchmarks/harness.json) and run via [`tools/benchmark/run-benchmarks.ps1`](../tools/benchmark/run-benchmarks.ps1). Every benchmark entry carries a `suite` number; benchmarks without one default to Suite 1.

@@ -1,0 +1,172 @@
+// An engine: the job system with a frame around it.
+//
+// Everything the compiler is told here is a thing it checks. The frame is a
+// `const` of `std/schedule`, so the dispatcher for each thread and the
+// quiesce point at every phase boundary are generated from the order the
+// program wrote. Each phase carries an effect, so a call reaching across a
+// phase is refused with the chain that got there. A slot stays in the ring
+// because its type says so. The blend names what its longest path may cost.
+// One global is written from two phases, and the lock that orders them is an
+// effect both writers require rather than a convention. The worker is handed
+// nothing that lives in the frame that spawned it. Two rules say the things
+// the compiler has no word for.
+import "std/io";
+import "std/rule";
+import "std/schedule";
+import "std/thread";
+
+extern fn mettle_swap_stage(slot: rawptr, replacement: rawptr) -> int32;
+
+effect Input;
+effect Sim;
+effect Render;
+effect WorldLock;
+
+type Slot = uint32 where value < 64;
+
+struct Job {
+  id: int32;
+  cost: int32;
+  result: int32;
+}
+
+const FRAME: Schedule[3] = [
+  { phase: "input", effect: "Input", entry: "read_input", thread: 0 },
+  { phase: "simulate", effect: "Sim", entry: "step_world", thread: 1 },
+  { phase: "present", effect: "Render", entry: "draw_world", thread: 0 },
+];
+
+var g_jobs: Job[64];
+var g_pushed: uint32 = 0;
+var g_taken: uint32 = 0;
+var g_queue_lock: int32 = 0;
+var g_world_lock: int32 = 0;
+var g_world: int64 = 0;
+var g_drawn: int64 = 0;
+var g_frames: int32 = 0;
+
+@swappable fn priority_v1(cost: int32) -> int32 { return cost; }
+@swappable fn priority_v2(cost: int32) -> int32 { return 100 - cost; }
+
+var priority: fn(int32) -> int32 = &priority_v1;
+
+@noalloc fn job_square(j: Job*) {
+  j.result = j.cost * j.cost;
+}
+
+fn queue_push(id: int32, cost: int32) -> bool {
+  if (g_pushed >= 64) { return false; }
+  var at: Slot = g_pushed;
+  g_jobs[at] = { id: id, cost: cost, result: 0 };
+  g_pushed = g_pushed + 1;
+  return true;
+}
+
+fn queue_take(out: Job**) -> bool {
+  spin_lock(&g_queue_lock);
+  if (g_taken >= g_pushed || g_taken >= 64) {
+    spin_unlock(&g_queue_lock);
+    return false;
+  }
+  var at: Slot = g_taken;
+  *out = &g_jobs[at];
+  g_taken = g_taken + 1;
+  spin_unlock(&g_queue_lock);
+  return true;
+}
+
+fn read_input() {
+  var i: int32 = 0;
+  while (i < 8) {
+    queue_push(i, priority(i));
+    i = i + 1;
+  }
+}
+
+fn drain() -> int64 {
+  var total: int64 = 0;
+  var n: int32 = 0;
+  while (n < 8) {
+    var j: Job* = 0;
+    if (queue_take(&j)) {
+      job_square(j);
+      total = total + (int64)j.result;
+    }
+    n = n + 1;
+  }
+  return total;
+}
+
+fn blend(world: int64) -> int64 where cycles < 1200 {
+  var shade: int64 = 0;
+  var i: int32 = 0;
+  while (i < 16) {
+    shade = shade + world / 4 + (int64)i;
+    i = i + 1;
+  }
+  return shade;
+}
+
+fn world_add(amount: int64) requires Sim, WorldLock {
+  g_world = g_world + amount;
+}
+
+fn world_present() requires Render, WorldLock {
+  g_drawn = g_drawn + blend(g_world);
+  g_world = 0;
+}
+
+fn under_world_lock_sim(amount: int64) provides WorldLock requires Sim {
+  spin_lock(&g_world_lock);
+  world_add(amount);
+  spin_unlock(&g_world_lock);
+}
+
+fn under_world_lock_render() provides WorldLock requires Render {
+  spin_lock(&g_world_lock);
+  world_present();
+  spin_unlock(&g_world_lock);
+}
+
+fn step_world() requires Sim {
+  under_world_lock_sim(drain());
+}
+
+fn draw_world() requires Render {
+  under_world_lock_render();
+  g_frames = g_frames + 1;
+}
+
+@rule fn jobs_never_allocate(p: Program) -> Verdict explain R3001 "A job runs on a worker with no allocator behind it. Mark the function @noalloc, or move the allocation out of the job." {
+  for f in p.functions {
+    if (f.module != "") { continue; }
+    if (f.name.length < 4) { continue; }
+    if (f.name[0] == 'j' && f.name[1] == 'o' && f.name[2] == 'b' && f.name[3] == '_' && !f.is_noalloc) {
+      return verdict_fail(f.site, "a job runs on the worker and may not allocate; mark it @noalloc");
+    }
+  }
+  return verdict_pass();
+}
+
+@rule fn every_phase_has_an_entry(p: Program) -> Verdict explain R3002 "A schedule names the function each phase runs. The name has to resolve, or the frame has a hole in it." {
+  if (program_function_index(p, "read_input") < 0) {
+    return verdict_fail(p.functions[0].site, "the input phase names no function");
+  }
+  if (program_function_index(p, "step_world") < 0) {
+    return verdict_fail(p.functions[0].site, "the simulate phase names no function");
+  }
+  if (program_function_index(p, "draw_world") < 0) {
+    return verdict_fail(p.functions[0].site, "the present phase names no function");
+  }
+  return verdict_pass();
+}
+
+fn main() -> int32 {
+  var worker: int64 = CreateThread(0, 0, &FRAME_thread_1, 0, 0, 0);
+  mettle_swap_stage(&priority, &priority_v2);
+  FRAME_thread_0(0);
+  thread_join_infinite(worker);
+  thread_close(worker);
+  println("jobs {g_taken} of {g_pushed}, drawn {g_drawn}, frames {g_frames}");
+  return 0;
+}

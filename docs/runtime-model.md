@@ -216,6 +216,10 @@ type says nothing about its effects.
 [`examples/job_system/`](../examples/job_system/) is the whole shape in one
 file: a queue on `std/thread`, a priority function swapped at `quiesce`, a
 `Slot` type, a `Worker` effect, and three rules the build stops on.
+[`examples/engine/`](../examples/engine/) is that queue with a frame around
+it: a schedule read as data, a phase effect per phase, a global two phases
+write with a lock effect ordering them, a declared deadline, and the three
+ways to break it written down beside what each one prints.
 
 ## A schedule is data the compiler reads
 

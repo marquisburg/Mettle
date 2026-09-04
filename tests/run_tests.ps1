@@ -4476,6 +4476,55 @@ catch {
   Write-CaseResult -Name "abstraction_examples" -Passed $false -Reason $_.Exception.Message
 }
 
+# The job system with a frame around it, and every claim in one file. Enforce:
+# it builds and runs, expand prints the generated dispatchers, the reports name
+# the shared global, the schedule and the deadline, and each of the three ways
+# the README says to break it actually breaks it.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "engine.exe"
+  $out = & $CompilerPath --build "examples/engine/engine.mettle" -o $exe --report-deadlines --report-effects --report-rules --report-expansion 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the engine failed to build: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "shared g_world: world_add \(Sim\), world_present \(Render\), ordered by an effect both require") { throw "the shared world is not on the ledger: $out" }
+  if ($flat -notmatch "deadline blend: \d+ of 1200 cycles") { throw "the blend's deadline is not on the ledger: $out" }
+  if ($flat -notmatch "schedules: 1 read as data, 3 phases, 5 functions generated") { throw "the schedule is not on the ledger: $out" }
+  if ($flat -notmatch "rule jobs_never_allocate: pass") { throw "the job rule did not run: $out" }
+  if ($flat -notmatch "rule every_phase_has_an_entry: pass") { throw "the phase rule did not run: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "jobs 8 of 8") { throw "the engine did not drain its queue: $run" }
+  if ($run -notmatch "frames 1") { throw "the engine did not present a frame: $run" }
+
+  $ex = & $CompilerPath expand "examples/engine/engine.mettle" 2>&1 | Out-String
+  if ($ex -notmatch "fn FRAME_phase_simulate\(\) provides Sim") { throw "expand does not print the simulate wrapper: $ex" }
+  if ($ex -notmatch "fn FRAME_thread_1") { throw "expand does not print the worker's dispatcher: $ex" }
+
+  $source = Get-Content "examples/engine/engine.mettle" -Raw
+  $cross = Join-Path $tmpDir "engine_cross.mettle"
+  Set-Content -Path $cross -Value ($source -replace "(?m)^fn read_input\(\) \{", "fn read_input() {`n  world_add(1);") -Encoding UTF8
+  $out = & $CompilerPath --build $cross -o (Join-Path $tmpDir "engine_cross.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "the input phase reached into the simulation and built" }
+  if ($out -notmatch "error\[F0002\]") { throw "the crossing was not refused: $out" }
+
+  $race = Join-Path $tmpDir "engine_race.mettle"
+  Set-Content -Path $race -Value ($source -replace "fn world_present\(\) requires Render, WorldLock \{", "fn world_present() requires Render {") -Encoding UTF8
+  $out = & $CompilerPath --build $race -o (Join-Path $tmpDir "engine_race.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "two phases wrote one global with nothing ordering them and it built" }
+  if ($out -notmatch "error\[F0006\]") { throw "the unordered writes were not refused: $out" }
+
+  $slow = Join-Path $tmpDir "engine_slow.mettle"
+  Set-Content -Path $slow -Value ($source -replace "while \(i < 16\) \{", "while (i < 64) {") -Encoding UTF8
+  $out = & $CompilerPath --build $slow -o (Join-Path $tmpDir "engine_slow.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a blend that outgrew its deadline built" }
+  if ($out -notmatch "error\[D0001\]") { throw "the missed deadline was not refused: $out" }
+  Write-CaseResult -Name "engine_example" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "engine_example" -Passed $false -Reason $_.Exception.Message
+}
+
 # A deadline is a claim about a function's longest path, and the compiler
 # proves it from a cost model or stops the build. Enforce: a path that fits
 # builds and the report prints it block by block, a path that does not fails

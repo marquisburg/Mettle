@@ -612,7 +612,9 @@ program declares (`requires Worker` on the job, `provides Worker` on the
 thread's entry, and the compiler infers everything between and refuses a job
 reached from `main` with the chain that reached it), and what the compiler has
 no word for is a `@rule`, such as a state machine's `step` deciding every
-state. `examples/job_system/` is that shape in one file, and a module offers
+state. `examples/job_system/` is that shape in one file, `examples/engine/`
+is the same queue with a schedule, phase effects, an ordered shared global and
+a declared deadline around it, and a module offers
 its rules and its effects to whoever imports it, which is how a house style
 stops being a script in another language.
 
