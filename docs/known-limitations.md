@@ -259,18 +259,19 @@ three places: returning the address of a local, handing a task a pointer into
 the frame that spawned it, and writing through a pointer already handed to a
 task. Everything else it points at, it points at only when it can prove it.
 
-A task is recognised by the shape of the call, meaning the address of a
-function this program defines followed by a pointer argument. A spawn that
-takes its entry point out of a struct field, an array or a variable is not
-recognised, so nothing is claimed about it. Neither M0121 nor M0122 fires on
-one, and `--check-tasks` emits no check there either.
+A task is recognised by the shape of the call, meaning a function value
+followed by a pointer argument. The function value may be written `&worker`,
+held in a variable, or read out of a struct field or an array; what makes it
+one is its type. What is not recognised is a spawn that takes the pointer
+somewhere other than the argument straight after the entry point, and a
+`rawptr` handed over with no function value anywhere in the call.
 
-`--check-tasks` bounds the spawning thread's stack exactly where the operating
-system hands the bounds out. Where it does not, the check covers a thread
-stack's span above the current frame, so an allocation that landed within that
-span of the stack would be reported as a capture. No allocator on either
-supported platform places one there, and the check is opt-in, so this is a
-stated approximation and not a silent one. See
+`--check-tasks` bounds the spawning thread's stack exactly on both platforms:
+Windows keeps the base in the TEB, and on Linux the owned runtime records the
+initial stack block for the first thread and the block it allocated for every
+thread it created. A thread the runtime did not create and cannot see, started
+by foreign code that then calls back into Mettle, has no recorded bound and
+falls back to a thread stack's span above the current frame. See
 [Borrow checker](borrow-checker.md).
 
 ## Null and bounds checks

@@ -1810,7 +1810,18 @@ static int mt_initialize_initial_tls(mt_i64 argc, char **argv);
 static void mt_raise_stack_limit(void);
 #endif
 
+/* The top of the stack this thread was given. A pointer into a live frame of
+ * this thread is always below it, because a frame is only ever made downwards
+ * from here, so this is what answers "is that address one of mine" exactly
+ * rather than approximately. */
+static __thread void *mt_stack_high;
+
+void *mettle_thread_stack_high(void) { return mt_stack_high; }
+
 void mettle_rt_startup(mt_i64 argc, char **argv) {
+  /* argv points into the block the kernel laid out above the initial stack
+   * pointer, so every frame this process ever makes sits below it. */
+  mt_stack_high = (void *)argv;
   if (!mt_initialize_initial_tls(argc, argv)) {
     _exit(127);
   }
@@ -2927,6 +2938,7 @@ typedef struct MtThread {
   volatile int tid;
   int detached;
   void *stack;
+  mt_size stack_size;
   void *tls_mapping;
   mt_size tls_mapping_size;
   void *thread_pointer;
@@ -2950,6 +2962,7 @@ static int mt_futex(volatile int *address, int operation, int value,
 static void mt_thread_child(MtThread *thread) __attribute__((noreturn, used));
 
 static void mt_thread_child(MtThread *thread) {
+  mt_stack_high = (mt_u8 *)thread->stack + thread->stack_size;
   thread->result = thread->pthread_start
                        ? thread->pthread_start(thread->argument)
                        : (mt_u64)thread->start(thread->argument);
@@ -3019,6 +3032,7 @@ mt_i64 mettle_thread_create(void *attributes, mt_u64 stack_size,
     return 0;
   }
   thread->stack = stack;
+  thread->stack_size = size;
   thread->start = start;
   thread->argument = argument;
   if (mt_tls_memory_size) {
@@ -3062,6 +3076,7 @@ static mt_i64 mt_pthread_create(MtPthreadStart start, void *argument) {
     return 0;
   }
   thread->stack = stack;
+  thread->stack_size = MT_THREAD_STACK_SIZE;
   thread->pthread_start = start;
   thread->argument = argument;
   if (mt_tls_memory_size) {

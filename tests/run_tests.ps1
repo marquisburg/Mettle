@@ -4911,6 +4911,19 @@ try {
   for ($i = 0; $i -lt $a.Length; $i++) {
     if ($a[$i] -ne $b[$i]) { throw "a program with no task changed at byte $i under --check-tasks" }
   }
+  $out = & $CompilerPath --build "tests/test_task_indirect.mettle" -o (Join-Path $tmpDir "task_indirect.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a task whose entry came out of a variable was not seen as one" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "handed to the task 'start'") { throw "the entry held in a variable was not recognised: $out" }
+  if ($flat -notmatch "handed to the task 'g_spawn'") { throw "the entry read out of a field was not recognised: $out" }
+
+  $exe = Join-Path $tmpDir "task_indirect_ok.exe"
+  $out = & $CompilerPath --build "tests/test_task_indirect_ok.mettle" -o $exe --check-tasks 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the same two spawns handed a global were refused: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a global handed to a task tripped the run-time check: $run" }
+  if ($run -notmatch "seen 14") { throw "the indirect spawns did not run: $run" }
+
   Write-CaseResult -Name "task_ownership_crosses_the_handover" -Passed $true
 }
 catch {

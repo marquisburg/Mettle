@@ -103,11 +103,20 @@ is accounted for, and one the body never frees is a leak.
 Two lifetime questions cross out of one thread and into another, and the
 analysis answers both.
 
-A task is recognised by shape, not by name. A call hands the address of a
-function this program defines to a callee whose body is not here, with a
-pointer as the argument straight after it. That is what `CreateThread`,
-`pthread_create` and a program's own spawn wrapper all look like, so all three
-are seen the same way, and no interface is on a list the compiler believes.
+A task is recognised by shape, not by name. A call hands a function value to
+a callee whose body is not here, with a pointer as the argument straight after
+it. That is what `CreateThread`, `pthread_create` and a program's own spawn
+wrapper all look like, so all three are seen the same way, and no interface is
+on a list the compiler believes.
+
+The function value is recognised by its type, so how the program got hold of
+it does not matter:
+
+```mettle
+CreateThread(0, 0, &worker_main, msg, 0, 0);      // written at the spawn
+CreateThread(0, 0, start, msg, 0, 0);             // held in a variable
+CreateThread(0, 0, g_spawn.entry, msg, 0, 0);     // read out of a field
+```
 
 The pointer that follows the entry point is what the task will read.
 

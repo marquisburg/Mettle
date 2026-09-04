@@ -1,0 +1,50 @@
+// The same two spawns, handed something that outlives them. The entry point
+// still comes out of a variable and out of a struct field, so the recogniser
+// sees a task both times; what changed is that the message is a global, which
+// is why nothing is refused.
+import "std/io";
+import "std/thread";
+
+struct Spawn {
+  entry: fn(cstring) -> uint32;
+  label: int32;
+}
+
+struct Work {
+  count: int32;
+  total: int32;
+}
+
+var g_work: Work;
+var g_spawn: Spawn;
+var g_seen: int32 = 0;
+
+fn worker_main(arg: cstring) -> uint32 {
+  var w: Work* = (Work*)arg;
+  g_seen = g_seen + w.count;
+  return 0;
+}
+
+fn spawn_from_variable() -> int64 {
+  var start: fn(cstring) -> uint32 = &worker_main;
+  return CreateThread(0, 0, start, (cstring)(&g_work), 0, 0);
+}
+
+fn spawn_from_field() -> int64 {
+  g_spawn.entry = &worker_main;
+  g_spawn.label = 1;
+  return CreateThread(0, 0, g_spawn.entry, (cstring)(&g_work), 0, 0);
+}
+
+fn main() -> int32 {
+  g_work.count = 7;
+  g_work.total = 0;
+  var h: int64 = spawn_from_variable();
+  thread_join_infinite(h);
+  thread_close(h);
+  h = spawn_from_field();
+  thread_join_infinite(h);
+  thread_close(h);
+  println("seen {g_seen}");
+  return 0;
+}

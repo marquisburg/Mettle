@@ -613,12 +613,16 @@ void mettle_safety_reset(void) {
 
 #define SAFETY_TASK_STACK_SPAN (8u * 1024u * 1024u)
 
+void *mettle_thread_stack_high(void);
+
 static uintptr_t safety_stack_base(void) {
 #if defined(_WIN64)
   const NT_TIB *tib = (const NT_TIB *)NtCurrentTeb();
   return tib ? (uintptr_t)tib->StackBase : 0;
-#else
+#elif defined(_WIN32)
   return 0;
+#else
+  return (uintptr_t)mettle_thread_stack_high();
 #endif
 }
 

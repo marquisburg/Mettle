@@ -152,10 +152,15 @@ void mettle_safety_reset(void);
  * --check-tasks. It answers the same question the borrow analyser answered
  * while compiling, from the other side: does this pointer lie in the stack of
  * the thread that is spawning the task? The analysis is not consulted, so a
- * capture it could not see is caught here anyway. Where the operating system
- * hands out the thread's stack bounds the answer is exact; where it does not,
- * the check covers a thread stack's span above the current frame and says so
- * in docs/known-limitations.md. */
+ * capture it could not see is caught here anyway.
+ *
+ * The upper bound is exact on both platforms. Windows keeps the thread's
+ * stack base in the TEB. Linux has the owned runtime record it: the initial
+ * stack block for the first thread, and the block it allocated for every
+ * thread it created. A thread the runtime did not create and cannot see, one
+ * started by foreign code that then calls back in, has no recorded bound and
+ * falls back to a thread stack's span above the current frame, which
+ * docs/known-limitations.md says. */
 void mettle_safety_task_capture_check(const void *pointer, const char *task,
                                const char *sender, uint32_t line);
 

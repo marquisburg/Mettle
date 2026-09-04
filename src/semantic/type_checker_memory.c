@@ -1124,6 +1124,66 @@ static void mem_apply_call_arg(MemCtx *ctx, MemLocal *local,
   /* pure borrow: the callee looked at it and gave it back; keep tracking */
 }
 
+static const char *mem_named_function(MemCtx *ctx, ASTNode *expr) {
+  ASTNode *arg = mem_unwrap_cast(expr);
+  UnaryExpression *unary = NULL;
+  ASTNode *operand = NULL;
+  Identifier *id = NULL;
+  MemFnSummary *body = NULL;
+  if (!arg || arg->type != AST_UNARY_EXPRESSION) {
+    return NULL;
+  }
+  unary = (UnaryExpression *)arg->data;
+  if (!unary || !unary->operator || strcmp(unary->operator, "&") != 0) {
+    return NULL;
+  }
+  operand = mem_unwrap_cast(unary->operand);
+  if (!operand || operand->type != AST_IDENTIFIER) {
+    return NULL;
+  }
+  id = (Identifier *)operand->data;
+  if (!id || !id->name || mem_find_local(ctx, id->name)) {
+    return NULL;
+  }
+  body = mem_summary_find(ctx->summaries, id->name);
+  return body && body->fn ? id->name : NULL;
+}
+
+static const char *mem_carried_function(ASTNode *expr) {
+  ASTNode *node = mem_unwrap_cast(expr);
+  ASTNode *root = node;
+  int guard = 0;
+  if (!node || !node->resolved_type ||
+      node->resolved_type->kind != TYPE_FUNCTION_POINTER) {
+    return NULL;
+  }
+  while (root && guard++ < 16) {
+    root = mem_unwrap_cast(root);
+    if (!root) {
+      return NULL;
+    }
+    if (root->type == AST_IDENTIFIER) {
+      Identifier *id = (Identifier *)root->data;
+      if (!id || !id->name) {
+        return NULL;
+      }
+      return id->name;
+    }
+    if (root->type == AST_MEMBER_ACCESS) {
+      MemberAccess *member = (MemberAccess *)root->data;
+      root = member ? member->object : NULL;
+      continue;
+    }
+    if (root->type == AST_INDEX_EXPRESSION) {
+      ArrayIndexExpression *index = (ArrayIndexExpression *)root->data;
+      root = index ? index->array : NULL;
+      continue;
+    }
+    return NULL;
+  }
+  return NULL;
+}
+
 static const char *mem_task_entry(MemCtx *ctx, CallExpression *call,
                                   size_t *arg_out) {
   size_t i;
@@ -1137,32 +1197,17 @@ static const char *mem_task_entry(MemCtx *ctx, CallExpression *call,
     return NULL;
   }
   for (i = 0; i + 1 < call->argument_count; i++) {
-    ASTNode *arg = mem_unwrap_cast(call->arguments[i]);
-    UnaryExpression *unary = NULL;
-    ASTNode *operand = NULL;
-    Identifier *id = NULL;
-    MemFnSummary *body = NULL;
-    if (!arg || arg->type != AST_UNARY_EXPRESSION) {
-      continue;
+    const char *named = mem_named_function(ctx, call->arguments[i]);
+    const char *carried = NULL;
+    if (named) {
+      *arg_out = i + 1;
+      return named;
     }
-    unary = (UnaryExpression *)arg->data;
-    if (!unary || !unary->operator || strcmp(unary->operator, "&") != 0) {
-      continue;
+    carried = mem_carried_function(call->arguments[i]);
+    if (carried) {
+      *arg_out = i + 1;
+      return carried;
     }
-    operand = mem_unwrap_cast(unary->operand);
-    if (!operand || operand->type != AST_IDENTIFIER) {
-      continue;
-    }
-    id = (Identifier *)operand->data;
-    if (!id || !id->name || mem_find_local(ctx, id->name)) {
-      continue;
-    }
-    body = mem_summary_find(ctx->summaries, id->name);
-    if (!body || !body->fn) {
-      continue;
-    }
-    *arg_out = i + 1;
-    return id->name;
   }
   return NULL;
 }
