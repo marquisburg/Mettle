@@ -23,7 +23,7 @@ frontend, see [Writing a frontend](embedding.md).
 
 8. [Heap allocation](heap-allocation.md)
 9. [Memory safety](memory-safety.md)
-10. [Borrow checker](borrow-checker.md)
+10. [Borrow checker](borrow-checker.md), including what a task may be handed
 
 ## Building
 

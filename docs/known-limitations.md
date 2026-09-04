@@ -153,8 +153,24 @@ analysis follows paths: a fact inside an `if`, a loop body, a `switch` arm or a
 `match` arm is definite for that path, and what survives the join is what every
 arm agreed on.
 
-There is no ownership syntax, so it never rejects a program. It points only at
-what it can prove. See [Borrow checker](borrow-checker.md).
+There is no ownership syntax, and the analysis rejects a program in exactly
+three places: returning the address of a local, handing a task a pointer into
+the frame that spawned it, and writing through a pointer already handed to a
+task. Everything else it points at, it points at only when it can prove it.
+
+A task is recognised by the shape of the call, meaning the address of a
+function this program defines followed by a pointer argument. A spawn that
+takes its entry point out of a struct field, an array or a variable is not
+recognised, so nothing is claimed about it. Neither M0121 nor M0122 fires on
+one, and `--check-tasks` emits no check there either.
+
+`--check-tasks` bounds the spawning thread's stack exactly where the operating
+system hands the bounds out. Where it does not, the check covers a thread
+stack's span above the current frame, so an allocation that landed within that
+span of the stack would be reported as a capture. No allocator on either
+supported platform places one there, and the check is opt-in, so this is a
+stated approximation and not a silent one. See
+[Borrow checker](borrow-checker.md).
 
 ## Null and bounds checks
 

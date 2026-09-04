@@ -3955,6 +3955,8 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
     options->report_rules = 1;
   } else if (strcmp(argv[i], "--check-proofs") == 0) {
     options->check_proofs = 1;
+  } else if (strcmp(argv[i], "--check-tasks") == 0) {
+    options->check_tasks = 1;
   } else if (strcmp(argv[i], "--check-effects") == 0) {
     options->check_effects = 1;
   } else if (strcmp(argv[i], "--check-purity-fault") == 0) {
@@ -6092,6 +6094,7 @@ int compile_file(const char *input_filename, const char *output_filename,
   ir_lowering_set_refinement_checks(options->check_proofs || options->test_mode ||
                                     options->trace_function != NULL ||
                                     ir_verify_enabled());
+  ir_lowering_set_task_checks(options->check_tasks);
   ir_explain_safety_set_collect(options->explain && options->optimize,
                                 input_filename);
 
@@ -6883,6 +6886,8 @@ void print_usage(const char *program_name) {
   printf("  --report-rules      Print the verdict and interpreter steps of every @rule\n");
   printf("  --check-proofs      Trap at run time when a value the compiler proved to be a\n"
          "                      declared type is not one (survives --release)\n");
+  printf("  --check-tasks       Trap at run time when a pointer handed to a task lies in\n"
+         "                      the stack of the thread that spawned it\n");
   printf("  --check-effects     Trap at run time when an effect the compiler proved absent\n"
          "                      is performed, or one it proved provided is not (survives\n"
          "                      --release)\n");

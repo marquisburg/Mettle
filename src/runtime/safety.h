@@ -148,6 +148,17 @@ uint64_t mettle_safety_descriptor_high_water(void);
  * measure a clean run; a program that simply exits does not need it. */
 void mettle_safety_reset(void);
 
+/* The run-time half of M0121, emitted at every task spawn under
+ * --check-tasks. It answers the same question the borrow analyser answered
+ * while compiling, from the other side: does this pointer lie in the stack of
+ * the thread that is spawning the task? The analysis is not consulted, so a
+ * capture it could not see is caught here anyway. Where the operating system
+ * hands out the thread's stack bounds the answer is exact; where it does not,
+ * the check covers a thread stack's span above the current frame and says so
+ * in docs/known-limitations.md. */
+void mettle_safety_task_capture_check(const void *pointer, const char *task,
+                               const char *sender, uint32_t line);
+
 #ifdef __cplusplus
 }
 #endif

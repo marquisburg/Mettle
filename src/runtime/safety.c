@@ -608,3 +608,52 @@ void mettle_safety_reset(void) {
   __atomic_store_n(&g_safety_live_regions, 0, __ATOMIC_RELAXED);
   safety_unlock();
 }
+
+/* ---- the task-capture check ----------------------------------------------- */
+
+#define SAFETY_TASK_STACK_SPAN (8u * 1024u * 1024u)
+
+static uintptr_t safety_stack_base(void) {
+#if defined(_WIN64)
+  const NT_TIB *tib = (const NT_TIB *)NtCurrentTeb();
+  return tib ? (uintptr_t)tib->StackBase : 0;
+#else
+  return 0;
+#endif
+}
+
+static char g_task_message[512];
+
+void mettle_safety_task_capture_check(const void *pointer, const char *task,
+                               const char *sender, uint32_t line) {
+  volatile char here = 0;
+  uintptr_t low = (uintptr_t)(void *)&here;
+  uintptr_t value = (uintptr_t)pointer;
+  uintptr_t base = safety_stack_base();
+  size_t at = 0;
+  const size_t capacity = sizeof(g_task_message);
+  (void)here;
+  if (!pointer) {
+    return;
+  }
+  if (base == 0 || base <= low) {
+    base = low + SAFETY_TASK_STACK_SPAN;
+  }
+  if (value < low || value >= base) {
+    return;
+  }
+  g_task_message[0] = '\0';
+  safety_append(g_task_message, capacity, &at,
+                "Fatal error: a pointer into the spawning thread's stack was "
+                "handed to the task '");
+  safety_append(g_task_message, capacity, &at, task ? task : "?");
+  safety_append(g_task_message, capacity, &at, "' by '");
+  safety_append(g_task_message, capacity, &at, sender ? sender : "?");
+  safety_append(g_task_message, capacity, &at, "'");
+  if (line != 0) {
+    safety_append(g_task_message, capacity, &at, " (line ");
+    safety_append_unsigned(g_task_message, capacity, &at, line);
+    safety_append(g_task_message, capacity, &at, ")");
+  }
+  mettle_crash_trap_ex(METTLE_CRASH_TRAP_UNKNOWN, g_task_message, 0, 0, 0, 0);
+}

@@ -356,6 +356,8 @@ typedef struct {
   size_t tensor_epilogue_clamp_max_argument;
   size_t tensor_epilogue_stride_argument;
   size_t tensor_epilogue_bias_stride_argument;
+  size_t task_capture_argument;
+  const char *task_entry_name;
 } CallExpression;
 
 typedef struct {

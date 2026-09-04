@@ -1,0 +1,29 @@
+// A task handed a pointer into the frame that spawned it. Nothing here says
+// when the worker stops reading, and `main` returning takes the storage with
+// it, so the build stops at the spawn.
+import "std/io";
+import "std/thread";
+
+struct Work {
+  count: int32;
+  total: int32;
+}
+
+var g_seen: int32 = 0;
+
+fn worker_main(arg: cstring) -> uint32 {
+  var w: Work* = (Work*)arg;
+  g_seen = w.count;
+  return 0;
+}
+
+fn main() -> int32 {
+  var work: Work;
+  work.count = 21;
+  work.total = 0;
+  var h: int64 = CreateThread(0, 0, &worker_main, (cstring)(&work), 0, 0);
+  thread_join_infinite(h);
+  thread_close(h);
+  println("seen {g_seen}");
+  return 0;
+}

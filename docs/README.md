@@ -31,7 +31,7 @@ frontend can drive instead. The documentation is organized the same way.
 - [Heap allocation](heap-allocation.md): the allocators and how to pair them.
 - [Memory safety](memory-safety.md): what the compiler proves, and `--safe`.
 - [Borrow checker](borrow-checker.md): pointers that outlive what they point
-  at.
+  at, including across a task boundary.
 
 ## Building and tooling
 

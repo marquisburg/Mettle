@@ -114,8 +114,10 @@ Neither needs root or admin.
 
 **Finds memory bugs while it compiles.** It reads the whole program and reports
 use after free, double free, leaks, dangling returns, and pointers `realloc`
-left stale. You write no lifetimes and no ownership marks. It infers them, and
-it reports only what it can prove. See
+left stale. It follows a pointer across a task boundary too: handing a task a
+pointer into the frame that spawned it stops the build, and so does writing
+through a message the sender already handed over. You write no lifetimes and no
+ownership marks. It infers them, and it reports only what it can prove. See
 [the memory analyser](docs/borrow-checker.md).
 
 **Checks the rest at run time, cheaply enough to ship.** `--safe` checks every

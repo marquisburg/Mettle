@@ -115,6 +115,7 @@ divergence. See [ML-driven IR optimization](ml-opt.md).
 | `--report-target` | The target in effect, printed as a `TargetDesc` in Mettle; `mettle target <triple>` prints a built-in one and `--target desc.mettle` builds for a described one. See [Bare metal](bare-metal.md). |
 | `--check-proofs` | Trap at run time when a value the compiler proved to be a [declared type](types.md) is not one. Survives `--release`, and costs nothing in a program with no declared types. |
 | `--check-effects` | Trap at run time when an [effect](effects.md) the compiler proved absent is performed, or one it proved provided is not. Survives `--release`, and costs nothing in a program that declares no effect. |
+| `--check-tasks` | Trap at run time when a pointer handed to a task lies in the stack of the thread that spawned it, re-checking M0121 without consulting the [borrow analysis](borrow-checker.md). Costs nothing in a program that spawns no task. |
 
 `--explain` needs `-O` or `--release`, because there are no decisions to
 report without the optimizer. A repeat run leads with what changed since the

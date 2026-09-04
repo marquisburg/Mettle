@@ -33,6 +33,8 @@
 //   M0115  shift count at or past the operand width               warning
 //   M0116  division or modulo by a constant zero                   ERROR
 //   M0117  loop index runs past the end of the array               ERROR
+//   M0121  a task is handed a pointer into the frame that spawns it ERROR
+//   M0122  a message written after it was handed to a task          ERROR
 //
 // Every finding reports under its own code, not the generic E0003, so
 // `mettle explain M0107` works on the diagnostic the reader is looking at.
@@ -131,6 +133,9 @@ typedef struct {
   long long points_to_offset; /* element offset into points_to_stack; -1 unknown */
   int has_const_value;    /* integer local with a known spine value */
   long long const_value;  /* (drives the loop-bound analysis) */
+  int handed_over;
+  SourceLocation handover_loc;
+  const char *handover_via;
 } MemLocal;
 
 typedef struct {
@@ -371,6 +376,27 @@ static void mem_error(MemCtx *ctx, const char *code, SourceLocation loc,
   char message[512];
   va_list args;
   if (ctx->mode != MEM_MODE_LOCAL) {
+    return;
+  }
+  va_start(args, fmt);
+  vsnprintf(message, sizeof(message), fmt, args);
+  va_end(args);
+  error_reporter_add_error_with_suggestion(ctx->checker->error_reporter,
+                                           ERROR_SEMANTIC, loc, message,
+                                           suggestion);
+  error_reporter_set_last_code(ctx->checker->error_reporter, code);
+  ir_explain_memory_note(
+      error_reporter_current_filename(ctx->checker->error_reporter), 1,
+      loc.line, code, message, suggestion);
+  ctx->checker->has_error = 1;
+  ctx->had_error = 1;
+}
+
+static void mem_error_late(MemCtx *ctx, const char *code, SourceLocation loc,
+                           const char *suggestion, const char *fmt, ...) {
+  char message[512];
+  va_list args;
+  if (ctx->mode != MEM_MODE_INTERPROC) {
     return;
   }
   va_start(args, fmt);
@@ -1098,6 +1124,100 @@ static void mem_apply_call_arg(MemCtx *ctx, MemLocal *local,
   /* pure borrow: the callee looked at it and gave it back; keep tracking */
 }
 
+static const char *mem_task_entry(MemCtx *ctx, CallExpression *call,
+                                  size_t *arg_out) {
+  size_t i;
+  MemFnSummary *callee = NULL;
+  if (!ctx->summaries || !call || call->object || call->is_indirect_call ||
+      !call->function_name) {
+    return NULL;
+  }
+  callee = mem_summary_find(ctx->summaries, call->function_name);
+  if (callee && callee->fn) {
+    return NULL;
+  }
+  for (i = 0; i + 1 < call->argument_count; i++) {
+    ASTNode *arg = mem_unwrap_cast(call->arguments[i]);
+    UnaryExpression *unary = NULL;
+    ASTNode *operand = NULL;
+    Identifier *id = NULL;
+    MemFnSummary *body = NULL;
+    if (!arg || arg->type != AST_UNARY_EXPRESSION) {
+      continue;
+    }
+    unary = (UnaryExpression *)arg->data;
+    if (!unary || !unary->operator || strcmp(unary->operator, "&") != 0) {
+      continue;
+    }
+    operand = mem_unwrap_cast(unary->operand);
+    if (!operand || operand->type != AST_IDENTIFIER) {
+      continue;
+    }
+    id = (Identifier *)operand->data;
+    if (!id || !id->name || mem_find_local(ctx, id->name)) {
+      continue;
+    }
+    body = mem_summary_find(ctx->summaries, id->name);
+    if (!body || !body->fn) {
+      continue;
+    }
+    *arg_out = i + 1;
+    return id->name;
+  }
+  return NULL;
+}
+
+static void mem_check_task_capture(MemCtx *ctx, CallExpression *call,
+                                   SourceLocation loc) {
+  size_t at = 0;
+  const char *entry = mem_task_entry(ctx, call, &at);
+  ASTNode *arg = NULL;
+  MemLocal *frame = NULL;
+  MemLocal *held = NULL;
+  if (!entry || at >= call->argument_count) {
+    return;
+  }
+  arg = call->arguments[at];
+  call->task_capture_argument = at;
+  call->task_entry_name = entry;
+  frame = mem_addr_of_stack(ctx, arg);
+  held = mem_expr_as_local(ctx, arg);
+  if (!frame && held && held->points_to_stack) {
+    frame = held;
+  }
+  if (frame) {
+    mem_error_late(
+        ctx, "M0121", loc,
+        "put what the task reads where it outlives the task: a global, an "
+        "allocation the task or a later join owns, or a value passed by copy",
+        "'%s' is handed to the task '%s', and it points into the frame of "
+        "'%s', which the task can still be reading after that frame returns",
+        frame->name, entry,
+        ctx->fn && ctx->fn->name ? ctx->fn->name : "this function");
+  }
+  if (held && held->is_pointer) {
+    held->handed_over = 1;
+    held->handover_loc = loc;
+    held->handover_via = entry;
+  }
+}
+
+static void mem_check_handover_write(MemCtx *ctx, ASTNode *target,
+                                     SourceLocation loc) {
+  MemLocal *root = mem_addr_root_local(ctx, target);
+  if (!root || !root->handed_over) {
+    return;
+  }
+  mem_error_late(ctx, "M0122", loc,
+                 "write it before the task starts, or hand the task its own "
+                 "copy and keep this one",
+                 "'%s' was handed to the task '%s' on line %d, and this "
+                 "writes through it afterwards",
+                 root->name, root->handover_via ? root->handover_via : "?",
+                 (int)root->handover_loc.line);
+  root->handed_over = 0;
+}
+
 /* Constant arithmetic that traps or surprises: division/modulo by a constant
  * zero (a guaranteed runtime trap) and shifts wider than the value (x86
  * masks the count, so `x << 32` on an int32 is `x`, which nobody means). */
@@ -1599,6 +1719,7 @@ static void mem_walk_expr(MemCtx *ctx, ASTNode *expr) {
                              : NULL,
                          i, expr->location);
     }
+    mem_check_task_capture(ctx, call, expr->location);
     return;
   }
   case AST_FUNC_PTR_CALL: {
@@ -1636,6 +1757,8 @@ static void mem_apply_assignment(MemCtx *ctx, const char *name, ASTNode *value,
     }
     if (local->is_pointer) {
       local->freed = MEM_FREED_NO;
+      local->handed_over = 0;
+      local->handover_via = NULL;
       local->freed_via = NULL;
       local->freed_alias = NULL;
       local->holds_alloc = 0;
@@ -1833,6 +1956,12 @@ static void mem_local_join(MemLocal *into, const MemLocal *a,
   into->escaped = a->escaped || b->escaped;
   into->reassigned = a->reassigned || b->reassigned;
   into->out_of_scope = a->out_of_scope || b->out_of_scope;
+  into->handed_over = a->handed_over || b->handed_over;
+  if (into->handed_over) {
+    const MemLocal *from = a->handed_over ? a : b;
+    into->handover_loc = from->handover_loc;
+    into->handover_via = from->handover_via;
+  }
 
   if (a->freed == MEM_FREED_DEFINITE && b->freed == MEM_FREED_DEFINITE) {
     into->freed = MEM_FREED_DEFINITE;
@@ -2119,6 +2248,7 @@ static void mem_walk_statement(MemCtx *ctx, ASTNode *statement) {
     if (assign->target) {
       /* store through a field/index/deref: the value escapes */
       mem_walk_expr(ctx, assign->target);
+      mem_check_handover_write(ctx, assign->target, statement->location);
       MemLocal *source = mem_expr_as_local(ctx, assign->value);
       if (source && source->is_pointer) {
         source->escaped = 1;
@@ -2503,5 +2633,5 @@ int type_checker_check_program_memory(TypeChecker *checker, ASTNode *program) {
   free(table.buckets);
   free(items);
   free(decls);
-  return 1;
+  return !checker->has_error;
 }

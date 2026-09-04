@@ -102,6 +102,7 @@ IRProgram *ir_lower_program(ASTNode *program, TypeChecker *type_checker,
   context.emit_runtime_checks = emit_runtime_checks ? 1 : 0;
   context.emit_safety_checks = emit_safety_checks ? 1 : 0;
   context.emit_refinement_checks = g_ir_lowering_refinement_checks;
+  context.emit_task_checks = g_ir_lowering_task_checks;
   context.program = ir_program;
 
   Program *program_data = (Program *)program->data;
@@ -155,6 +156,28 @@ IRProgram *ir_lower_program(ASTNode *program, TypeChecker *type_checker,
    * generators no longer consult the frontend TypeChecker/SymbolTable/AST. */
   mtlc_lower_populate_module(ir_program, program, type_checker, symbol_table);
   ir_mark_volatile_global_accesses(ir_program);
+  if (context.emitted_task_check &&
+      !ir_program_lookup_symbol(ir_program, "mettle_safety_task_capture_check")) {
+    IRModuleSymbol entry;
+    MtlcType *params[4];
+    MtlcType *cstring = ir_program_lookup_type(ir_program, "cstring");
+    MtlcType *word = ir_program_lookup_type(ir_program, "uint32");
+    memset(&entry, 0, sizeof(entry));
+    entry.name = "mettle_safety_task_capture_check";
+    entry.kind = IR_MODSYM_FUNCTION;
+    entry.is_extern = 1;
+    entry.has_body = 0;
+    entry.return_type = ir_program_lookup_type(ir_program, "void");
+    if (cstring && word) {
+      params[0] = cstring;
+      params[1] = cstring;
+      params[2] = cstring;
+      params[3] = word;
+      entry.param_types = params;
+      entry.param_count = 4;
+    }
+    ir_program_add_symbol(ir_program, &entry);
+  }
 
   return ir_program;
 }
@@ -306,11 +329,16 @@ IRFunction *ir_lower_function(IRLoweringContext *context,
 
 int g_ir_lowering_explain = 0;
 int g_ir_lowering_refinement_checks = 0;
+int g_ir_lowering_task_checks = 0;
 
 void ir_lowering_set_explain(int enabled) { g_ir_lowering_explain = enabled; }
 
 void ir_lowering_set_refinement_checks(int enabled) {
   g_ir_lowering_refinement_checks = enabled;
+}
+
+void ir_lowering_set_task_checks(int enabled) {
+  g_ir_lowering_task_checks = enabled;
 }
 
 void ir_set_error(IRLoweringContext *context, const char *format, ...) {

@@ -1,0 +1,29 @@
+// A task handed something that outlives it. The message is a global, so the
+// spawning frame's return has nothing to do with what the worker reads, and
+// both the borrow analyser and --check-tasks are quiet.
+import "std/io";
+import "std/thread";
+
+struct Work {
+  count: int32;
+  total: int32;
+}
+
+var g_work: Work;
+var g_seen: int32 = 0;
+
+fn worker_main(arg: cstring) -> uint32 {
+  var w: Work* = (Work*)arg;
+  g_seen = w.count * 2;
+  return 0;
+}
+
+fn main() -> int32 {
+  g_work.count = 21;
+  g_work.total = 0;
+  var h: int64 = CreateThread(0, 0, &worker_main, (cstring)(&g_work), 0, 0);
+  thread_join_infinite(h);
+  thread_close(h);
+  println("seen {g_seen}");
+  return 0;
+}

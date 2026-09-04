@@ -32,7 +32,12 @@ and subsystems apart:
   inference with no ownership syntax, and it "never rejects a program. It only
   points at provable mistakes." A whole class of false-positive-driven misery,
   the reason people fight their borrow checkers, was designed out by refusing
-  to speak without proof.
+  to speak without proof. It rejects a program in three places, and each is a
+  fact rather than a risk: returning the address of a local, handing a task a
+  pointer into the frame that spawned it (`M0121`), and writing through a
+  message already handed to a task (`M0122`). Each stays inference: a task is
+  recognised by the shape of the call, and `--check-tasks` re-asks the first
+  one at run time without consulting what the analysis concluded.
 - `--explain` simulates its own suggestions before printing them. A
   compiler that says "try hoisting this bound" without checking is guessing at
   the user's expense. Mettle runs the suggested fix and only prints it if it

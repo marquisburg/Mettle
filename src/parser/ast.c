@@ -342,6 +342,8 @@ static ASTNode *ast_clone_function_call(ASTNode *clone, const ASTNode *node) {
       src->tensor_epilogue_stride_argument;
   dst->tensor_epilogue_bias_stride_argument =
       src->tensor_epilogue_bias_stride_argument;
+  dst->task_capture_argument = src->task_capture_argument;
+  dst->task_entry_name = src->task_entry_name;
   dst->type_arg_count = src->type_arg_count;
   dst->written_name = ast_intern_string(src->written_name);
   dst->is_indirect_call = src->is_indirect_call;
@@ -2248,6 +2250,8 @@ ASTNode *ast_create_call_expression(const char *function_name,
   call_expr->tensor_epilogue_clamp_max_argument = SIZE_MAX;
   call_expr->tensor_epilogue_stride_argument = SIZE_MAX;
   call_expr->tensor_epilogue_bias_stride_argument = SIZE_MAX;
+  call_expr->task_capture_argument = SIZE_MAX;
+  call_expr->task_entry_name = NULL;
 
   if (argument_count > 0) {
     call_expr->arguments = malloc(argument_count * sizeof(ASTNode *));
@@ -2719,6 +2723,8 @@ ASTNode *ast_create_method_call(ASTNode *object, const char *method_name,
   call_expr->tensor_epilogue_clamp_max_argument = SIZE_MAX;
   call_expr->tensor_epilogue_stride_argument = SIZE_MAX;
   call_expr->tensor_epilogue_bias_stride_argument = SIZE_MAX;
+  call_expr->task_capture_argument = SIZE_MAX;
+  call_expr->task_entry_name = NULL;
 
   if (argument_count > 0) {
     call_expr->arguments = malloc(argument_count * sizeof(ASTNode *));

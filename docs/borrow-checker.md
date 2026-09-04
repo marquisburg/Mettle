@@ -98,6 +98,57 @@ another is two paths that disagree, and nothing is said. A loop body is one
 path and not entering the loop is another, so an allocation freed in the body
 is accounted for, and one the body never frees is a leak.
 
+## Across a task boundary
+
+Two lifetime questions cross out of one thread and into another, and the
+analysis answers both.
+
+A task is recognised by shape, not by name. A call hands the address of a
+function this program defines to a callee whose body is not here, with a
+pointer as the argument straight after it. That is what `CreateThread`,
+`pthread_create` and a program's own spawn wrapper all look like, so all three
+are seen the same way, and no interface is on a list the compiler believes.
+
+The pointer that follows the entry point is what the task will read.
+
+```mettle
+var work: Work;
+CreateThread(0, 0, &worker_main, (cstring)(&work), 0, 0);   // M0121
+```
+
+`work` lives in the frame that spawns the task, and the frame's storage goes
+when it returns. Nothing here says when the task stops reading, so this is
+refused rather than warned about: the read happens on another thread and the
+corruption it causes carries no line number. A global, an allocation, or a
+value passed by copy all outlive the frame and all compile.
+
+The second question is what the sender may still do with what it handed over.
+
+```mettle
+var h: int64 = CreateThread(0, 0, &worker_main, msg, 0, 0);
+msg[0] = 2;                                                // M0122
+```
+
+From the spawn onwards both ends hold the same bytes with nothing ordering
+them, so what the worker reads depends on which core got there first. A
+pointer reassigned before the write is a different object and says nothing;
+the finding is reported once per pointer, so a loop that writes it prints one
+line.
+
+`--check-tasks` asks the same question from the other side. It emits a call at
+every recognised spawn that compares the handed pointer against the spawning
+thread's stack and traps when it lies inside, without consulting the analysis
+at all, which is what catches a capture routed through a global first:
+
+```bash
+mettle --build app.mettle -o app.exe --check-tasks
+```
+
+A program with no task spawn compiles to the same bytes with the flag as
+without it, because nothing is emitted and no helper is named. See
+[known limitations](known-limitations.md) for what the run-time check can and
+cannot bound exactly.
+
 ## Where it stays quiet
 
 The analysis proves things about code it can follow. It says nothing when it

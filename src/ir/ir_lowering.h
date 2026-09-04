@@ -31,5 +31,6 @@ IRProgram *ir_lower_program(ASTNode *program, TypeChecker *type_checker,
 void ir_lowering_set_explain(int enabled);
 
 void ir_lowering_set_refinement_checks(int enabled);
+void ir_lowering_set_task_checks(int enabled);
 
 #endif /* IR_LOWERING_H */

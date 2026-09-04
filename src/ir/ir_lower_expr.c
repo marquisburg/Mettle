@@ -179,6 +179,90 @@ static int ir_lower_interpolation(IRLoweringContext *context,
                                   ASTNode *expression,
                                   IROperand *out_value);
 
+static int ir_task_argument_is_repeatable(ASTNode *node) {
+  int guard = 0;
+  while (node && guard++ < 16) {
+    if (node->type == AST_CAST_EXPRESSION) {
+      CastExpression *cast = (CastExpression *)node->data;
+      node = cast ? cast->operand : NULL;
+      continue;
+    }
+    if (node->type == AST_IDENTIFIER) {
+      return 1;
+    }
+    if (node->type == AST_MEMBER_ACCESS) {
+      MemberAccess *member = (MemberAccess *)node->data;
+      node = member ? member->object : NULL;
+      continue;
+    }
+    if (node->type == AST_UNARY_EXPRESSION) {
+      UnaryExpression *unary = (UnaryExpression *)node->data;
+      if (!unary || !unary->operator ||
+          (strcmp(unary->operator, "&") != 0 &&
+           strcmp(unary->operator, "*") != 0)) {
+        return 0;
+      }
+      node = unary->operand;
+      continue;
+    }
+    if (node->type == AST_INDEX_EXPRESSION) {
+      ArrayIndexExpression *index = (ArrayIndexExpression *)node->data;
+      if (!index || !index->index ||
+          (index->index->type != AST_NUMBER_LITERAL &&
+           index->index->type != AST_IDENTIFIER)) {
+        return 0;
+      }
+      node = index->array;
+      continue;
+    }
+    return 0;
+  }
+  return 0;
+}
+
+static int ir_emit_task_capture_check(IRLoweringContext *context,
+                                      IRFunction *function,
+                                      ASTNode *expression,
+                                      CallExpression *call) {
+  IROperand pointer = ir_operand_none();
+  IRInstruction helper = {0};
+  int ok = 0;
+  ASTNode *argument = NULL;
+  if (call->task_capture_argument >= call->argument_count ||
+      !call->arguments) {
+    return 1;
+  }
+  argument = call->arguments[call->task_capture_argument];
+  if (!ir_task_argument_is_repeatable(argument)) {
+    return 1;
+  }
+  if (!ir_lower_expression(context, function, argument, &pointer)) {
+    return 0;
+  }
+  helper.op = IR_OP_CALL;
+  helper.location = expression->location;
+  helper.text = "mettle_safety_task_capture_check";
+  helper.argument_count = 4;
+  helper.arguments = calloc(4, sizeof(IROperand));
+  if (!helper.arguments) {
+    ir_operand_destroy(&pointer);
+    return 0;
+  }
+  helper.arguments[0] = pointer;
+  helper.arguments[1] = ir_operand_string(
+      call->task_entry_name ? call->task_entry_name : "?");
+  helper.arguments[2] = ir_operand_string(
+      context->current_function_name ? context->current_function_name : "?");
+  helper.arguments[3] = ir_operand_int((long long)expression->location.line);
+  ok = ir_emit(context, function, &helper);
+  context->emitted_task_check = 1;
+  ir_operand_destroy(&helper.arguments[1]);
+  ir_operand_destroy(&helper.arguments[2]);
+  free(helper.arguments);
+  ir_operand_destroy(&pointer);
+  return ok;
+}
+
 int ir_lower_call_expression(IRLoweringContext *context,
                                     IRFunction *function, ASTNode *expression,
                                     IROperand *out_value) {
@@ -186,6 +270,12 @@ int ir_lower_call_expression(IRLoweringContext *context,
   Symbol *callee_symbol = NULL;
   if (!call || !call->function_name) {
     ir_set_error(context, "Malformed call expression");
+    return 0;
+  }
+
+  if (context->emit_task_checks &&
+      call->task_capture_argument != SIZE_MAX &&
+      !ir_emit_task_capture_check(context, function, expression, call)) {
     return 0;
   }
 

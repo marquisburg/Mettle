@@ -4476,6 +4476,60 @@ catch {
   Write-CaseResult -Name "abstraction_examples" -Passed $false -Reason $_.Exception.Message
 }
 
+# A pointer that crosses into a task stops being the sender's. Enforce: the
+# frame's address handed to a task fails the build, a write through a message
+# already handed over fails the build, the correct program builds and runs,
+# --check-tasks catches a capture the analysis could not see, and a program
+# with no task pays nothing for the flag.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "task_ok.exe"
+  $out = & $CompilerPath --build "tests/test_task_ok.mettle" -o $exe --check-tasks 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a task handed a global was refused: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "seen 42") { throw "the worker did not read the message: $run" }
+
+  $out = & $CompilerPath --build "tests/test_task_capture.mettle" -o (Join-Path $tmpDir "task_capture.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a task handed a pointer into the spawning frame built" }
+  if ($out -notmatch "error\[M0121\]") { throw "the capture was not refused under its own code: $out" }
+  if ($out -notmatch "points into the frame of") { throw "the refusal does not say what is wrong: $out" }
+
+  $out = & $CompilerPath --build "tests/test_task_write_after.mettle" -o (Join-Path $tmpDir "task_write.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a message written after handover built" }
+  if ($out -notmatch "error\[M0122\]") { throw "the write after handover was not refused: $out" }
+
+  $out = & $CompilerPath explain M0121 2>&1 | Out-String
+  if ($out -notmatch "every thread-spawn interface") { throw "explain M0121 says nothing: $out" }
+  $out = & $CompilerPath explain M0122 2>&1 | Out-String
+  if ($out -notmatch "nothing ordering the two") { throw "explain M0122 says nothing: $out" }
+
+  $laundered = Join-Path $tmpDir "task_laundered.exe"
+  $out = & $CompilerPath --build "tests/test_task_laundered.mettle" -o $laundered --check-tasks 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the laundered capture was refused while compiling: $out" }
+  $run = & $laundered 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a capture the analysis could not see ran to completion" }
+  if ($run -notmatch "into the spawning thread's stack") { throw "the run-time check did not catch it: $run" }
+
+  $plain = Join-Path $tmpDir "task_free_plain.exe"
+  $checked = Join-Path $tmpDir "task_free_checked.exe"
+  $out = & $CompilerPath --build "tests/test_pure_inferred.mettle" -o $plain 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the taskless build failed: $out" }
+  $out = & $CompilerPath --build "tests/test_pure_inferred.mettle" -o $checked --check-tasks 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the taskless build under --check-tasks failed: $out" }
+  $a = [System.IO.File]::ReadAllBytes($plain)
+  $b = [System.IO.File]::ReadAllBytes($checked)
+  if ($a.Length -ne $b.Length) { throw "a program with no task changed size under --check-tasks" }
+  for ($i = 0; $i -lt $a.Length; $i++) {
+    if ($a[$i] -ne $b[$i]) { throw "a program with no task changed at byte $i under --check-tasks" }
+  }
+  Write-CaseResult -Name "task_ownership_crosses_the_handover" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "task_ownership_crosses_the_handover" -Passed $false -Reason $_.Exception.Message
+}
+
 # A @rule is a property the program requires of itself. Enforce: there is an
 # input on which the build actually fails, and the failure names the site the
 # rule pointed at and the rule that pointed there.

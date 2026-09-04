@@ -1,0 +1,25 @@
+// The sender keeps writing a message it already handed to a task. Both ends
+// hold the same bytes from the spawn onwards with nothing ordering them, so
+// what the worker reads depends on which core got there first.
+import "std/io";
+import "std/mem";
+import "std/thread";
+
+var g_seen: int32 = 0;
+
+fn worker_main(arg: cstring) -> uint32 {
+  g_seen = (int32)arg[0];
+  return 0;
+}
+
+fn main() -> int32 {
+  var msg: cstring = malloc(64);
+  msg[0] = 1;
+  var h: int64 = CreateThread(0, 0, &worker_main, msg, 0, 0);
+  msg[0] = 2;
+  thread_join_infinite(h);
+  thread_close(h);
+  free(msg);
+  println("seen {g_seen}");
+  return 0;
+}

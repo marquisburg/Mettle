@@ -126,6 +126,7 @@ typedef struct {
   const char *target_desc_path;
   int report_target;
   int check_proofs;
+  int check_tasks;
   int check_effects;
   int check_purity_fault;
   int emit_object;
