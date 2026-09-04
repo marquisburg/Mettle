@@ -197,7 +197,7 @@ ramp apart 15.75, overlapped 0.5
 `0.5` is the answer the program wrote. Under the kernels it would have been
 `0.0`.
 
-## Seven rules, over three different things
+## Eight rules, over three different things
 
 ```bash
 mettle --build examples/desk/desk.mettle -o desk.exe --release --report-rules
@@ -226,6 +226,7 @@ mettle test examples/desk/desk.mettle --report-rules
 ```text
 test the_offline_bounce_is_deterministic ... ok
 rule the_audio_path_never_allocates: gap, 191 steps
+rule every_block_it_takes_is_released: gap, 172 steps
 rule every_lock_is_released: gap, 170 steps
 rule every_frame_that_started_finished: gap, 193 steps
 ```
@@ -242,14 +243,18 @@ mettle check-trace examples/desk/desk.mettle desk.trace --report-rules
 ```
 
 ```text
-trace: 17892 events from 'desk.trace'
-rule the_audio_path_never_allocates: pass, 1557568 steps
-rule every_lock_is_released: pass, 1664110 steps
-rule every_frame_that_started_finished: pass, 2521768 steps
+trace: 17915 events from 'desk.trace'
+rule the_audio_path_never_allocates: pass, 1559408 steps
+rule every_block_it_takes_is_released: pass, 1433391 steps
+rule every_lock_is_released: pass, 1666249 steps
+rule every_frame_that_started_finished: pass, 2524528 steps
 ```
 
 `the_audio_path_never_allocates` is `@noalloc` and `forbids alloc` asked again
 of a run that actually happened, by something that did not make the proof.
+`every_block_it_takes_is_released` counts what the run took against what it
+gave back, and the strings the printing builds are on that ledger like
+anything else: this run took 27 blocks and released 27.
 
 ## Everything else it holds up under
 

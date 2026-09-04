@@ -48,6 +48,8 @@
 #include "type_checker_internal.h"
 #include "../ir/ir_explain_memory.h"
 #include "codegen/target.h"
+#include <stdlib.h>
+#include <stdio.h>
 
 #define MEM_MAX_LOCALS 256
 #define MEM_MAX_PARAMS 32
@@ -176,7 +178,8 @@ static int mem_type_is_pointer(const char *type_name) {
     return 1;
   }
   return strcmp(type_name, "cstring") == 0 ||
-         strcmp(type_name, "rawptr") == 0;
+         strcmp(type_name, "rawptr") == 0 ||
+         strcmp(type_name, "string") == 0;
 }
 
 static long long mem_scalar_size(MemCtx *ctx, const char *type_name) {
@@ -2632,6 +2635,27 @@ int type_checker_check_program_memory(TypeChecker *checker, ASTNode *program) {
     }
   }
 
+  /* The facts outlive this pass. IR lowering asks whether a callee gives a
+   * pointer back, which is the same question `stores` answers, and the answer
+   * is what lets a string built for one call be freed after it. */
+  if (checker->borrow_facts) {
+    free(checker->borrow_facts);
+  }
+  checker->borrow_facts = calloc(table.count, sizeof(TypeCheckerBorrowFact));
+  checker->borrow_fact_count = 0;
+  if (checker->borrow_facts) {
+    for (size_t i = 0; i < table.count; i++) {
+      if (!decls[i]) {
+        continue;
+      }
+      checker->borrow_facts[checker->borrow_fact_count].name = items[i].name;
+      checker->borrow_facts[checker->borrow_fact_count].stores = items[i].stores;
+      checker->borrow_facts[checker->borrow_fact_count].frees =
+          items[i].frees_definite | items[i].frees_maybe;
+      checker->borrow_fact_count++;
+    }
+  }
+
   /* Reporting pass: summary-aware leaks and cross-call use-after-free. */
   for (size_t i = 0; i < table.count; i++) {
     if (!decls[i]) {
@@ -2679,4 +2703,20 @@ int type_checker_check_program_memory(TypeChecker *checker, ASTNode *program) {
   free(items);
   free(decls);
   return !checker->has_error;
+}
+
+int type_checker_callee_borrows(const TypeChecker *checker, const char *callee,
+                                size_t index) {
+  if (!checker || !callee || index >= MEM_MAX_PARAMS) {
+    return 0;
+  }
+  for (size_t i = 0; i < checker->borrow_fact_count; i++) {
+    if (checker->borrow_facts[i].name &&
+        strcmp(checker->borrow_facts[i].name, callee) == 0) {
+      unsigned bit = 1u << index;
+      return (checker->borrow_facts[i].stores & bit) == 0u &&
+             (checker->borrow_facts[i].frees & bit) == 0u;
+    }
+  }
+  return 0;
 }

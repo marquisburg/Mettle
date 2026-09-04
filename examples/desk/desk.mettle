@@ -336,6 +336,17 @@ fn on_the_audio_path(name: string) -> bool {
   return verdict_pass();
 }
 
+@rule fn every_block_it_takes_is_released(t: Trace) -> Verdict explain R4008 "A desk that keeps a block per frame runs out of memory on the long session, and nothing shorter finds it. The strings the printing builds are on this ledger too, because they are blocks like any other." {
+  var taken: int64 = trace_count(t, "alloc");
+  if (taken == 0) {
+    return verdict_gap_program("this run took nothing, so nothing here was tested");
+  }
+  if (taken != trace_count(t, "free")) {
+    return verdict_fail_program("this run took and released a different number of blocks");
+  }
+  return verdict_pass();
+}
+
 @rule fn every_lock_is_released(t: Trace) -> Verdict explain R4006 "The meter lock is held for two stores. A run that leaves it held stops the next frame forever." {
   if (trace_count(t, "lock") == 0) {
     return verdict_gap_program("this run took no lock, so nothing here was tested");

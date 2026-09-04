@@ -252,7 +252,13 @@ accepted at a declaration, an argument, a return, and an assignment.
 ## Borrow analysis
 
 A borrow handed across a call boundary is not followed: the interior pointer
-`&buf[4]` passed to a function is not related back to `buf` inside it.
+`&buf[4]` passed to a function is not related back to `buf` inside it. The
+same gap sets the one limit on releasing an interpolated string: a callee that
+stores its `string` parameter or hands it back is seen and nothing is
+released, but a callee that passes the view's `chars` to an `extern` which
+keeps the bytes is not, because nothing states what an `extern` does with a
+pointer it is given. A `string` is a borrowed view, so a callee keeping one
+past the call was already keeping a borrow.
 
 A leak is reported for an allocation the function never frees. One the function
 frees on some paths and not on the path an early `return` takes is not reported,

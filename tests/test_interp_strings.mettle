@@ -1,0 +1,46 @@
+// What an interpolated string costs, and who releases it.
+//
+// Every piece of a concatenation is dead the moment its bytes have been
+// copied, so lowering releases it. The last piece is dead when the call it was
+// built for returns, provided that call gives it back; `keeps` and `hands_back`
+// do not, and the same run has to still print what they were given.
+import "std/io";
+import "std/mem";
+
+var g_kept: string;
+
+fn hands_back(s: string) -> string {
+  return s;
+}
+
+fn keeps(s: string) {
+  g_kept = s;
+}
+
+fn reads(s: string) -> int64 {
+  return (int64)s.length;
+}
+
+fn main() -> int32 {
+  var n: int32 = 3;
+  var f: float64 = 1.5;
+  var c: char = 'z';
+  println("ints {0} {n} {-n} {1234567890} {-1234567890}");
+  println("mixed {c} {true} {false} {f} {-f}");
+  println("edges {0.0} {1e18} {1.0e-9} {123456789.25}");
+  println(hands_back("through {n}"));
+  keeps("kept {n}");
+  println(g_kept);
+  println("read {reads("four {n}")}");
+  var held: string = "held {n}";
+  println(held);
+  println(held);
+  var i: int32 = 0;
+  var total: int64 = 0;
+  while (i < 64) {
+    total = total + reads("loop {i}");
+    i = i + 1;
+  }
+  println("total {total}");
+  return 0;
+}

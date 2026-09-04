@@ -231,6 +231,40 @@ The braces are part of the literal, so interpolation works in any string, and
 [`print`](standard-library.md) and `println` are ordinary functions taking one
 `string`.
 
+### What it costs, and who releases it
+
+Interpolation desugars to `+` over the pieces, and `+` on strings builds a new
+one. Each conversion takes one block sized to what it writes, and every piece
+of the chain is dead the moment its bytes have been copied into the next one,
+so the compiler releases it there: an interpolated string costs one allocation,
+not one per `{expr}`. A `{b}` on a bool takes nothing at all, because the
+answer is one of two literals.
+
+The last block is released too, where the compiler can see the end of it. A
+string built for one call and handed to a function that neither keeps nor
+returns it is unreachable the moment that call returns, and that is not a
+promise anyone writes: it is what the [memory analysis](borrow-checker.md)
+inferred about that parameter. `println("frames {n}")` therefore allocates once
+and frees once. Where there is no such fact, an extern, a call through a
+pointer, a callee that stores the view or hands it back, nothing is released
+and the string is the program's, exactly as the result of `a + b` is:
+
+```mettle
+println("frames {n}");        // one block, taken and released
+var label: string = "f {n}";  // one block, and it is yours
+println(label);
+free(label.chars);
+```
+
+A `string` is a borrowed view, so a function that keeps one past the call is
+keeping a borrow. The compiler reads a callee that stores its parameter or
+returns it as doing exactly that and releases nothing; what it cannot see is a
+callee that hands the bytes to an `extern` which keeps them, since nothing
+states what an `extern` does with a pointer.
+
+`--record-trace` puts this on a ledger: every block a run takes and every one
+it releases, with the site, for `mettle check-trace` to hold a rule to.
+
 ## See also
 
 - [Types](types.md)

@@ -45,6 +45,11 @@ var n: int32 = 42;
 println("answer is {n}");
 ```
 
+That line takes one block and gives it back: `print` and `println` only read
+what they are handed, which the compiler works out rather than being told, so
+the string built for the call is released when it returns. See
+[what interpolation costs](expressions.md).
+
 Files come through the C standard library, declared here so you can call them
 directly:
 

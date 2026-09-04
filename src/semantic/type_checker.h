@@ -197,7 +197,26 @@ typedef struct {
   struct TypeCheckerProof *proof_log;
   size_t proof_log_count;
   size_t proof_log_capacity;
+  /* What the memory analysis inferred about each function's parameters, kept
+     past its own pass because IR lowering asks the same question: a value
+     built for one call and handed to a function that only reads it dies with
+     the call. Bit i is parameter i. */
+  struct TypeCheckerBorrowFact *borrow_facts;
+  size_t borrow_fact_count;
 } TypeChecker;
+
+typedef struct TypeCheckerBorrowFact {
+  const char *name; /* AST-owned */
+  unsigned stores;  /* keeps a reference to parameter i */
+  unsigned frees;   /* frees parameter i, definitely or maybe */
+} TypeCheckerBorrowFact;
+
+/* 1 when `callee` is a function this build analyzed and it neither keeps a
+   reference to parameter `index` nor frees it: the argument is read and given
+   back. 0 for anything unknown, which is what an extern, a call through a
+   pointer, and a parameter past the analysis's width all are. */
+int type_checker_callee_borrows(const TypeChecker *checker, const char *callee,
+                                size_t index);
 
 int type_checker_predicate_is_relational(TypeChecker *checker,
                                          struct ASTNode *predicate,

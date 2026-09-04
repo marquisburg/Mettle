@@ -118,7 +118,11 @@ static int instrument_one(IRFunction *fn, size_t *sites) {
     if (insn->op != IR_OP_CALL || !insn->text) {
       continue;
     }
-    if (strcmp(record_display_name(insn->text), "free") == 0) {
+    /* `mettle_string_free` releases exactly one block, so a ledger that
+     * counted the string this allocated and not the release of it would say a
+     * program leaks where it does not. */
+    if (strcmp(record_display_name(insn->text), "free") == 0 ||
+        strcmp(record_display_name(insn->text), "mettle_string_free") == 0) {
       const IROperand *pointer =
           insn->argument_count > 0 ? &insn->arguments[0] : NULL;
       if (!emit_event(fn, i - 1, "free", "free", pointer, insn->location)) {

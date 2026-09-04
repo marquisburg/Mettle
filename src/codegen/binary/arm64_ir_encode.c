@@ -114,7 +114,7 @@ typedef enum {
   STUB_MALLOC, STUB_CALLOC, STUB_FREE, STUB_PUTS, STUB_PUTCHAR, STUB_WRITE,
   STUB_STRLEN, STUB_MEMCPY, STUB_MEMMOVE, STUB_MEMSET, STUB_EXIT, STUB_ABORT,
   STUB_STR_FROM_INT, STUB_STR_FROM_UINT, STUB_STR_FROM_BOOL,
-  STUB_STR_FROM_CHAR, STUB_STR_EQ,
+  STUB_STR_FROM_CHAR, STUB_STR_EQ, STUB_STR_FREE,
   STUB_COUNT
 } Arm64StubId;
 
@@ -129,6 +129,7 @@ static const struct {
     {"mettle_string_from_bool", 1},
     {"mettle_string_from_char", 1},
     {"mettle_string_eq", 0},
+    {"mettle_string_free", 0},
 };
 
 /* Index of the runtime stub named `name`, or -1. `mettle_heap_zeroed` is the
@@ -3399,6 +3400,10 @@ static void emit_runtime_stub(Arm64Emit *e, int id, int malloc_label) {
   case STUB_STR_FROM_BOOL: emit_string_from_bool(e, malloc_label); break;
   case STUB_STR_FROM_CHAR: emit_string_from_char(e, malloc_label); break;
   case STUB_STR_EQ: emit_string_eq(e); break;
+  /* The self-contained image allocates by bumping, so releasing a string is
+   * the same nothing that releasing anything else is here. The call still has
+   * to resolve: lowering emits it wherever it can see a string end. */
+  case STUB_STR_FREE: emit_stub_free(e); break;
   default: arm64_fail(e, "internal: no runtime stub %d", id); break;
   }
 }

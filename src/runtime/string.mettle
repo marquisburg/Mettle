@@ -23,15 +23,73 @@
 // one per interpolated type; a program that never interpolates names none of
 // them and links none of this.
 //
-// Digits are written back-to-front into one heap-allocated scratch block. The
-// block must outlive the returned view, so it is `new` storage, never a stack
-// local, which the escape checker would rightly reject.
-
-struct MettleStringScratch {
-    bytes: uint8[32]
-}
+// Every one of these returns a view whose `chars` is the base of its own
+// allocation, so `mettle_string_free` on the view frees exactly what was
+// taken. That is what lets lowering free the pieces of an interpolation once
+// they have been copied into the next one: a view into the middle of a block
+// could not be handed to `free`, and before this the digits were written
+// back-to-front into a block whose base nobody kept.
 
 extern fn malloc(size: int64) -> rawptr = "malloc";
+extern fn free(block: rawptr) = "free";
+
+// Release the storage behind a view this module produced. IR lowering emits
+// this for a string it built and can see the end of, and for nothing else: a
+// literal, a slice, and a view a program is still holding are not this
+// module's to release.
+export fn mettle_string_free(s: string) -> int32 {
+    free(s.chars);
+    return 0;
+}
+
+// Write `value`'s digits at `at` and answer where they end. Shared by every
+// conversion here, so none of them builds a number by concatenation.
+fn mettle_string_put_uint(buf: uint8*, at: int64, value: uint64) -> int64 {
+    var digits: int64 = 1;
+    var probe: uint64 = value;
+    while (probe >= (uint64)10) {
+        probe = probe / (uint64)10;
+        digits = digits + 1;
+    }
+    var i: int64 = at + digits;
+    var v: uint64 = value;
+    while (i > at) {
+        i = i - 1;
+        buf[i] = (uint8)(48 + (v % (uint64)10));
+        v = v / (uint64)10;
+    }
+    return at + digits;
+}
+
+fn mettle_string_put_text(buf: uint8*, at: int64, text: string) -> int64 {
+    var i: int64 = 0;
+    var n: int64 = (int64)text.length;
+    while (i < n) {
+        buf[at + i] = text.chars[i];
+        i = i + 1;
+    }
+    return at + n;
+}
+
+// Close a buffer this module filled: NUL for anything that later reads it as a
+// C string, and a view whose base is the block itself.
+fn mettle_string_own(buf: uint8*, length: int64) -> string {
+    buf[length] = (uint8)0;
+    var s: string;
+    s.chars = buf;
+    s.length = (uint64)length;
+    return s;
+}
+
+fn mettle_string_uint_digits(value: uint64) -> int64 {
+    var digits: int64 = 1;
+    var probe: uint64 = value;
+    while (probe >= (uint64)10) {
+        probe = probe / (uint64)10;
+        digits = digits + 1;
+    }
+    return digits;
+}
 
 export fn mettle_string_concat(a: string, b: string) -> string {
     var total: int64 = (int64)a.length + (int64)b.length;
@@ -57,22 +115,9 @@ export fn mettle_string_concat(a: string, b: string) -> string {
 }
 
 export fn mettle_string_from_uint(value: uint64) -> string {
-    var scratch: MettleStringScratch* = new MettleStringScratch;
-    var pos: int64 = 32;
-    var v: uint64 = value;
-    if (v == 0) {
-        pos = pos - 1;
-        scratch->bytes[pos] = (uint8)48;
-    }
-    while (v > 0) {
-        pos = pos - 1;
-        scratch->bytes[pos] = (uint8)(48 + (v % 10));
-        v = v / 10;
-    }
-    var s: string;
-    s.chars = &scratch->bytes[pos];
-    s.length = (uint64)(32 - pos);
-    return s;
+    var digits: int64 = mettle_string_uint_digits(value);
+    var buf: uint8* = malloc(digits + 1);
+    return mettle_string_own(buf, mettle_string_put_uint(buf, 0, value));
 }
 
 export fn mettle_string_from_int(value: int64) -> string {
@@ -80,19 +125,19 @@ export fn mettle_string_from_int(value: int64) -> string {
         return mettle_string_from_uint((uint64)value);
     }
     var magnitude: uint64 = (uint64)0 - (uint64)value;
-    return "-" + mettle_string_from_uint(magnitude);
+    var digits: int64 = mettle_string_uint_digits(magnitude);
+    var buf: uint8* = malloc(digits + 2);
+    buf[0] = (uint8)45;
+    return mettle_string_own(buf, mettle_string_put_uint(buf, 1, magnitude));
 }
 
 // One character, as a view of one byte. The byte needs a home that outlives
-// the view, so it comes from the same heap scratch the digits use rather than
-// from a stack local the escape checker would reject.
+// the view, so it comes from the heap rather than from a stack local the
+// escape checker would rightly reject.
 export fn mettle_string_from_char(value: int64) -> string {
-    var scratch: MettleStringScratch* = new MettleStringScratch;
-    scratch->bytes[0] = (uint8)value;
-    var s: string;
-    s.chars = &scratch->bytes[0];
-    s.length = (uint64)1;
-    return s;
+    var buf: uint8* = malloc(2);
+    buf[0] = (uint8)value;
+    return mettle_string_own(buf, 1);
 }
 
 export fn mettle_string_from_bool(value: int64) -> string {
@@ -107,7 +152,7 @@ export fn mettle_string_from_bool(value: int64) -> string {
 // as d.dddddd with a decimal exponent instead, because past those points the
 // fixed form is either wider than it is honest or all zeros. Not
 // shortest-round-trip; six significant fractional digits is the contract.
-fn mettle_string_f64_fixed(value: float64) -> string {
+fn mettle_string_put_fixed(buf: uint8*, at: int64, value: float64) -> int64 {
     var int_part: int64 = (int64)value;
     var frac: float64 = value - (float64)int_part;
     var scaled: int64 = (int64)(frac * 1000000.0 + 0.5);
@@ -115,19 +160,25 @@ fn mettle_string_f64_fixed(value: float64) -> string {
         scaled = scaled - 1000000;
         int_part = int_part + 1;
     }
-    // 1000000 + scaled prints as "1xxxxxx"; dropping the '1' leaves the six
-    // fractional digits zero-padded without a padding loop.
-    var padded: string = mettle_string_from_uint((uint64)(1000000 + scaled));
-    var frac_str: string;
-    frac_str.chars = padded.chars + 1;
-    frac_str.length = padded.length - 1;
-    while (frac_str.length > 1) {
-        if (frac_str.chars[frac_str.length - 1] != 48) {
+    var next: int64 = mettle_string_put_uint(buf, at, (uint64)int_part);
+    buf[next] = (uint8)46;
+    next = next + 1;
+    var start: int64 = next;
+    var scale: int64 = 100000;
+    var rest: int64 = scaled;
+    while (scale > 0) {
+        buf[next] = (uint8)(48 + (rest / scale));
+        rest = rest % scale;
+        next = next + 1;
+        scale = scale / 10;
+    }
+    while (next > start + 1) {
+        if (buf[next - 1] != (uint8)48) {
             break;
         }
-        frac_str.length = frac_str.length - 1;
+        next = next - 1;
     }
-    return mettle_string_from_uint((uint64)int_part) + "." + frac_str;
+    return next;
 }
 
 // Takes the raw IEEE-754 bits in a GP register. The call is injected at IR
@@ -138,26 +189,33 @@ export fn mettle_string_from_f64(bits: int64) -> string {
     var tmp: int64 = bits;
     var reinterpret: float64* = (float64*)(&tmp);
     var value: float64 = *reinterpret;
+    // Sign, eighteen integer digits, a point, six fractional digits, an
+    // exponent with its own sign and four digits, and the terminator: the
+    // widest thing this writes is half of what it takes.
+    var buf: uint8* = malloc(64);
+    var at: int64 = 0;
     if (value != value) {
-        return "nan";
+        return mettle_string_own(buf, mettle_string_put_text(buf, 0, "nan"));
     }
     var v: float64 = value;
-    var sign: string = "";
     if (v < 0.0) {
-        sign = "-";
+        buf[at] = (uint8)45;
+        at = at + 1;
         v = 0.0 - v;
     }
     // Only zero and infinity survive halving unchanged.
     if (v * 0.5 == v) {
         if (v != 0.0) {
-            return sign + "inf";
+            return mettle_string_own(buf, mettle_string_put_text(buf, at, "inf"));
         }
-        return sign + "0.0";
+        return mettle_string_own(buf, mettle_string_put_text(buf, at, "0.0"));
     }
     var upper: float64 = 100000000000000000.0;
     var lower: float64 = 0.0001;
+    var exponent: int64 = 0;
+    var scaled: bool = false;
     if (v >= upper || v < lower) {
-        var exponent: int64 = 0;
+        scaled = true;
         while (v >= 10.0) {
             v = v / 10.0;
             exponent = exponent + 1;
@@ -166,9 +224,20 @@ export fn mettle_string_from_f64(bits: int64) -> string {
             v = v * 10.0;
             exponent = exponent - 1;
         }
-        return sign + mettle_string_f64_fixed(v) + "e" + mettle_string_from_int(exponent);
     }
-    return sign + mettle_string_f64_fixed(v);
+    at = mettle_string_put_fixed(buf, at, v);
+    if (scaled) {
+        buf[at] = (uint8)101;
+        at = at + 1;
+        if (exponent < 0) {
+            buf[at] = (uint8)45;
+            at = at + 1;
+            at = mettle_string_put_uint(buf, at, (uint64)(0 - exponent));
+        } else {
+            at = mettle_string_put_uint(buf, at, (uint64)exponent);
+        }
+    }
+    return mettle_string_own(buf, at);
 }
 
 export fn mettle_string_eq(a: string, b: string) -> int32 {

@@ -180,6 +180,105 @@ static int ir_lower_interpolation(IRLoweringContext *context,
                                   ASTNode *expression,
                                   IROperand *out_value);
 
+static void ir_declare_string_free_helper(IRLoweringContext *context) {
+  IRModuleSymbol entry = {0};
+  MtlcType *params[1];
+  if (!context || !context->program || !context->type_checker) {
+    return;
+  }
+  if (ir_program_lookup_symbol(context->program, "mettle_string_free")) {
+    return;
+  }
+  params[0] = mtlc_type_from_frontend(context->type_checker->builtin_string);
+  entry.name = (char *)"mettle_string_free";
+  entry.kind = IR_MODSYM_FUNCTION;
+  entry.is_extern = 1;
+  /* The answer is discarded; a void return is not a shape every backend call
+     path takes, and this one has no reason to be the exception. */
+  entry.type = mtlc_type_from_frontend(context->type_checker->builtin_int32);
+  entry.return_type = entry.type;
+  entry.param_types = params;
+  entry.param_count = 1;
+  ir_program_add_symbol(context->program, &entry);
+}
+
+/* True when lowering this expression produces a string whose bytes this
+ * module allocated and nothing else can name: the buffer a `+` on strings
+ * fills, or the buffer a value-to-string conversion fills for one `{expr}`.
+ * A literal, a slice, a parameter, a variable and `{s}` on a string that
+ * already existed are all views of storage someone else owns, so none of them
+ * is one of these. */
+static int ir_string_temp_is_owned(IRLoweringContext *context, ASTNode *node) {
+  Type *type = NULL;
+  if (!context || !node || !context->type_checker) {
+    return 0;
+  }
+  if (node->type == AST_BINARY_EXPRESSION) {
+    BinaryExpression *binary = (BinaryExpression *)node->data;
+    if (!binary || !binary->operator || strcmp(binary->operator, "+") != 0) {
+      return 0;
+    }
+    type = ir_infer_expression_type(context, node);
+    return type && type->kind == TYPE_STRING;
+  }
+  if (node->type != AST_FUNCTION_CALL) {
+    return 0;
+  }
+  {
+    CallExpression *call = (CallExpression *)node->data;
+    if (!call || !call->function_name ||
+        strcmp(call->function_name, "__mtl_interp") != 0 ||
+        call->argument_count != 1 || !call->arguments) {
+      return 0;
+    }
+    type = type_checker_infer_type(context->type_checker, call->arguments[0]);
+    if (!type) {
+      return 0;
+    }
+    switch (type->kind) {
+    /* `{s}` on a string hands back the view it was given, and `{b}` on a bool
+     * hands back one of two literals. Neither allocated anything. */
+    case TYPE_STRING:
+    case TYPE_BOOL:
+      return 0;
+    case TYPE_CHAR:
+    case TYPE_INT8:
+    case TYPE_INT16:
+    case TYPE_INT32:
+    case TYPE_INT64:
+    case TYPE_UINT8:
+    case TYPE_UINT16:
+    case TYPE_UINT32:
+    case TYPE_UINT64:
+    case TYPE_FLOAT32:
+    case TYPE_FLOAT64:
+    case TYPE_FLOAT16:
+    case TYPE_BFLOAT16:
+      return 1;
+    default:
+      return 0;
+    }
+  }
+}
+
+/* Release a string this module built, once nothing can reach it again. */
+static int ir_emit_string_free(IRLoweringContext *context, IRFunction *function,
+                               const IROperand *value, SourceLocation location) {
+  IROperand argument[1];
+  IRInstruction call = {0};
+  if (!context || !function || !value) {
+    return 0;
+  }
+  ir_declare_string_free_helper(context);
+  argument[0] = *value;
+  call.op = IR_OP_CALL;
+  call.location = location;
+  call.text = (char *)"mettle_string_free";
+  call.arguments = argument;
+  call.argument_count = 1;
+  return ir_emit(context, function, &call);
+}
+
 static int ir_task_argument_is_repeatable(ASTNode *node) {
   int guard = 0;
   while (node && guard++ < 16) {
@@ -1248,6 +1347,31 @@ int ir_lower_call_expression(IRLoweringContext *context,
   free(instruction.argument_types);
   instruction.argument_types = NULL;
 
+  /* A string built for this call and handed to a function that only reads it
+   * is unreachable the moment the call returns. Whether the callee only reads
+   * it is not a promise anyone wrote: it is what the memory analysis inferred
+   * about that parameter, and where there is no such function to ask about,
+   * an extern or a call through a pointer, nothing is released. */
+  if (call->function_name && !call->is_indirect_call && !call->object) {
+    for (size_t i = 0; i < call->argument_count; i++) {
+      if (!ir_string_temp_is_owned(context, call->arguments[i]) ||
+          !type_checker_callee_borrows(context->type_checker,
+                                       call->function_name, i)) {
+        continue;
+      }
+      if (!ir_emit_string_free(context, function, &arguments[i],
+                               expression->location)) {
+        for (size_t j = 0; j < emitted_argument_count; j++) {
+          ir_operand_destroy(&emitted_arguments[j]);
+        }
+        free(prefixed_arguments);
+        free(arguments);
+        ir_operand_destroy(&destination);
+        return 0;
+      }
+    }
+  }
+
   for (size_t i = 0; i < emitted_argument_count; i++) {
     ir_operand_destroy(&emitted_arguments[i]);
   }
@@ -1389,7 +1513,10 @@ static int ir_lower_interpolation(IRLoweringContext *context,
   convert.argument_count = 1;
   convert.value_type =
       mtlc_type_from_frontend(context->type_checker->builtin_string);
-  convert.allocates = 1;
+  /* `{b}` on a bool answers with one of two literals and takes nothing, so a
+     ledger that counted it would report a leak that is not there and a
+     `@noalloc` function would be told it allocates. */
+  convert.allocates = value_type->kind != TYPE_BOOL;
   int convert_ok = ir_emit(context, function, &convert);
   ir_operand_destroy(&operand);
   if (!convert_ok) {
@@ -1720,6 +1847,26 @@ static int ir_lower_string_concat(IRLoweringContext *context,
       instruction.allocates = 1;
       ir_declare_string_concat_helper(context);
       if (!ir_emit(context, function, &instruction)) {
+        ir_operand_destroy(&right);
+        ir_operand_destroy(&left);
+        ir_operand_destroy(&destination);
+        return 0;
+      }
+
+      /* The pieces of a concatenation are dead the moment their bytes have
+       * been copied: a chain is built left to right, and each result is read
+       * exactly once by the next `+`. Releasing them here is what keeps an
+       * interpolated string to one allocation rather than one per piece. */
+      if (ir_string_temp_is_owned(context, binary->left) &&
+          !ir_emit_string_free(context, function, &left, expression->location)) {
+        ir_operand_destroy(&right);
+        ir_operand_destroy(&left);
+        ir_operand_destroy(&destination);
+        return 0;
+      }
+      if (ir_string_temp_is_owned(context, binary->right) &&
+          !ir_emit_string_free(context, function, &right,
+                               expression->location)) {
         ir_operand_destroy(&right);
         ir_operand_destroy(&left);
         ir_operand_destroy(&destination);

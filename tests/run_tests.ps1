@@ -4822,6 +4822,56 @@ catch {
   Write-CaseResult -Name "a_declared_type_survives_a_shift" -Passed $false -Reason $_.Exception.Message
 }
 
+# An interpolated string is one allocation, and it is released. Enforce: the
+# text is what it always was, a run's blocks balance except for the three the
+# program is still holding, a callee that returns or keeps what it was given
+# still gets a live view, and a `@noalloc` function may still say `{b}`.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "interp_strings.exe"
+  $out = & $CompilerPath --build "tests/test_interp_strings.mettle" -o $exe --record-trace 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the interpolation fixture did not build: $out" }
+  $trace = Join-Path $tmpDir "interp_strings.trace"
+  $env:METTLE_TRACE = $trace
+  $run = & $exe 2>&1 | Out-String
+  Remove-Item Env:METTLE_TRACE
+  $flat = $run -replace ("[" + [char]13 + [char]10 + "]"), ""
+
+  # Every conversion prints what it always printed.
+  if ($flat -notmatch "ints 0 3 -3 1234567890 -1234567890") { throw "integer interpolation changed: $run" }
+  if ($flat -notmatch "mixed z true false 1\.5 -1\.5") { throw "char, bool or float interpolation changed: $run" }
+  if ($flat -notmatch "edges 0\.0 1\.0e18 1\.0e-9 123456789\.25") { throw "the float edges changed: $run" }
+  # A callee that hands it back, one that keeps it, and one that only reads it.
+  if ($flat -notmatch "through 3") { throw "a string a callee returned was released under it: $run" }
+  if ($flat -notmatch "kept 3") { throw "a string a callee stored was released under it: $run" }
+  if ($flat -notmatch "read 6") { throw "a string a callee only read gave the wrong answer: $run" }
+  # A string the program is holding survives being printed twice.
+  if (([regex]::Matches($flat, "held 3")).Count -ne 2) { throw "a held string did not survive: $run" }
+  if ($flat -notmatch "total 438") { throw "the loop gave the wrong answer: $run" }
+
+  if (-not (Test-Path $trace)) { throw "the run wrote no trace" }
+  $lines = Get-Content $trace
+  $took = ($lines | Where-Object { $_ -match "^alloc\|" }).Count
+  $gave = ($lines | Where-Object { $_ -match "^free\|" }).Count
+  if ($took -lt 100) { throw "the fixture took only $took blocks; it is not exercising the path" }
+  # Three outlive their statement on purpose: the one a callee returned, the
+  # one a callee kept, and the one the program bound to a name.
+  if ($took - $gave -ne 3) { throw "the ledger is off: $took taken, $gave released, expected a difference of 3" }
+
+  # Interpolation runs in the compile-time interpreter too, and the same
+  # conversions have to answer there.
+  $out = & $CompilerPath test "tests/test_refine_shift.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the interpreter lost a declared-type conversion: $out" }
+
+  Write-CaseResult -Name "an_interpolated_string_is_released" -Passed $true
+}
+catch {
+  $failed++
+  if (Test-Path Env:METTLE_TRACE) { Remove-Item Env:METTLE_TRACE }
+  Write-CaseResult -Name "an_interpolated_string_is_released" -Passed $false -Reason $_.Exception.Message
+}
+
 # The mixing desk: one program carrying effects, declared types, a schedule,
 # deadlines, tasks, rules over three different images, and a vectorizer that
 # tests what it cannot prove. Enforce: it builds, the live run and the offline
@@ -4884,6 +4934,7 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "the rules did not hold over the recording: $out" }
   $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
   if ($flat -notmatch "rule the_audio_path_never_allocates: pass") { throw "the allocation rule proved nothing over the recording: $out" }
+  if ($flat -notmatch "rule every_block_it_takes_is_released: pass") { throw "the desk did not release every block it took: $out" }
   if ($flat -notmatch "rule every_lock_is_released: pass") { throw "the lock rule was still a gap over a run that took locks: $out" }
 
   Write-CaseResult -Name "the_desk_holds_together" -Passed $true
