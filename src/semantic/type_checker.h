@@ -34,6 +34,7 @@ typedef struct TypeCheckerProof {
   char *type_name;
   char *expression;
   char *proof;
+  char *range;
   size_t line;
   size_t column;
   int proven;
@@ -179,6 +180,8 @@ typedef struct {
 
 void type_checker_report_proofs(const TypeChecker *checker, FILE *out);
 long long type_checker_proof_steps(const TypeChecker *checker);
+int type_checker_why_proof(const TypeChecker *checker, const char *site,
+                           const char *type_name, FILE *out);
 
 // Function declarations
 TypeChecker *type_checker_create(SymbolTable *symbol_table);

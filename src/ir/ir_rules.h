@@ -40,5 +40,12 @@ int ir_rules_run(IRProgram *program, const IRRuleImage *image,
                  ErrorReporter *reporter, FILE *report, long long budget,
                  IRRuleStats *stats);
 
+/* As above, and when `cross_check` is set every rule is run twice more over a
+   freshly placed image and a verdict that moves is reported as R0005. */
+int ir_rules_run_checked(IRProgram *program, const IRRuleImage *image,
+                         ErrorReporter *reporter, FILE *report,
+                         long long budget, int cross_check,
+                         IRRuleStats *stats);
+
 
 #endif

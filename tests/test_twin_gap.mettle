@@ -1,0 +1,20 @@
+import "std/io";
+
+fn first_slow(rows: int32**) -> int32 {
+  var row: int32* = rows[0];
+  return row[0];
+}
+
+fn first_fast(rows: int32**) -> int32 reference first_slow {
+  return rows[0][0];
+}
+
+fn main() -> int32 {
+  var a: int32[2];
+  a[0] = 5; a[1] = 6;
+  var p: int32* = &a[0];
+  var rows: int32*[1];
+  rows[0] = p;
+  print("first {first_fast(&rows[0])}");
+  return 0;
+}

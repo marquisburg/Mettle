@@ -109,6 +109,7 @@ divergence. See [ML-driven IR optimization](ml-opt.md).
 | `--report-proofs` | Every conversion into a [declared type](types.md) the prover settled: the type, the expression, the site, whether it was proven, what it cost, and the route that settled it. |
 | `--proof-budget=N` | Fail the build when the declared-type prover spends more than N steps. |
 | `--report-effects` | What each function performs and needs, and what the [effect](effects.md) pass spent getting there. |
+| `--report-twins` | What each `reference` twin was checked against, and on how many generated input sets. See [Translation validation](translation-validation.md). |
 | `--effect-budget=N` | Fail the build when the effect pass spends more than N steps. |
 | `--report-target` | The target in effect, printed as a `TargetDesc` in Mettle; `mettle target <triple>` prints a built-in one and `--target desc.mettle` builds for a described one. See [Bare metal](bare-metal.md). |
 | `--check-proofs` | Trap at run time when a value the compiler proved to be a [declared type](types.md) is not one. Survives `--release`, and costs nothing in a program with no declared types. |
@@ -131,6 +132,22 @@ checked.
 
 [The `--explain-json` schema](explain-json.md) documents the machine-readable
 form.
+
+## Asking why
+
+A diagnostic explains a fact that did not hold. `mettle why` explains one that
+did, with the same chain and the same range the refusal would have printed:
+
+```bash
+mettle why app.mettle main Audit
+mettle why app.mettle 15 Percent
+```
+
+The first walks the call graph to the line that performs the effect. The
+second names the range the compiler knew for the expression and the route that
+settled the predicate. A subject that starts with a digit is a site and the
+third argument is a declared type; otherwise it is a function and the third
+argument is an effect.
 
 ## Debugging
 

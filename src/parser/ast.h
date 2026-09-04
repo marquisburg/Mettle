@@ -152,6 +152,9 @@ typedef struct {
   int is_inline_contract; // `@inline!` : every call inlines or compile error
   int is_noinline;        // `@noinline`: never inline this function
   int is_pure;            // `@pure`    : side-effect-free; enables call LICM
+  char *reference_twin;
+  char *explain_code;
+  char *explain_text;
   int is_noalloc;         // `@noalloc` : proven allocation-free or compile error
   int is_test;            // `@test`    : compile-time unit test; compiled out
                           //              of normal builds, run by `mettle test`

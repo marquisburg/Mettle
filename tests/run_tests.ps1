@@ -3985,6 +3985,102 @@ catch {
   Write-CaseResult -Name "explain_lists_beliefs" -Passed $false -Reason $_.Exception.Message
 }
 
+# `mettle why` answers a question about a fact that HELD, with the same chain
+# and range the refusal would have printed. Enforce: an effect that holds
+# prints its chain, and a conversion that was proven prints its route.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath why "tests/test_beliefs.mettle" main Audit 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "why on a held effect failed: $out" }
+  if ($out -notmatch "``main`` performs ``Audit``") { throw "why does not state the fact: $out" }
+  if ($out -notmatch "calls audit at \d+:\d+") { throw "why does not print the chain: $out" }
+  if ($out -notmatch "and performs it at \d+:\d+") { throw "why does not reach the source: $out" }
+  $out = & $CompilerPath why "tests/test_beliefs.mettle" tick_twice Audit 2>&1 | Out-String
+  if ($out -notmatch "neither performs nor needs ``Audit``") { throw "why does not answer for an effect that does not hold: $out" }
+  $out = & $CompilerPath why "tests/test_refine_ok.mettle" 15 Percent 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "why on a proven conversion failed: $out" }
+  if ($out -notmatch "becomes 'Percent'") { throw "why does not state the conversion: $out" }
+  if ($out -notmatch "the range the compiler knew: 0\.\.100") { throw "why does not print the range: $out" }
+  if ($out -notmatch "the proof: the value's range 0\.\.100 settles the comparison") { throw "why does not print the proof: $out" }
+  $out = & $CompilerPath why "tests/test_refine_ok.mettle" 9999 Percent 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "why answered for a site with no proof" }
+  if ($out -notmatch "no conversion into 'Percent' at 9999") { throw "why does not say there was nothing there: $out" }
+  Write-CaseResult -Name "why_explains_a_fact_that_held" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "why_explains_a_fact_that_held" -Passed $false -Reason $_.Exception.Message
+}
+
+# A reference twin is a claim the build checks by running both. Enforce: a pair
+# that agrees builds and says what it was checked on, a pair that disagrees
+# stops the build with the input that shows it, and a pair the prober cannot
+# reach is a loud warning rather than a silent pass.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "twin_ok.exe"
+  $out = & $CompilerPath --build "tests/test_twin_ok.mettle" -o $exe --report-twins 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "an agreeing twin failed the build: $out" }
+  if ($out -notmatch "twin abs_fast against abs_slow \(as written\): agreed on \d+ generated input sets") { throw "no ledger line for the pair: $out" }
+  if ($out -notmatch "twins: 1 pair, 1 agreed, 0 diverged, 0 gapped") { throw "no twin ledger total: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "abs 7 9") { throw "the program did not run: $run" }
+  $verified = Join-Path $tmpDir "twin_verify.exe"
+  $out = & $CompilerPath --build --release --verify "tests/test_twin_ok.mettle" -o $verified --report-twins 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the verified build failed: $out" }
+  if ($out -notmatch "twin abs_fast against abs_slow \(after the optimizer\): agreed") { throw "--verify did not re-check the pair after the optimizer: $out" }
+  $bad = Join-Path $tmpDir "twin_bad.exe"
+  $out = & $CompilerPath --build "tests/test_twin_bad.mettle" -o $bad 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a diverging twin built" }
+  if ($out -notmatch "error\[T0001\]: ``abs_wrong`` and its reference ``abs_slow`` disagree") { throw "the divergence does not name the pair: $out" }
+  if ($out -notmatch "abs_wrong\(") { throw "the divergence does not print the input: $out" }
+  $gap = Join-Path $tmpDir "twin_gap.exe"
+  $out = & $CompilerPath --build "tests/test_twin_gap.mettle" -o $gap --report-twins 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a gapped twin stopped the build: $out" }
+  if ($out -notmatch "warning\[T0002\]: ``first_fast`` was not checked against its reference ``first_slow``") { throw "the gap is not loud: $out" }
+  if ($out -notmatch "twins: 1 pair, 0 agreed, 0 diverged, 1 gapped") { throw "the gap is not on the ledger: $out" }
+  $ex = & $CompilerPath explain T0001 2>&1 | Out-String
+  if ($ex -notmatch "agreement is evidence") { throw "explain T0001 overstates the check: $ex" }
+  Write-CaseResult -Name "reference_twins_checked" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "reference_twins_checked" -Passed $false -Reason $_.Exception.Message
+}
+
+# A rule carries its own explanation and its own code, and its verdict is
+# cross-checked. Enforce: the failure carries the rule's code and text,
+# `mettle explain <code> <file>` prints it, and `mettle test` runs every rule
+# again and says the verdict held.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "rule_explain.exe"
+  $out = & $CompilerPath --build "tests/test_rule_explain.mettle" -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "the rule did not fail the build" }
+  if ($out -notmatch "error\[R1001\]: rule 'no_recursion' failed") { throw "the failure does not carry the rule's own code: $out" }
+  if ($out -notmatch "This codebase runs on fixed stacks") { throw "the failure does not carry the rule's explanation: $out" }
+  $ex = & $CompilerPath explain R1001 "tests/test_rule_explain.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "explain on a rule code failed: $ex" }
+  if ($ex -notmatch "R1001: rule ``no_recursion``") { throw "explain does not name the rule: $ex" }
+  if ($ex -notmatch "Rewrite the recursion as a loop") { throw "explain does not print the text: $ex" }
+  $ex = & $CompilerPath explain R1001 2>&1 | Out-String
+  if ($ex -notmatch "belongs to a rule the program wrote") { throw "a bare rule code does not say where the text lives: $ex" }
+  $out = & $CompilerPath test "tests/test_rule_pass.mettle" --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "mettle test with rules failed: $out" }
+  if ($out -notmatch "rule no_recursion: verdict held on a second run") { throw "the verdict was not cross-checked: $out" }
+  if ($out -notmatch "rule no_network: verdict held on a second run") { throw "not every rule was cross-checked: $out" }
+  $ex = & $CompilerPath explain R0005 2>&1 | Out-String
+  if ($ex -notmatch "does not trust") { throw "explain R0005 is missing: $ex" }
+  Write-CaseResult -Name "rule_explains_itself_and_is_cross_checked" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rule_explains_itself_and_is_cross_checked" -Passed $false -Reason $_.Exception.Message
+}
+
 # A @rule is a property the program requires of itself. Enforce: there is an
 # input on which the build actually fails, and the failure names the site the
 # rule pointed at and the rule that pointed there.

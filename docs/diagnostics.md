@@ -132,6 +132,7 @@ Proof diagnostics:
 |------|---------|
 | P0001 | A declared type's rule could not be proven here |
 | P0002 | A bounds check was proven away by a declared type (reported by `--explain`) |
+| P0003 | The declared-type prover spent more than its budget |
 
 [Types](types.md) covers declared types and what the compiler proves.
 
@@ -143,8 +144,19 @@ Effect diagnostics:
 | F0002 | A function requires an effect nothing provides |
 | F0003 | A function value does not fit the effects its type declares |
 | F0004 | A function declared @pure performs something |
+| F0005 | The effect pass spent more than its budget |
 
 [Effects](effects.md) covers the F codes in context.
+
+Reference twins:
+
+| Code | Meaning |
+|------|---------|
+| T0001 | A function and its reference twin disagree |
+| T0002 | A reference twin could not be checked |
+
+[Translation validation](translation-validation.md) covers the differential
+machinery both the twins and `--verify` run on.
 
 ## JSON output
 

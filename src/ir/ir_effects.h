@@ -27,6 +27,9 @@ typedef struct {
   int instrument;
   int library_build;
   FILE *report;
+  const char *why_function;
+  const char *why_effect;
+  FILE *why_out;
 } IREffectInput;
 
 typedef struct IREffectResults IREffectResults;

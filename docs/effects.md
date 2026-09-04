@@ -80,6 +80,10 @@ that belief is checked at run time under `mettle test` and `--check-effects`
 (below). A known allocator such as `malloc` performs `alloc` whatever its
 declaration says.
 
+`mettle why app.mettle main Audit` prints the chain for an effect that holds:
+every call from the named function down to the line that performs it, the same
+chain a `forbids` refusal would have printed.
+
 A belief is never silent. `--explain` prints a **beliefs** section listing
 every extern the build took on trust: the ones whose `with` clause was read as
 written, the ones on the compiler's known-clean list, and the ones with no

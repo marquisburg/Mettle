@@ -175,6 +175,7 @@ void type_checker_destroy(TypeChecker *checker) {
       free(checker->proof_log[i].type_name);
       free(checker->proof_log[i].expression);
       free(checker->proof_log[i].proof);
+      free(checker->proof_log[i].range);
     }
     free(checker->proof_log);
     // Clean up built-in types

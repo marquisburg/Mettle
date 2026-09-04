@@ -49,7 +49,8 @@ frontend can drive instead. The documentation is organized the same way.
 
 - [Profile-guided optimization](pgo.md): `--pgo`, with no training run.
 - [Translation validation](translation-validation.md): `--verify`, which
-  catches the optimizer's own bugs.
+  catches the optimizer's own bugs, and `reference` twins, which point the same
+  differential at two functions the program says agree.
 - [Rewrite rules](rewrite-rules.md): `rewrite`, identities from your own code
 - [Rules](rules.md): `@rule`, a property the program requires of itself, checked on every build
   that the compiler proves, applies, and checks. `--report-rules` and

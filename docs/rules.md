@@ -129,6 +129,46 @@ rules: 2 run, 2 passed, 0 failed, 0 gaps, 2485 steps
 `N` gives no verdict. A program with no rules pays nothing: no reflection is
 built and no interpreter runs.
 
+## A rule that explains itself
+
+A rule knows why it exists and the compiler does not. It can say so, and claim
+its own diagnostic code while it is there:
+
+```mettle
+@rule fn no_recursion(p: Program) -> Verdict explain R1001 "This codebase runs on fixed stacks, so a recursive function is a stack overflow waiting for the right input. Rewrite the recursion as a loop with an explicit worklist." {
+  for f in p.functions {
+    if (f.module == "" && f.is_recursive) {
+      return verdict_fail(f.site, "this module forbids recursion");
+    }
+  }
+  return verdict_pass();
+}
+```
+
+The failure is reported under `R1001` instead of the generic `R0002`, the text
+comes with it as a note, and `mettle explain R1001 house.mettle` prints it on
+its own. The code lives on the declaration, so the file is part of the
+question: a code above `R0999` belongs to a rule the program wrote, and
+`mettle explain R1001` without a file says so. `explain` is a contextual
+keyword and sits on the signature line, beside `with` and `forbids`.
+
+## A verdict that is checked
+
+A rule is code the compiler runs and does not trust, which cuts both ways: a
+rule that answers differently on two runs over the same program decided by
+accident. Under `mettle test` every rule is run twice more over a freshly
+placed copy of the same image and the verdicts compared. A verdict that held
+says so under `--report-rules`:
+
+```text
+rule no_recursion: pass, 3033 steps
+rule no_recursion: verdict held on a second run
+```
+
+One that moved is `error[R0005]`, and the build stops. A rule that is a
+function of the Program it was handed answers the same way every time; one
+that is not is reading something else.
+
 ## Rules a module offers
 
 A rule can live in a module and apply to whoever imports it, which is how a

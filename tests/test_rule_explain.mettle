@@ -1,0 +1,19 @@
+import "std/rule";
+
+fn depth(n: int32) -> int32 {
+  if (n <= 0) { return 0; }
+  return 1 + depth(n - 1);
+}
+
+@rule fn no_recursion(p: Program) -> Verdict explain R1001 "This codebase runs on fixed stacks, so a recursive function is a stack overflow waiting for the right input. Rewrite the recursion as a loop with an explicit worklist." {
+  for f in p.functions {
+    if (f.module == "" && f.is_recursive) {
+      return verdict_fail(f.site, "this module forbids recursion");
+    }
+  }
+  return verdict_pass();
+}
+
+fn main() -> int32 {
+  return depth(3) - 3;
+}

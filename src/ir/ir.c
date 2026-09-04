@@ -1005,6 +1005,9 @@ IRFunction *ir_function_create(const char *name) {
   function->is_noinline = 0;
   function->is_pure = 0;
   function->is_readonly_inferred = 0;
+  function->reference_twin = NULL;
+  function->explain_code = NULL;
+  function->explain_text = NULL;
   function->is_speculatable_inferred = 0;
   function->is_noalloc = 0;
   function->is_test = 0;

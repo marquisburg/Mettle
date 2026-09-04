@@ -315,6 +315,18 @@ static const ErrorCodeDoc DOCS[] = {
      "\n"
      "Fix: give the rule what it needs to decide (a direct call, a named\n"
      "function), or accept the gap.\n"},
+    {"R0005", "A rule answered differently on a second run",
+     "Under `mettle test` every `@rule` is run again over a freshly placed\n"
+     "copy of the same program image, and this rule did not give the same\n"
+     "verdict twice. A rule is code the compiler runs and does not trust,\n"
+     "so a verdict that moves is reported rather than picked from.\n"
+     "\n"
+     "A rule that is a function of the program it reads answers the same\n"
+     "way every time. One that does not is reading something else: an\n"
+     "uninitialised local, an address, or an order the compiler is free to\n"
+     "change.\n"
+     "\n"
+     "Fix: make the rule depend only on the Program it was handed.\n"},
     {"R0004", "Rules spent more than their budget",
      "`--rule-budget=N` makes the cost of running the program's rules a\n"
      "contract: the interpreter steps they spend together may not exceed\n"
@@ -401,6 +413,34 @@ static const ErrorCodeDoc DOCS[] = {
      "\n"
      "Fix: declare fewer effects, cut the call graph the fixpoint walks, or\n"
      "raise the budget deliberately.\n"},
+    {"T0001", "A function and its reference twin disagree",
+     "`fn fast(...) -> R reference slow;` says the two compute the same\n"
+     "thing, and the build checks it. The differential prober generates\n"
+     "input sets from the parameter shapes plus the constants both\n"
+     "functions compare against, runs both in the interpreter, and this\n"
+     "pair disagreed. The message carries the input that shows it.\n"
+     "\n"
+     "This is a differential test and it says so: agreement is evidence,\n"
+     "not equivalence. Disagreement is decisive, because one input where\n"
+     "they differ is all a counterexample needs.\n"
+     "\n"
+     "The same check runs again after the optimizer under `--verify`, so a\n"
+     "pass that breaks the fast one is caught by the reference the program\n"
+     "already supplied.\n"
+     "\n"
+     "Fix: make them agree, or stop claiming they do.\n"},
+    {"T0002", "A reference twin could not be checked",
+     "The pair was declared and the prober could not generate inputs it\n"
+     "could run: a parameter shape it has no values for, or a construct\n"
+     "the interpreter cannot execute. The build goes on and this warning\n"
+     "stands, because a check that did not run must not read as one that\n"
+     "passed.\n"
+     "\n"
+     "`--report-twins` prints what each pair was checked on, so a pair that\n"
+     "was checked on nothing is visible beside the pairs that were.\n"
+     "\n"
+     "Fix: narrow the parameters to shapes the prober can build, or accept\n"
+     "that this pair is unchecked and know that it is.\n"},
     {"F0004", "A function declared @pure performs something",
      "`@pure` is a contract, and this build checked it. The function\n"
      "carries the decorator and its body, or something it calls, writes\n"
@@ -1341,6 +1381,14 @@ int mettle_explain_error_code(const char *code) {
   }
 
   fprintf(stderr, "error: unknown code '%s'\n", code);
+  if (normalized[0] == 'R' && normalized[1] >= '1' && normalized[1] <= '9') {
+    fprintf(stderr,
+            "help: a code above R0999 belongs to a rule the program wrote, "
+            "and the text lives on the declaration: run `mettle explain %s "
+            "<file.mettle>`\n",
+            normalized);
+    return 1;
+  }
   const char *near = nearest_code(normalized);
   if (near) {
     fprintf(stderr, "help: did you mean `%s`? Run `mettle explain %s`\n", near,

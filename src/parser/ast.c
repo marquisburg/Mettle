@@ -163,6 +163,12 @@ static ASTNode *ast_clone_method_declaration(ASTNode *clone, const ASTNode *node
   dst->is_inline_contract = src->is_inline_contract;
   dst->is_noinline = src->is_noinline;
   dst->is_pure = src->is_pure;
+  dst->reference_twin =
+      src->reference_twin ? ast_copy_string(src->reference_twin) : NULL;
+  dst->explain_code =
+      src->explain_code ? ast_copy_string(src->explain_code) : NULL;
+  dst->explain_text =
+      src->explain_text ? ast_copy_string(src->explain_text) : NULL;
   dst->is_noalloc = src->is_noalloc;
   dst->is_test = src->is_test;
   dst->is_swappable = src->is_swappable;
@@ -1304,6 +1310,9 @@ void ast_destroy_node(ASTNode *node) {
       free(func_decl->captured_names);
       free(func_decl->captured_types);
       ast_free_string(func_decl->env_struct_name);
+      ast_free_string(func_decl->reference_twin);
+      ast_free_string(func_decl->explain_code);
+      ast_free_string(func_decl->explain_text);
       ast_destroy_node(func_decl->composed_name);
       ast_function_set_effects(func_decl, AST_EFFECT_CLAUSE_WITH, NULL, 0);
       ast_function_set_effects(func_decl, AST_EFFECT_CLAUSE_FORBIDS, NULL, 0);
@@ -1839,6 +1848,9 @@ ASTNode *ast_create_function_declaration(const char *name, char **param_names,
   func_decl->is_inline_contract = 0;
   func_decl->is_noinline = 0;
   func_decl->is_pure = 0;
+  func_decl->reference_twin = NULL;
+  func_decl->explain_code = NULL;
+  func_decl->explain_text = NULL;
   func_decl->is_noalloc = 0;
   func_decl->is_test = 0;
   func_decl->is_swappable = 0;

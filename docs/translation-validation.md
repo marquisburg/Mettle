@@ -21,6 +21,39 @@ miscompile, caught at the moment it is introduced.
 The claim "this optimization is correct" is not accepted from the optimizer on
 its own authority.
 
+## Reference twins
+
+The same machinery checks a claim the program makes about itself. A function
+may name a slower function it is supposed to agree with:
+
+```mettle
+fn abs_slow(x: int32) -> int32 {
+  if (x < 0) { return 0 - x; }
+  return x;
+}
+
+fn abs_fast(x: int32) -> int32 reference abs_slow {
+  var m: int32 = x >> 31;
+  return (x + m) ^ m;
+}
+```
+
+Every build runs both on generated inputs and compares them. Agreement costs a
+line under `--report-twins`; disagreement is `error[T0001]` with the input that
+shows it, and the build stops. A pair the prober cannot generate inputs for is
+`warning[T0002]` and stays loud, because a check that did not run must not read
+as one that passed.
+
+Under `--verify` the pair is checked again after the optimizer, against the
+reference as it was before any pass touched it, so a pass that breaks the fast
+one is caught by the reference the program already supplied. The reference
+itself is swept as dead code when nothing calls it, so a program pays for the
+check at build time and nothing at run time.
+
+This is a differential test and it says so: agreement on generated inputs is
+evidence, not equivalence. `reference` is a contextual keyword and sits on the
+signature line.
+
 ## A clean run
 
 ```text

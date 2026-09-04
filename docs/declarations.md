@@ -302,6 +302,18 @@ only checked with -O/--release
 program as data and returns a verdict with a location, and a failing verdict
 stops the build the way `@noalloc` does. [Rules](rules.md) covers it.
 
+Two clauses sit on the signature line beside the effect clauses, both
+contextual keywords. `reference NAME` says this function computes what `NAME`
+computes, and every build runs both on generated inputs and refuses the build
+when they disagree; [Translation validation](translation-validation.md) covers
+it. `explain RNNNN "text"` gives a `@rule` its own diagnostic code and its own
+explanation; [Rules](rules.md) covers it.
+
+```mettle
+fn abs_fast(x: int32) -> int32 reference abs_slow { ... }
+@rule fn no_recursion(p: Program) -> Verdict explain R1001 "..." { ... }
+```
+
 `@naked` and `@interrupt` are for code the operating system is not running.
 [Bare metal](bare-metal.md) covers both, along with inline assembly.
 

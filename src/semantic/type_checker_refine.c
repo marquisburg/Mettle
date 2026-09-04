@@ -973,7 +973,7 @@ static char *proof_copy(const char *text) {
 
 static void proof_log(TypeChecker *checker, const Type *layer,
                       const ASTNode *expr, const char *proof, int proven,
-                      long long steps) {
+                      long long steps, const char *range) {
   TypeCheckerProof *entry;
   char expr_text[160] = "";
   if (checker->proof_log_count == checker->proof_log_capacity) {
@@ -994,8 +994,62 @@ static void proof_log(TypeChecker *checker, const Type *layer,
   entry->proof = proof_copy(proof);
   entry->line = expr ? expr->location.line : 0;
   entry->column = expr ? expr->location.column : 0;
+  entry->range = proof_copy(range ? range : "no range was needed");
   entry->proven = proven;
   entry->steps = steps;
+}
+
+int type_checker_why_proof(const TypeChecker *checker, const char *site,
+                           const char *type_name, FILE *out) {
+  size_t want_line = 0;
+  size_t want_column = 0;
+  size_t found = 0;
+  if (!checker || !site || !type_name || !out) {
+    return 0;
+  }
+  if (sscanf(site, "%zu:%zu", &want_line, &want_column) < 1) {
+    fprintf(out, "`%s` is not a site; write a line or a line:column\n", site);
+    return 0;
+  }
+  for (size_t i = 0; i < checker->proof_log_count; i++) {
+    const TypeCheckerProof *p = &checker->proof_log[i];
+    if (p->line != want_line) {
+      continue;
+    }
+    if (want_column && p->column != want_column) {
+      continue;
+    }
+    if (strcmp(p->type_name ? p->type_name : "", type_name) != 0) {
+      continue;
+    }
+    found++;
+    if (p->proven) {
+      fprintf(out, "`%s` at %zu:%zu becomes '%s'.\n",
+              p->expression ? p->expression : "?", p->line, p->column,
+              p->type_name);
+      fprintf(out, "  the range the compiler knew: %s\n",
+              p->range ? p->range : "?");
+      fprintf(out, "  the proof: %s\n", p->proof ? p->proof : "?");
+      fprintf(out, "  it cost %lld prover steps\n", p->steps);
+      fprintf(out,
+              "This is the same chain and range the refusal would have "
+              "printed.\n");
+    } else {
+      fprintf(out, "`%s` at %zu:%zu does not become '%s'.\n",
+              p->expression ? p->expression : "?", p->line, p->column,
+              p->type_name);
+      fprintf(out, "  %s\n", p->proof ? p->proof : "?");
+    }
+  }
+  if (!found) {
+    fprintf(out,
+            "no conversion into '%s' at %s: the prover settled %zu "
+            "conversion%s in this build, and --report-proofs lists them\n",
+            type_name, site, checker->proof_log_count,
+            checker->proof_log_count == 1 ? "" : "s");
+    return 0;
+  }
+  return 1;
 }
 
 long long type_checker_proof_steps(const TypeChecker *checker) {
@@ -1072,11 +1126,23 @@ int type_checker_prove_refinement(TypeChecker *checker, Type *refined,
       set_failure(checker, message);
       checker->proofs_refused++;
       proof_log(checker, layer, expr, message, 0,
-                checker->proof_steps - ctx.steps);
+                checker->proof_steps - ctx.steps, range_text);
       return 0;
     }
-    proof_log(checker, layer, expr, ctx.route, 1,
-              checker->proof_steps - ctx.steps);
+    {
+      char known[96] = "the value's own type";
+      if (ctx.have_range && ctx.value_range.has_min &&
+          ctx.value_range.has_max) {
+        snprintf(known, sizeof(known), "%lld..%lld", ctx.value_range.min,
+                 ctx.value_range.max);
+      } else if (ctx.have_range && ctx.value_range.has_min) {
+        snprintf(known, sizeof(known), "at least %lld", ctx.value_range.min);
+      } else if (ctx.have_range && ctx.value_range.has_max) {
+        snprintf(known, sizeof(known), "at most %lld", ctx.value_range.max);
+      }
+      proof_log(checker, layer, expr, ctx.route, 1,
+                checker->proof_steps - ctx.steps, known);
+    }
     {
       char expr_text[160] = "";
       describe(expr, expr_text, sizeof(expr_text), 0);

@@ -5916,6 +5916,46 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
     return NULL;
   }
 
+  char *reference_twin = NULL;
+  char *explain_code = NULL;
+  char *explain_text = NULL;
+  if (parser_is_identifier_like(parser->current_token.type) &&
+      parser->current_token.value &&
+      strcmp(parser->current_token.value, "reference") == 0) {
+    parser_advance(parser);
+    if (!parser_is_identifier_like(parser->current_token.type) ||
+        !parser->current_token.value) {
+      parser_set_error(parser,
+                       "Expected the name of the reference function after "
+                       "'reference'");
+    } else {
+      reference_twin = strdup(parser->current_token.value);
+      parser_advance(parser);
+    }
+  }
+  if (parser_is_identifier_like(parser->current_token.type) &&
+      parser->current_token.value &&
+      strcmp(parser->current_token.value, "explain") == 0) {
+    parser_advance(parser);
+    if (!parser_is_identifier_like(parser->current_token.type) ||
+        !parser->current_token.value ||
+        parser->current_token.value[0] != 'R') {
+      parser_set_error(parser,
+                       "Expected a diagnostic code such as R1001 after "
+                       "'explain'");
+    } else {
+      explain_code = strdup(parser->current_token.value);
+      parser_advance(parser);
+      if (parser->current_token.type != TOKEN_STRING) {
+        parser_set_error(parser,
+                         "Expected the explanation text after the code");
+      } else {
+        explain_text = strdup(parser->current_token.value);
+        parser_advance(parser);
+      }
+    }
+  }
+
   if (parser->current_token.type == TOKEN_EQUALS) {
     parser_advance(parser); // consume '='
     if (parser->current_token.type != TOKEN_STRING) {
@@ -6007,6 +6047,12 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
   parser_free_effect_clauses(&effect_clauses);
   if (func_decl && func_decl->data) {
     FunctionDeclaration *func_data = (FunctionDeclaration *)func_decl->data;
+    func_data->reference_twin = reference_twin;
+    reference_twin = NULL;
+    func_data->explain_code = explain_code;
+    func_data->explain_text = explain_text;
+    explain_code = NULL;
+    explain_text = NULL;
     func_data->composed_name = composed_name;
     composed_name = NULL;
     parser->pending_composed_name = NULL;
@@ -6048,6 +6094,9 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
   free(func_name);
   free(return_type);
   free(link_name);
+  free(reference_twin);
+  free(explain_code);
+  free(explain_text);
   parser_free_string_array(return_types, return_type_count);
   for (size_t i = 0; i < param_count; i++) {
     free(param_names[i]);

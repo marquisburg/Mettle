@@ -1260,6 +1260,104 @@ static void ctx_free(Ctx *ctx) {
   free(ctx->index);
 }
 
+static int why_effect(Ctx *ctx, const char *function, const char *effect,
+                      FILE *out) {
+  EFn *efn = find_fn(ctx, function);
+  int bit = effect_bit(ctx, effect);
+  Hop *hops = NULL;
+  size_t length = 0;
+  if (!efn) {
+    for (size_t i = 0; i < ctx->fn_count; i++) {
+      if (ctx->fns[i].fn && ctx->fns[i].fn->name &&
+          strcmp(display_name(ctx->fns[i].fn->name), function) == 0) {
+        efn = &ctx->fns[i];
+        break;
+      }
+    }
+  }
+  if (!efn) {
+    fprintf(out, "`%s` is not a function this program defines\n", function);
+    return 0;
+  }
+  if (bit < 0) {
+    fprintf(out, "`%s` is not an effect this program declares\n", effect);
+    return 0;
+  }
+  if (!bit_test(efn->performs, (size_t)bit) &&
+      !bit_test(efn->needs, (size_t)bit)) {
+    fprintf(out,
+            "`%s` neither performs nor needs `%s`. The pass walked every "
+            "direct call it can reach and found no source.\n",
+            function, effect);
+    return 1;
+  }
+  if (bit_test(efn->performs, (size_t)bit)) {
+    fprintf(out, "`%s` performs `%s`.\n", function, effect);
+    if (!trace_chain(ctx, (size_t)(efn - ctx->fns), (size_t)bit, 0, &hops,
+                     &length)) {
+      return 0;
+    }
+    if (length == 0) {
+      fprintf(out, "  the chain is empty, which means the pass lost it\n");
+    } else {
+      for (size_t i = 0; i < length; i++) {
+        const char *name = display_name(ctx->fns[hops[i].function].fn->name);
+        if (i == 0) {
+          fprintf(out, "  %s\n", name);
+        } else {
+          const EFn *caller = &ctx->fns[hops[i - 1].function];
+          SourceSpan span = instruction_span(caller, hops[i].via_site);
+          fprintf(out, "  calls %s at %zu:%zu\n", name, span.line,
+                  span.column);
+        }
+      }
+      {
+        EFn *last = &ctx->fns[hops[length - 1].function];
+        size_t site = last->source_sites[bit];
+        if (site == NO_SITE) {
+          fprintf(out, "  and `%s` is declared `with %s`\n",
+                  display_name(last->fn->name), effect);
+        } else {
+          SourceSpan span = instruction_span(last, site);
+          fprintf(out, "  and performs it at %zu:%zu\n", span.line,
+                  span.column);
+        }
+      }
+    }
+    free(hops);
+  }
+  if (bit_test(efn->needs, (size_t)bit)) {
+    fprintf(out, "`%s` needs `%s`.\n", function, effect);
+    hops = NULL;
+    length = 0;
+    if (!trace_chain(ctx, (size_t)(efn - ctx->fns), (size_t)bit, 1, &hops,
+                     &length)) {
+      return 0;
+    }
+    for (size_t i = 0; i < length; i++) {
+      const char *name = display_name(ctx->fns[hops[i].function].fn->name);
+      if (i == 0) {
+        fprintf(out, "  %s\n", name);
+      } else {
+        const EFn *caller = &ctx->fns[hops[i - 1].function];
+        SourceSpan span = instruction_span(caller, hops[i].via_site);
+        fprintf(out, "  calls %s at %zu:%zu\n", name, span.line,
+                span.column);
+      }
+    }
+    if (length > 0) {
+      fprintf(out, "  and `%s` is declared `requires %s`\n",
+              display_name(ctx->fns[hops[length - 1].function].fn->name),
+              effect);
+    }
+    free(hops);
+  }
+  fprintf(out,
+          "This is the same chain the build would print if something "
+          "forbade it.\n");
+  return 1;
+}
+
 static void report_effects(Ctx *ctx, FILE *out) {
   size_t declared = 0;
   for (size_t i = 0; i < ctx->fn_count; i++) {
@@ -1418,6 +1516,10 @@ int ir_effects_run(IRProgram *program, const IREffectInput *input,
   }
   if (input->report) {
     report_effects(&ctx, input->report);
+  }
+  if (input->why_out && input->why_function && input->why_effect) {
+    ok = why_effect(&ctx, input->why_function, input->why_effect,
+                    input->why_out);
   }
   ledger_effects(&ctx);
   if (out_steps) {

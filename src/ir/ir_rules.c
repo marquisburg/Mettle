@@ -392,19 +392,32 @@ static int run_one_rule(IRProgram *program, IRFunction *rule,
     error_reporter_set_last_label(reporter, verdict.outcome == 1
                                                 ? "the rule points here"
                                                 : "unproven here");
-    error_reporter_set_last_code(reporter, verdict.outcome == 1 ? "R0002"
-                                                                : "R0003");
+    error_reporter_set_last_code(reporter,
+                                 rule->explain_code
+                                     ? rule->explain_code
+                                     : (verdict.outcome == 1 ? "R0002"
+                                                             : "R0003"));
     SourceSpan declared = source_span_from_location(rule->location, 4);
     declared = error_reporter_span_snap_to_token(reporter, declared, "rule");
     error_reporter_add_note_of_span(reporter, declared,
                                     verdict.outcome == 1
                                         ? "the rule that failed the build"
                                         : "the rule that announced the gap");
+    if (rule->explain_text) {
+      error_reporter_add_note_of_span(reporter, declared, rule->explain_text);
+    }
   } else {
     report_at_rule_code(reporter, rule, message,
                         "this rule speaks about the program as a whole",
                         verdict.outcome == 1,
-                        verdict.outcome == 1 ? "R0002" : "R0003");
+                        rule->explain_code
+                            ? rule->explain_code
+                            : (verdict.outcome == 1 ? "R0002" : "R0003"));
+    if (rule->explain_text && reporter) {
+      SourceSpan at_rule = source_span_from_location(rule->location, 4);
+      at_rule = error_reporter_span_snap_to_token(reporter, at_rule, "rule");
+      error_reporter_add_note_of_span(reporter, at_rule, rule->explain_text);
+    }
   }
   if (report) {
     fprintf(report, "rule %s: %s, %lld steps\n", display,
@@ -421,9 +434,111 @@ static int run_one_rule(IRProgram *program, IRFunction *rule,
   return 1;
 }
 
+/* A rule is code the compiler does not trust, and a rule that answers
+ * differently on two runs over the same program decided by accident. Under
+ * `mettle test` every rule is run a second time in a fresh machine over a
+ * freshly placed image, and a verdict that moved is reported. */
+static int rule_verdict_again(IRProgram *program, IRFunction *rule,
+                              const IRRuleImage *image, long long fuel,
+                              RuleVerdict *out, IRInterpStatus *out_status) {
+  const MtlcType *verdict_type = find_verdict_type(program, rule);
+  IRInterpMachine *machine = ir_interp_create(program);
+  unsigned char *bytes;
+  unsigned long long base;
+  unsigned long long address;
+  IRInterpValue arg;
+  IRInterpValue result;
+  if (!machine || !verdict_type) {
+    if (machine) {
+      ir_interp_destroy(machine);
+    }
+    return 0;
+  }
+  bytes = malloc(image->size ? image->size : 1);
+  if (!bytes) {
+    ir_interp_destroy(machine);
+    return 0;
+  }
+  memcpy(bytes, image->bytes, image->size);
+  base = ir_interp_next_buffer_address(machine);
+  for (size_t i = 0; i < image->pointer_count; i++) {
+    size_t offset = image->pointer_offsets[i];
+    unsigned long long value = 0;
+    if (offset + 8 > image->size) {
+      continue;
+    }
+    memcpy(&value, bytes + offset, 8);
+    value += base;
+    memcpy(bytes + offset, &value, 8);
+  }
+  address = ir_interp_add_buffer(machine, bytes, (long long)image->size);
+  free(bytes);
+  if (address != base) {
+    ir_interp_destroy(machine);
+    return 0;
+  }
+  memset(&arg, 0, sizeof(arg));
+  arg.i = (long long)address;
+  memset(&result, 0, sizeof(result));
+  *out_status = ir_interp_run(machine, rule, &arg, 1, &result, fuel);
+  memset(out, 0, sizeof(*out));
+  if (*out_status == IR_INTERP_OK) {
+    decode_verdict(machine, verdict_type, (unsigned long long)result.i, out);
+  }
+  ir_interp_destroy(machine);
+  return 1;
+}
+
+static void rule_cross_check(IRProgram *program, IRFunction *rule,
+                             const IRRuleImage *image, ErrorReporter *reporter,
+                             FILE *report, long long fuel,
+                             IRRuleStats *stats) {
+  RuleVerdict first;
+  RuleVerdict second;
+  IRInterpStatus first_status = IR_INTERP_OK;
+  IRInterpStatus second_status = IR_INTERP_OK;
+  const char *display = rule_display_name(rule->name);
+  char message[512];
+  if (!rule_verdict_again(program, rule, image, fuel, &first,
+                          &first_status) ||
+      !rule_verdict_again(program, rule, image, fuel, &second,
+                          &second_status)) {
+    return;
+  }
+  if (first_status == second_status && first.outcome == second.outcome &&
+      first.line == second.line && first.column == second.column &&
+      strcmp(first.message, second.message) == 0) {
+    if (report) {
+      fprintf(report, "rule %s: verdict held on a second run\n", display);
+    }
+    return;
+  }
+  snprintf(message, sizeof(message),
+           "rule '%s' answered differently on a second run over the same "
+           "program: first %s, then %s. A rule that is not a function of the "
+           "program it reads decided by accident",
+           display, first.outcome == 0 ? "pass" : first.outcome == 1 ? "fail"
+                                                                     : "gap",
+           second.outcome == 0 ? "pass"
+                               : second.outcome == 1 ? "fail" : "gap");
+  report_at_rule_code(reporter, rule, message, "unstable verdict", 1, "R0005");
+  stats->malformed++;
+  if (report) {
+    fprintf(report, "rule %s: verdict moved between runs\n", display);
+  }
+}
+
 int ir_rules_run(IRProgram *program, const IRRuleImage *image,
                  ErrorReporter *reporter, FILE *report, long long budget,
                  IRRuleStats *stats) {
+  return ir_rules_run_checked(program, image, reporter, report, budget, 0,
+                              stats);
+}
+
+int ir_rules_run_checked(IRProgram *program, const IRRuleImage *image,
+                         ErrorReporter *reporter, FILE *report,
+                         long long budget, int cross_check,
+                         IRRuleStats *stats) {
   IRRuleStats local;
   int failed_build = 0;
   if (!stats) {
@@ -442,6 +557,13 @@ int ir_rules_run(IRProgram *program, const IRRuleImage *image,
     if (!run_one_rule(program, rule, image, reporter, report, fuel, stats,
                       &failed_build)) {
       return 0;
+    }
+    if (cross_check) {
+      size_t before = stats->malformed;
+      rule_cross_check(program, rule, image, reporter, report, fuel, stats);
+      if (stats->malformed != before) {
+        failed_build = 1;
+      }
     }
   }
   if (budget > 0 && stats->steps > budget) {

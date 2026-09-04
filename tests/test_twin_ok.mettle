@@ -1,0 +1,18 @@
+import "std/io";
+
+fn abs_slow(x: int32) -> int32 {
+  if (x < 0) {
+    return 0 - x;
+  }
+  return x;
+}
+
+fn abs_fast(x: int32) -> int32 reference abs_slow {
+  var m: int32 = x >> 31;
+  return (x + m) ^ m;
+}
+
+fn main() -> int32 {
+  print("abs {abs_fast(0 - 7)} {abs_fast(9)}");
+  return 0;
+}

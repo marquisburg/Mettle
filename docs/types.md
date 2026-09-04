@@ -585,6 +585,10 @@ it: every proven conversion is checked as the interpreter runs, and a value
 that violates its type stops the run naming the type. The prover is code, and
 code is not trusted on its own authority.
 
+`mettle why app.mettle 15 Percent` answers the other half of the question: it
+prints the chain and the range for a conversion that succeeded, in the same
+words the refusal would have used.
+
 `--report-proofs` prints the ledger: one line per conversion, with the type,
 the expression, the site, whether it was proven, what it cost in prover steps,
 and the route that settled it (a range the compiler could bound, or a

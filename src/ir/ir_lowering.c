@@ -1,6 +1,7 @@
 // AST->IR lowering: driver, context lifecycle, emit primitives.
 #include "ir_lowering_internal.h"
 #include "frontend/mtlc_lower_module.h" // backend module table population
+#include "string_intern.h"
 
 static void ir_lowering_free_control_stack(IRLoweringContext *context) {
   for (size_t j = 0; j < context->control_count; j++) {
@@ -197,6 +198,16 @@ IRFunction *ir_lower_function(IRLoweringContext *context,
                           function_data->is_naked ||
                           function_data->is_interrupt;
   function->is_pure = function_data->is_pure;
+  function->reference_twin =
+      function_data->reference_twin
+          ? string_intern(function_data->reference_twin)
+          : NULL;
+  function->explain_code = function_data->explain_code
+                               ? string_intern(function_data->explain_code)
+                               : NULL;
+  function->explain_text = function_data->explain_text
+                               ? string_intern(function_data->explain_text)
+                               : NULL;
   function->is_noalloc = function_data->is_noalloc;
   ir_function_set_effects(function, IR_EFFECT_CLAUSE_WITH,
                           (const char *const *)function_data->effects_with,

@@ -3014,6 +3014,9 @@ static ASTNode *mono_lift_one_method(MonoContext *ctx, const char *struct_name,
   fn->is_inline_contract = md->is_inline_contract;
   fn->is_noinline = md->is_noinline;
   fn->is_pure = md->is_pure;
+  fn->reference_twin = md->reference_twin ? strdup(md->reference_twin) : NULL;
+  fn->explain_code = md->explain_code ? strdup(md->explain_code) : NULL;
+  fn->explain_text = md->explain_text ? strdup(md->explain_text) : NULL;
   fn->is_noalloc = md->is_noalloc;
   fn->is_swappable = md->is_swappable;
   fn->is_naked = md->is_naked;

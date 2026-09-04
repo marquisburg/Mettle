@@ -109,6 +109,10 @@ typedef struct {
   int report_rules;
   long long rule_budget;
   int rule_budget_set;
+  int report_twins;
+  int why_mode;
+  const char *why_subject;
+  const char *why_what;
   int report_proofs;
   long long proof_budget;
   int proof_budget_set;

@@ -36,6 +36,7 @@
 #include "ir/ir_rules.h"
 #include "ir/ir_effects.h"
 #include "ir/ir_purity.h"
+#include "ir/ir_twins.h"
 #include "ir/ir_explain_ledger.h"
 #include "ir/ir_interp.h"
 #include <ctype.h>
@@ -95,6 +96,8 @@ __declspec(dllimport) int __stdcall QueryPerformanceCounter(MettleQpcTicks *coun
 #define PROFILE_PHASE_DEBUG_INFO METTLE_COMPILER_PHASE_DEBUG_INFO
 #define PROFILE_PHASE_CLEANUP METTLE_COMPILER_PHASE_CLEANUP
 #define PROFILE_PHASE_COUNT METTLE_COMPILER_PHASE_COUNT
+
+static int explain_rule_code(const char *code, const char *path);
 
 static int compiler_options_use_profile_runtime(const CompilerOptions *options) {
   return options &&
@@ -3915,6 +3918,8 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
     options->check_purity_fault = 1;
   } else if (strcmp(argv[i], "--report-proofs") == 0) {
     options->report_proofs = 1;
+  } else if (strcmp(argv[i], "--report-twins") == 0) {
+    options->report_twins = 1;
   } else if (strcmp(argv[i], "--report-effects") == 0) {
     options->report_effects = 1;
   } else if (strncmp(argv[i], "--proof-budget=", 15) == 0) {
@@ -4355,6 +4360,9 @@ int main(int argc, char *argv[]) {
       return print_help_topic(argv[0], argv[0], argc >= 3 ? argv[2] : NULL);
     }
     if (strcmp(argv[1], "explain") == 0) {
+      if (argc >= 4) {
+        return explain_rule_code(argv[2], argv[3]);
+      }
       return mettle_explain_error_code(argc >= 3 ? argv[2] : NULL);
     }
     if (strcmp(argv[1], "expand") == 0) {
@@ -4369,6 +4377,21 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "usage: mettle expand <file.mettle>\n");
         return 1;
       }
+    }
+    if (strcmp(argv[1], "why") == 0) {
+      if (argc < 5) {
+        fprintf(stderr,
+                "usage: mettle why <file.mettle> <function> <effect>\n"
+                "       mettle why <file.mettle> <line[:column]> <type>\n"
+                "  prints the chain that established a fact this build "
+                "rested on\n");
+        return 1;
+      }
+      options.why_mode = 1;
+      options.why_subject = argv[3];
+      options.why_what = argv[4];
+      argv[1] = argv[2];
+      argc = 2;
     }
     if (strcmp(argv[1], "swap-check") == 0) {
       options.swap_check_mode = 1;
@@ -4769,6 +4792,77 @@ static int compile_monomorphize(ASTNode *program,
  * inside that block would carry, so the two always agree. */
 static const char *expand_annotate(void *context, const ASTNode *block) {
   return type_checker_expansion_note((TypeChecker *)context, block, NULL);
+}
+
+/* `mettle explain R1001 house.mettle`: a rule may carry its own code and its
+ * own explanation, and the code is meaningless without the file that declares
+ * it. Parsing is enough: the text is on the declaration. */
+static int explain_rule_walk(const ASTNode *node, const char *code,
+                             int *found) {
+  if (!node) {
+    return 0;
+  }
+  if (node->type == AST_FUNCTION_DECLARATION && node->data) {
+    const FunctionDeclaration *fd = (const FunctionDeclaration *)node->data;
+    if (fd->explain_code && strcmp(fd->explain_code, code) == 0) {
+      printf("%s: rule `%s`\n\n%s\n", fd->explain_code,
+             fd->name ? fd->name : "?",
+             fd->explain_text ? fd->explain_text : "(no text)");
+      *found = 1;
+    }
+  }
+  for (size_t i = 0; i < node->child_count; i++) {
+    explain_rule_walk(node->children[i], code, found);
+  }
+  return *found;
+}
+
+static int explain_rule_code(const char *code, const char *path) {
+  char *source = NULL;
+  ErrorReporter *reporter = NULL;
+  Lexer *lexer = NULL;
+  Parser *parser = NULL;
+  ASTNode *program = NULL;
+  int found = 0;
+  if (!code || !path) {
+    return 1;
+  }
+  source = read_file(path);
+  if (!source) {
+    fprintf(stderr, "Error: could not read '%s'\n", path);
+    return 1;
+  }
+  reporter = error_reporter_create(path, source);
+  lexer = lexer_create(source);
+  parser = lexer && reporter
+               ? parser_create_with_error_reporter(lexer, reporter)
+               : NULL;
+  if (parser) {
+    program = parser_parse_program(parser);
+  }
+  if (program) {
+    explain_rule_walk(program, code, &found);
+  }
+  if (!found) {
+    fprintf(stderr,
+            "no rule in '%s' carries the code %s; a rule declares one with "
+            "`explain %s \"...\"` after its signature\n",
+            path, code, code);
+  }
+  if (program) {
+    ast_destroy_node(program);
+  }
+  if (parser) {
+    parser_destroy(parser);
+  }
+  if (lexer) {
+    lexer_destroy(lexer);
+  }
+  if (reporter) {
+    error_reporter_destroy(reporter);
+  }
+  free(source);
+  return found ? 0 : 1;
 }
 
 static int compile_type_check(TypeChecker *type_checker, ASTNode *program,
@@ -5532,6 +5626,7 @@ int compile_file(const char *input_filename, const char *output_filename,
   double phase_start = 0.0;
   const int arm64_object_output = compile_targets_arm64_object(options);
   IREffectResults *effect_results = NULL;
+  IRTwinSnapshots *twin_snapshots = NULL;
 
   compiler_profile_init(&profile, options && options->profile);
 
@@ -5800,6 +5895,14 @@ int compile_file(const char *input_filename, const char *output_filename,
   if (options->report_proofs) {
     type_checker_report_proofs(type_checker, stdout);
   }
+  if (options->why_mode && options->why_subject &&
+      (options->why_subject[0] >= '0' && options->why_subject[0] <= '9')) {
+    result = type_checker_why_proof(type_checker, options->why_subject,
+                                    options->why_what, stdout)
+                 ? 0
+                 : 1;
+    goto cleanup;
+  }
   if (options->proof_budget_set &&
       type_checker_proof_steps(type_checker) > options->proof_budget) {
     fprintf(stderr,
@@ -5908,7 +6011,7 @@ int compile_file(const char *input_filename, const char *output_filename,
 
   if (ir_program_declares_effects(ir_program) ||
       type_checker->effect_obligation_count > 0 || options->report_effects ||
-      options->effect_budget_set || options->explain) {
+      options->effect_budget_set || options->explain || options->why_mode) {
     IREffectInput effect_input;
     long long effect_steps = 0;
     IREffectDecl *effect_decls =
@@ -5943,6 +6046,11 @@ int compile_file(const char *input_filename, const char *output_filename,
                                 ir_verify_enabled();
       effect_input.library_build = options->shared_output;
       effect_input.report = options->report_effects ? stdout : NULL;
+      if (options->why_mode) {
+        effect_input.why_function = options->why_subject;
+        effect_input.why_effect = options->why_what;
+        effect_input.why_out = stdout;
+      }
       effects_ok = ir_effects_run(ir_program, &effect_input, error_reporter,
                                   &effect_results, &effect_steps);
     }
@@ -5955,6 +6063,10 @@ int compile_file(const char *input_filename, const char *output_filename,
         fprintf(stderr, "Error: could not analyse the program's effects\n");
       }
       result = 1;
+      goto cleanup;
+    }
+    if (options->why_mode) {
+      result = effects_ok ? 0 : 1;
       goto cleanup;
     }
     if (options->effect_budget_set && effect_steps > options->effect_budget) {
@@ -5989,6 +6101,23 @@ int compile_file(const char *input_filename, const char *output_filename,
                              safety_stats.region_calls);
   }
 
+  if (ir_program_has_twins(ir_program) || options->report_twins) {
+    IRTwinStats twin_stats;
+    if (!ir_twins_check(ir_program, error_reporter,
+                        options->report_twins ? stdout : NULL,
+                        "as written", &twin_stats)) {
+      error_reporter_print_errors(error_reporter);
+      result = 1;
+      goto cleanup;
+    }
+    if (error_reporter_has_errors(error_reporter)) {
+      error_reporter_print_errors(error_reporter);
+    }
+    if (ir_verify_enabled()) {
+      twin_snapshots = ir_twins_capture(ir_program);
+    }
+  }
+
   {
     IRPurityStats purity_stats;
     if (!ir_purity_check_contracts(ir_program, error_reporter,
@@ -6013,11 +6142,11 @@ int compile_file(const char *input_filename, const char *output_filename,
       result = 1;
       goto cleanup;
     }
-    rules_ok = ir_rules_run(ir_program, &rule_image, error_reporter,
-                            options->report_rules ? stdout : NULL,
-                            options->rule_budget_set ? options->rule_budget
-                                                     : 0,
-                            &rule_stats);
+    rules_ok = ir_rules_run_checked(
+        ir_program, &rule_image, error_reporter,
+        options->report_rules ? stdout : NULL,
+        options->rule_budget_set ? options->rule_budget : 0,
+        options->test_mode, &rule_stats);
     ir_rule_image_free(&rule_image);
     ir_program_drop_rules(ir_program);
     if (!rules_ok) {
@@ -6162,6 +6291,24 @@ int compile_file(const char *input_filename, const char *output_filename,
      * -O/--release. Tell the user their `@simd` loops went unchecked and strip
      * the markers so they never reach codegen. */
     ir_note_simd_contracts_unverified(ir_program);
+  }
+
+  /* A twin agreed with its reference on the program as written. Under
+   * --verify, ask again after the optimizer, against the reference as it was
+   * before any pass touched it, so a pass that broke the fast one is caught by
+   * the reference the program already supplied. */
+  if (twin_snapshots) {
+    IRTwinStats twin_stats;
+    int twins_ok = ir_twins_recheck(ir_program, twin_snapshots, error_reporter,
+                                    options->report_twins ? stdout : NULL,
+                                    "after the optimizer", &twin_stats);
+    ir_twins_snapshots_free(twin_snapshots);
+    twin_snapshots = NULL;
+    if (!twins_ok) {
+      error_reporter_print_errors(error_reporter);
+      result = 1;
+      goto cleanup;
+    }
   }
   ir_program_drop_rewrite_rules(ir_program);
 
@@ -6393,6 +6540,8 @@ int compile_file(const char *input_filename, const char *output_filename,
   }
 
 cleanup:
+  ir_twins_snapshots_free(twin_snapshots);
+  twin_snapshots = NULL;
   // Clean up resources
   compiler_set_phase(PROFILE_PHASE_CLEANUP);
   phase_start = compiler_profile_begin(&profile);
@@ -6556,6 +6705,9 @@ void print_usage(const char *program_name) {
   printf("  --report-target     Print the target in effect as a Mettle TargetDesc\n");
   printf("  --rule-budget=N     Fail the build when the rules spend more than N steps\n");
   printf("  --report-proofs     Print every declared-type proof, its route and its cost\n");
+  printf("  --report-twins      Print what each `reference` twin was checked on\n");
+  printf("  why <file> <fn> <effect>    Print the chain that made an effect hold\n");
+  printf("  why <file> <line> <type>    Print the proof that made a conversion hold\n");
   printf("  --proof-budget=N    Fail the build when the prover spends more than N steps\n");
   printf("  --report-effects    Print what each function performs and needs, and the cost\n");
   printf("  --effect-budget=N   Fail the build when the effect pass spends more than N\n"
