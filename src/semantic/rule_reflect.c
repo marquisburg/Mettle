@@ -1,5 +1,6 @@
 #include "rule_reflect.h"
 #include "../ir/ir_machine.h"
+#include "../ir/ir_trace.h"
 #include "import_resolver.h"
 #include "type_checker_internal.h"
 #include <stdint.h>
@@ -1138,6 +1139,100 @@ static int build_image(Reflect *reflect, const char *root_file,
  * whether a loop vectorized, whether a call was inlined, and the effects the
  * function was proven to hold. std/rule owns the shape; III.3's line is that a
  * rule sees a snapshot and never the machinery that produced it. */
+/* The trace image: what happened while the program ran, as events the
+ * interpreter recorded on the way through. Same shape as the other two images
+ * and the same line: a rule sees the events, never the machine that produced
+ * them. */
+int rule_reflect_build_trace(TypeChecker *checker, const char *root_file,
+                             IRRuleImage *out, char **error_message) {
+  const Type *trace_type = lookup_qualified(checker, "std/rule.Trace");
+  const Type *event_type = lookup_qualified(checker, "std/rule.Event");
+  const Type *site_type = lookup_qualified(checker, "std/rule.Site");
+  Image image;
+  size_t trace_offset;
+  size_t events_offset;
+  size_t count = ir_trace_event_count();
+  size_t site_capacity = 0;
+  if (!checker || !out || !error_message) {
+    return 0;
+  }
+  memset(out, 0, sizeof(*out));
+  *error_message = NULL;
+  if (!trace_type || !event_type || !site_type) {
+    *error_message = strdup("a @rule over a trace needs the Trace, Event and "
+                            "Site records from std/rule");
+    return 0;
+  }
+  memset(&image, 0, sizeof(image));
+  trace_offset = image_reserve(&image, trace_type->size, trace_type->alignment);
+  events_offset = count ? image_reserve(&image, event_type->size * count,
+                                        event_type->alignment)
+                        : 0;
+  for (size_t i = 0; i < count && !image.failed; i++) {
+    const IRTraceEvent *event = ir_trace_event_at(i);
+    size_t base = events_offset + i * event_type->size;
+    IRRuleSite site;
+    image_put_string(&image, base + field_offset(event_type, "kind", &image),
+                     event->kind);
+    image_put_string(&image, base + field_offset(event_type, "name", &image),
+                     event->name);
+    site.file = event->file && event->file[0] ? event->file : root_file;
+    site.line = event->line;
+    site.column = event->column;
+    put_site(&image, site_type, base + field_offset(event_type, "site", &image),
+             &site);
+    image_put_u64(&image, base + field_offset(event_type, "value", &image),
+                  (unsigned long long)event->value);
+    if (!add_site(out, &site_capacity, site)) {
+      image.failed = 1;
+    }
+  }
+  put_slice(&image, trace_offset + field_offset(trace_type, "events", &image),
+            events_offset, count);
+  image_put_string(&image,
+                   trace_offset + field_offset(trace_type, "test", &image),
+                   ir_trace_test_name());
+  image_put_string(&image,
+                   trace_offset + field_offset(trace_type, "file", &image),
+                   root_file ? root_file : "");
+  {
+    size_t pool_base = image.size;
+    if (image.pool_size > 0) {
+      size_t total = image.size + image.pool_size;
+      unsigned char *joined = realloc(image.bytes, total ? total : 1);
+      if (!joined) {
+        image.failed = 1;
+      } else {
+        memcpy(joined + image.size, image.pool, image.pool_size);
+        image.bytes = joined;
+        image.size = total;
+      }
+    }
+    for (size_t i = 0; i < image.string_count && !image.failed; i++) {
+      image_put_pointer(&image, image.string_fields[i],
+                        pool_base + image.string_offsets[i]);
+    }
+  }
+  free(image.pool);
+  free(image.string_fields);
+  free(image.string_offsets);
+  if (image.failed) {
+    free(image.bytes);
+    free(image.pointers);
+    free(out->sites);
+    memset(out, 0, sizeof(*out));
+    *error_message = strdup("could not lay out the trace the rules read");
+    return 0;
+  }
+  out->bytes = image.bytes;
+  out->size = image.size;
+  out->pointer_offsets = image.pointers;
+  out->pointer_count = image.pointer_count;
+  out->function_count = 0;
+  out->type_count = 0;
+  return 1;
+}
+
 static int machine_name_is_rule(const IRProgram *program, const char *name) {
   if (!program || !name) {
     return 0;

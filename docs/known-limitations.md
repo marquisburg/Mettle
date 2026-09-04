@@ -272,6 +272,12 @@ happened.
 Unreachable-code analysis is block-local and conservative. Some dead paths in
 complex control flow are not diagnosed.
 
+A `@rule` over a `Trace` runs in the compile-time interpreter under
+`mettle test` and nowhere else. There is no sampled version of it inside a
+compiled program: that would mean linking the rule and building the `Trace` at
+run time, and neither exists. A trace rule therefore says what the runs your
+tests drive did, and says nothing about a run in production.
+
 Mettle emits no integer overflow check, so a declared range has none to delete;
 what a range earns is the bounds check and the divide. Two pointers cannot be
 declared disjoint, so a vectorizer that refuses over a possible overlap cannot

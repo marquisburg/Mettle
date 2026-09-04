@@ -4,6 +4,7 @@
  * meaning differs from what it documents, the before/after comparison in
  * ir_verify.c diverges and the pass is caught. */
 #include "ir_interp.h"
+#include "ir_trace.h"
 #include "../runtime/mt_math.h"
 #include "../common.h"
 #include <limits.h>
@@ -2335,6 +2336,14 @@ static int ii_effect_each(IRInterpMachine *machine, const char *list,
 static int ii_effects_call(IRInterpMachine *machine, const char *name,
                            const IRInterpValue *args, size_t arg_count) {
   if (strcmp(name, "mettle_effects_leave") == 0) {
+    if (ir_trace_collecting() && machine->effect_frame_count > 0) {
+      ir_trace_record("effect_leave",
+                      machine->effect_frames[machine->effect_frame_count - 1]
+                          .name,
+                      machine->current_call_loc.filename,
+                      machine->current_call_loc.line,
+                      machine->current_call_loc.column, 0);
+    }
     if (machine->effect_frame_count > 0) {
       size_t last = --machine->effect_frame_count;
       free(machine->effect_frames[last].name);
@@ -2383,6 +2392,12 @@ static int ii_effects_call(IRInterpMachine *machine, const char *name,
       }
       machine->effect_frames = grown;
       machine->effect_frame_capacity = next;
+    }
+    if (ir_trace_collecting()) {
+      ir_trace_record("effect_enter", function,
+                      machine->current_call_loc.filename,
+                      machine->current_call_loc.line,
+                      machine->current_call_loc.column, 0);
     }
     machine->effect_frames[machine->effect_frame_count].name = function;
     machine->effect_frames[machine->effect_frame_count].forbids = forbids;
@@ -2679,6 +2694,12 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
   if (arg_count >= 1 && (strcmp(name, "pthread_mutex_lock") == 0 ||
                          strcmp(name, "pthread_mutex_trylock") == 0 ||
                          strcmp(name, "mettle_mutex_wait") == 0)) {
+    if (ir_trace_collecting()) {
+      ir_trace_record("lock", name, machine->current_call_loc.filename,
+                      machine->current_call_loc.line,
+                      machine->current_call_loc.column,
+                      ii_as_int(&args[0]));
+    }
     machine->held_mutex_count++;
     *result = ii_int_value(0);
     return 1;
@@ -2687,6 +2708,12 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
   if (arg_count >= 1 && (strcmp(name, "pthread_mutex_unlock") == 0 ||
                          strcmp(name, "ReleaseMutex") == 0 ||
                          strcmp(name, "mettle_mutex_release") == 0)) {
+    if (ir_trace_collecting()) {
+      ir_trace_record("unlock", name, machine->current_call_loc.filename,
+                      machine->current_call_loc.line,
+                      machine->current_call_loc.column,
+                      ii_as_int(&args[0]));
+    }
     if (machine->held_mutex_count > 0) {
       machine->held_mutex_count--;
     }
@@ -2755,6 +2782,11 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     }
     *result = ii_int_value(0);
     return 1;
+  }
+  if (strcmp(name, "free") == 0 && arg_count == 1 && ir_trace_collecting()) {
+    ir_trace_record("free", name, machine->current_call_loc.filename,
+                    machine->current_call_loc.line,
+                    machine->current_call_loc.column, ii_as_int(&args[0]));
   }
   if (strcmp(name, "free") == 0 && arg_count == 1) {
     unsigned long long addr = (unsigned long long)ii_as_int(&args[0]);
@@ -5609,6 +5641,10 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
     return 0;
   }
   machine->depth++;
+  if (ir_trace_collecting() && fn->name) {
+    ir_trace_record("call", fn->name, fn->location.filename, fn->location.line,
+                    fn->location.column, (long long)machine->depth);
+  }
 
   const char *saved_pure_fn = machine->pure_fn;
   int saved_pure_declared = machine->pure_declared;
@@ -5846,6 +5882,10 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
     case IR_OP_NEW: {
       if (!ii_pure_violation(machine, "allocated here")) {
         goto done;
+      }
+      if (ir_trace_collecting()) {
+        ir_trace_record("alloc", fn->name, insn->location.filename,
+                        insn->location.line, insn->location.column, 0);
       }
       if (!ii_op_new(machine, &frame, insn)) {
         goto done;

@@ -20,6 +20,11 @@
 #include "ir.h"
 #include "../error/error_reporter.h"
 
+/* A hook the driver installs to run the program's trace rules after each
+   test. Returning 0 fails that test. */
+void ir_comptime_set_trace_rules(int (*hook)(void *, const char *),
+                                 void *context);
+
 /* Returns the process exit code (0 = all tests passed). */
 int ir_comptime_run_tests(IRProgram *program, ErrorReporter *reporter,
                           const char *filename, const char *filter);

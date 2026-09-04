@@ -1,0 +1,24 @@
+import "std/io";
+import "std/rule";
+import "std/mem";
+
+fn leak(n: int64) -> int64 {
+  var scratch: int64[] = new int64[n];
+  return scratch.length;
+}
+
+@rule fn every_allocation_is_freed(t: Trace) -> Verdict {
+  if (trace_count(t, "alloc") != trace_count(t, "free")) {
+    return verdict_fail_program("TRACE_RULE_MARKER this run allocated and freed a different number of times");
+  }
+  return verdict_pass();
+}
+
+@test fn run_the_shapes() {
+  assert_eq(leak(4), 4);
+}
+
+fn main() -> int32 {
+  print("t {leak(2)}");
+  return 0;
+}

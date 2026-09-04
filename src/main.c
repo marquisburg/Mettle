@@ -38,6 +38,7 @@
 #include "ir/ir_purity.h"
 #include "ir/ir_twins.h"
 #include "ir/ir_machine.h"
+#include "ir/ir_trace.h"
 #include "ir/ir_explain_ledger.h"
 #include "ir/ir_interp.h"
 #include <ctype.h>
@@ -103,7 +104,8 @@ static int explain_rule_code(const char *code, const char *path);
 /* A rule over the machine survives the first rule phase and every pass after
    it, because what it reads does not exist until code generation is done. */
 static int main_keep_machine_rule(const IRFunction *rule) {
-  return ir_rule_kind(rule) == IR_RULE_OVER_MACHINE;
+  IRRuleKind kind = ir_rule_kind(rule);
+  return kind == IR_RULE_OVER_MACHINE || kind == IR_RULE_OVER_TRACE;
 }
 
 /* Asked before lowering, because lowering is where the loop markers the
@@ -3961,6 +3963,8 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
     options->report_proofs = 1;
   } else if (strcmp(argv[i], "--report-twins") == 0) {
     options->report_twins = 1;
+  } else if (strcmp(argv[i], "--fix") == 0) {
+    options->apply_rule_fixes = 1;
   } else if (strcmp(argv[i], "--report-effects") == 0) {
     options->report_effects = 1;
   } else if (strncmp(argv[i], "--proof-budget=", 15) == 0) {
@@ -5345,6 +5349,47 @@ static void compile_dump_ast(ASTNode *program, const char *output_filename) {
 
 /* `mettle test` / `mettle trace`: execute in the compile-time interpreter and
  * stop - no optimization (unless requested), no codegen, no linking. */
+/* Every trace rule, run over the events one test produced. Returns 0 when a
+ * rule failed, which fails that test: a rule about what a program does while it
+ * runs belongs to the run that produced it, and a verdict that names a later
+ * test would name the wrong one. */
+typedef struct {
+  IRProgram *program;
+  TypeChecker *type_checker;
+  ErrorReporter *reporter;
+  const char *filename;
+  FILE *report;
+  long long budget;
+} TraceRuleContext;
+
+static int compile_run_trace_rules(void *raw, const char *test_name) {
+  TraceRuleContext *ctx = (TraceRuleContext *)raw;
+  IRRuleImage image;
+  IRRuleStats stats;
+  char *error = NULL;
+  int ok;
+  (void)test_name;
+  if (!ctx || !ir_program_has_rules_of(ctx->program, IR_RULE_OVER_TRACE)) {
+    return 1;
+  }
+  if (!rule_reflect_build_trace(ctx->type_checker, ctx->filename, &image,
+                                &error)) {
+    fprintf(stderr, "Error: %s\n",
+            error ? error : "could not reflect the trace");
+    free(error);
+    return 0;
+  }
+  ok = ir_rules_run_kind(ctx->program, &image, ctx->reporter, ctx->report,
+                         ctx->budget, 0, IR_RULE_OVER_TRACE, &stats);
+  ir_rule_image_free(&image);
+  if (!ok) {
+    error_reporter_print_errors(ctx->reporter);
+  }
+  return ok;
+}
+
+static TraceRuleContext g_trace_rule_context;
+
 static int compile_run_comptime(IRProgram *ir_program, ASTNode *program,
                                 const CompilerOptions *options,
                                 ErrorReporter *error_reporter,
@@ -5356,8 +5401,25 @@ static int compile_run_comptime(IRProgram *ir_program, ASTNode *program,
   ir_program_drop_rewrite_rules(ir_program);
   ir_interp_set_purity_fault(options->check_purity_fault);
   if (options->test_mode) {
-    return ir_comptime_run_tests(ir_program, error_reporter, input_filename,
-                                 options->test_filter);
+    int status;
+    if (ir_program_has_rules_of(ir_program, IR_RULE_OVER_TRACE)) {
+      ir_trace_set_collect(1);
+      g_trace_rule_context.program = ir_program;
+      g_trace_rule_context.type_checker = (TypeChecker *)options->trace_rule_checker;
+      g_trace_rule_context.reporter = error_reporter;
+      g_trace_rule_context.filename = input_filename;
+      g_trace_rule_context.report = options->report_rules ? stdout : NULL;
+      g_trace_rule_context.budget =
+          options->rule_budget_set ? options->rule_budget : 0;
+      ir_comptime_set_trace_rules(compile_run_trace_rules,
+                                  &g_trace_rule_context);
+    }
+    status = ir_comptime_run_tests(ir_program, error_reporter, input_filename,
+                                   options->test_filter);
+    ir_comptime_set_trace_rules(NULL, NULL);
+    ir_trace_set_collect(0);
+    ir_trace_reset();
+    return status;
   }
   return ir_comptime_trace(ir_program, error_reporter, input_filename, source,
                            options->trace_function, options->trace_args,
@@ -6205,19 +6267,29 @@ int compile_file(const char *input_filename, const char *output_filename,
       result = 1;
       goto cleanup;
     }
+    ir_rules_set_apply_fixes(options->apply_rule_fixes);
     rules_ok = ir_rules_run_kind(
         ir_program, &rule_image, error_reporter,
         options->report_rules ? stdout : NULL,
         options->rule_budget_set ? options->rule_budget : 0,
         options->test_mode, IR_RULE_OVER_PROGRAM, &rule_stats);
     ir_rule_image_free(&rule_image);
-    if (machine_rules_pending) {
+    if (machine_rules_pending ||
+        ir_program_has_rules_of(ir_program, IR_RULE_OVER_TRACE)) {
       ir_program_drop_rules_except(ir_program, main_keep_machine_rule);
     } else {
       ir_program_drop_rules(ir_program);
     }
     if (!rules_ok) {
       error_reporter_print_errors(error_reporter);
+      if (options->apply_rule_fixes && ir_rules_proposal_count() > 0) {
+        int applied = ir_rules_apply_fixes(stdout);
+        if (applied > 0) {
+          fprintf(stdout,
+                  "%d line%s rewritten; build again to check the result\n",
+                  applied, applied == 1 ? "" : "s");
+        }
+      }
       result = 1;
       goto cleanup;
     }
@@ -6234,6 +6306,7 @@ int compile_file(const char *input_filename, const char *output_filename,
   }
 
   if (options->test_mode || options->trace_function) {
+    options->trace_rule_checker = type_checker;
     result = compile_run_comptime(ir_program, program, options, error_reporter,
                                   input_filename, source);
     goto cleanup;
@@ -6817,6 +6890,7 @@ void print_usage(const char *program_name) {
   printf("  --rule-budget=N     Fail the build when the rules spend more than N steps\n");
   printf("  --report-proofs     Print every declared-type proof, its route and its cost\n");
   printf("  --report-twins      Print what each `reference` twin was checked on\n");
+  printf("  --fix               Apply the replacement lines failing @rules proposed\n");
   printf("  why <file> <fn> <effect>    Print the chain that made an effect hold\n");
   printf("  why <file> <line> <type>    Print the proof that made a conversion hold\n");
   printf("  --proof-budget=N    Fail the build when the prover spends more than N steps\n");

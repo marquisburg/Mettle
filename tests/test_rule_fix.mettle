@@ -1,0 +1,22 @@
+import "std/io";
+import "std/rule";
+
+@noinline fn helper(n: int32) -> int32 {
+  return n + 1;
+}
+
+@rule fn helpers_are_inline(p: Program) -> Verdict {
+  for f in p.functions {
+    if (f.module != "") { continue; }
+    if (f.name == "helper" && !f.is_inline) {
+      return verdict_fix(f.site, "a helper has to be @inline",
+                         "@inline fn helper(n: int32) -> int32 {{");
+    }
+  }
+  return verdict_pass();
+}
+
+fn main() -> int32 {
+  print("h {helper(1)}");
+  return 0;
+}

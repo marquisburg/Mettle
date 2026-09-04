@@ -40,6 +40,12 @@ typedef enum {
   IR_RULE_OVER_TRACE
 } IRRuleKind;
 
+/* A verdict may carry a replacement line. --fix writes it; without the flag it
+   is printed as a note and nothing is touched. */
+void ir_rules_set_apply_fixes(int on);
+size_t ir_rules_proposal_count(void);
+int ir_rules_apply_fixes(FILE *out);
+
 IRRuleKind ir_rule_kind(const IRFunction *rule);
 int ir_program_has_rules(const IRProgram *program);
 int ir_program_has_rules_of(const IRProgram *program, IRRuleKind kind);

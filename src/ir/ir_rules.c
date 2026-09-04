@@ -141,6 +141,7 @@ typedef struct {
   long long line;
   long long column;
   char message[1024];
+  char fix[1024];
   int readable;
 } RuleVerdict;
 
@@ -207,6 +208,10 @@ static void decode_verdict(IRInterpMachine *machine, const MtlcType *type,
                    verdict->message, sizeof(verdict->message))) {
     return;
   }
+  if (type_has_field(type, "fix")) {
+    read_string(machine, address + type_field_offset(type, "fix"),
+                verdict->fix, sizeof(verdict->fix));
+  }
   verdict->readable = 1;
 }
 
@@ -221,6 +226,124 @@ static const IRRuleSite *match_site(const IRRuleImage *image,
     }
   }
   return NULL;
+}
+
+/* What a proposing rule asked for, kept until the build is done. Applying it
+ * while the compiler is still reading the file would rewrite the ground under
+ * the diagnostic that is printing. Nothing is written unless --fix asked. */
+typedef struct {
+  char file[512];
+  size_t line;
+  char replacement[1024];
+  char rule[128];
+} IRRuleProposal;
+
+static IRRuleProposal *g_proposals;
+static size_t g_proposal_count;
+static size_t g_proposal_capacity;
+static int g_apply_proposals;
+
+void ir_rules_set_apply_fixes(int on) { g_apply_proposals = on; }
+
+size_t ir_rules_proposal_count(void) { return g_proposal_count; }
+
+static int ir_rules_propose(const char *file, size_t line,
+                            const char *replacement, const char *rule) {
+  IRRuleProposal *entry;
+  if (!file || !replacement || line == 0) {
+    return 1;
+  }
+  for (size_t i = 0; i < g_proposal_count; i++) {
+    if (g_proposals[i].line == line &&
+        strcmp(g_proposals[i].file, file) == 0) {
+      return 1;
+    }
+  }
+  if (g_proposal_count == g_proposal_capacity) {
+    size_t grown = g_proposal_capacity ? g_proposal_capacity * 2 : 8;
+    IRRuleProposal *table =
+        realloc(g_proposals, grown * sizeof(IRRuleProposal));
+    if (!table) {
+      return 1;
+    }
+    g_proposals = table;
+    g_proposal_capacity = grown;
+  }
+  entry = &g_proposals[g_proposal_count++];
+  snprintf(entry->file, sizeof(entry->file), "%s", file);
+  entry->line = line;
+  snprintf(entry->replacement, sizeof(entry->replacement), "%s", replacement);
+  snprintf(entry->rule, sizeof(entry->rule), "%s", rule ? rule : "?");
+  return 1;
+}
+
+/* Apply what the rules proposed, one line each, and say what changed. A
+ * proposal is ordinary Mettle the program wrote: the compiler puts it where the
+ * rule said and compiles the result from scratch, with nothing exempted. */
+int ir_rules_apply_fixes(FILE *out) {
+  int applied = 0;
+  if (!g_apply_proposals || g_proposal_count == 0) {
+    return 0;
+  }
+  for (size_t i = 0; i < g_proposal_count; i++) {
+    IRRuleProposal *p = &g_proposals[i];
+    FILE *in = fopen(p->file, "rb");
+    char *text = NULL;
+    long size = 0;
+    size_t at = 0;
+    size_t line = 1;
+    size_t start = 0;
+    size_t end = 0;
+    if (!in) {
+      continue;
+    }
+    fseek(in, 0, SEEK_END);
+    size = ftell(in);
+    fseek(in, 0, SEEK_SET);
+    text = size > 0 ? malloc((size_t)size + 1) : NULL;
+    if (!text || fread(text, 1, (size_t)size, in) != (size_t)size) {
+      free(text);
+      fclose(in);
+      continue;
+    }
+    text[size] = '\0';
+    fclose(in);
+    for (at = 0; at <= (size_t)size; at++) {
+      if (line == p->line && start == 0 && !(p->line == 1)) {
+        start = at;
+      }
+      if (p->line == 1) {
+        start = 0;
+      }
+      if (at == (size_t)size || text[at] == '\n') {
+        if (line == p->line) {
+          end = at;
+          break;
+        }
+        line++;
+        if (line == p->line) {
+          start = at + 1;
+        }
+      }
+    }
+    if (end >= start) {
+      FILE *w = fopen(p->file, "wb");
+      if (w) {
+        fwrite(text, 1, start, w);
+        fwrite(p->replacement, 1, strlen(p->replacement), w);
+        fwrite(text + end, 1, (size_t)size - end, w);
+        fclose(w);
+        applied++;
+        if (out) {
+          fprintf(out, "fix: %s:%zu rewritten by rule %s\n", p->file, p->line,
+                  p->rule);
+          fprintf(out, "  %s\n", p->replacement);
+        }
+      }
+    }
+    free(text);
+  }
+  return applied;
 }
 
 static void report_at_rule_code(ErrorReporter *reporter, const IRFunction *rule,
@@ -445,6 +568,17 @@ static int run_one_rule(IRProgram *program, IRFunction *rule,
                                         : "the rule that announced the gap");
     if (rule->explain_text) {
       error_reporter_add_note_of_span(reporter, declared, rule->explain_text);
+    }
+    if (verdict.fix[0]) {
+      char note[1200];
+      snprintf(note, sizeof(note),
+               "the rule proposes this line instead, as ordinary Mettle: %s",
+               verdict.fix);
+      error_reporter_add_note_of_span(reporter, span, note);
+      if (!ir_rules_propose(verdict.file, (size_t)verdict.line, verdict.fix,
+                            display)) {
+        *failed_build = 1;
+      }
     }
   } else {
     report_at_rule_code(reporter, rule, message,

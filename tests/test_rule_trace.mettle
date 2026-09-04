@@ -1,0 +1,40 @@
+import "std/io";
+import "std/rule";
+import "std/mem";
+
+effect Audit;
+
+fn audited(n: int64) -> int64 provides Audit {
+  return n * 2;
+}
+
+fn take(n: int64) -> int64 {
+  var scratch: int64[] = new int64[n];
+  var total: int64 = scratch.length;
+  free(scratch.data);
+  return total;
+}
+
+@rule fn every_allocation_is_freed(t: Trace) -> Verdict {
+  if (trace_count(t, "alloc") != trace_count(t, "free")) {
+    return verdict_fail_program("this run allocated and freed a different number of times");
+  }
+  return verdict_pass();
+}
+
+@rule fn effect_frames_balance(t: Trace) -> Verdict {
+  if (!trace_balanced(t, "effect_enter", "effect_leave")) {
+    return verdict_fail_program("an effect frame was entered and never left");
+  }
+  return verdict_pass();
+}
+
+@test fn run_the_shapes() {
+  assert_eq(take(4), 4);
+  assert_eq(audited(3), 6);
+}
+
+fn main() -> int32 {
+  print("t {take(2)}");
+  return 0;
+}

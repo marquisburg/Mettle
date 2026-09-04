@@ -4315,6 +4315,58 @@ catch {
   Write-CaseResult -Name "rules_read_borrow_facts" -Passed $false -Reason $_.Exception.Message
 }
 
+# A rule may read what happened while the program ran. Enforce: under
+# `mettle test` the interpreter records the run as events, the rules see them,
+# a balanced run passes, and an unbalanced one fails that test.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath test "tests/test_rule_trace.mettle" --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the trace rules failed a balanced run: $out" }
+  if ($out -notmatch "rule every_allocation_is_freed: pass") { throw "no ledger line for the allocation rule: $out" }
+  if ($out -notmatch "rule effect_frames_balance: pass") { throw "no ledger line for the effect rule: $out" }
+  if ($out -notmatch "1 passed") { throw "the test did not run: $out" }
+  $out = & $CompilerPath test "tests/test_rule_trace_fail.mettle" 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a leaking run passed its trace rule" }
+  if ($out -notmatch "rule 'every_allocation_is_freed' failed") { throw "the trace rule did not fail: $out" }
+  if ($out -notmatch "TRACE_RULE_MARKER") { throw "the failure does not carry the rule's message: $out" }
+  Write-CaseResult -Name "rules_read_traces" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rules_read_traces" -Passed $false -Reason $_.Exception.Message
+}
+
+# A rule may propose the line it wants instead. Enforce: the proposal is
+# printed as ordinary Mettle without touching anything, --fix writes it, and
+# the rewritten program then passes the rule that asked for it.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $src = Join-Path $tmpDir "rule_fix.mettle"
+  $exe = Join-Path $tmpDir "rule_fix.exe"
+  Copy-Item "tests/test_rule_fix.mettle" $src -Force
+  $before = Get-Content $src -Raw
+  $out = & $CompilerPath --build $src -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "the proposing rule did not fail the build" }
+  if ($out -notmatch "the rule proposes this line instead") { throw "the proposal is not printed: $out" }
+  if ($out -notmatch "@inline fn helper") { throw "the proposal is not ordinary Mettle: $out" }
+  if ((Get-Content $src -Raw) -ne $before) { throw "the source was rewritten without --fix" }
+  $out = & $CompilerPath --build --fix $src -o $exe 2>&1 | Out-String
+  if ($out -notmatch "rewritten by rule helpers_are_inline") { throw "--fix did not say what it changed: $out" }
+  if ($out -notmatch "1 line rewritten") { throw "--fix did not report the count: $out" }
+  if ((Get-Content $src -Raw) -eq $before) { throw "--fix changed nothing" }
+  $out = & $CompilerPath --build $src -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the rewritten program does not build: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "h 2") { throw "the rewritten program did not run: $run" }
+  Write-CaseResult -Name "rules_propose_rewrites" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rules_propose_rewrites" -Passed $false -Reason $_.Exception.Message
+}
+
 # A @rule is a property the program requires of itself. Enforce: there is an
 # input on which the build actually fails, and the failure names the site the
 # rule pointed at and the rule that pointed there.

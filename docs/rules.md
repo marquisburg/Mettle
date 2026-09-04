@@ -137,6 +137,7 @@ A rule takes exactly one argument, and its type is the question:
 |-----------|---------------|--------------|
 | `Program` | The checked program: every function with its callees, effects, allocations and frees; every declared type with its size, alignment and layout; the modules; the globals with what writes each; the target. | After type checking, before any code is generated. |
 | `Machine` | What the program became: per function, its frame size, spill count, instruction count, whether the register-allocating backend took it, how many calls were inlined, and whether each loop vectorized, beside the effects it holds. | After code generation, before anything is written. |
+| `Trace` | What happened when it ran: calls, allocations, frees, lock acquires and releases, and effect frames entered and left, in order, each with its site. | After each `@test`, under `mettle test`. |
 
 There is no second keyword and no decorator to write. The parameter type is
 the whole dispatch, and a signature that is neither is refused with the three
@@ -200,6 +201,56 @@ graph sees: a name the compiler can follow, and nothing behind a function
 pointer. A rule that cares about what it cannot see reads `has_indirect_calls`
 and answers `verdict_gap`, which is the standard the borrow analyser is held to
 and the standard a rule is held to.
+
+## Rules over a run
+
+A rule that takes a `Trace` runs after each `@test`, over the events the
+interpreter recorded while that test executed:
+
+```mettle
+@rule fn every_allocation_is_freed(t: Trace) -> Verdict {
+  if (trace_count(t, "alloc") != trace_count(t, "free")) {
+    return verdict_fail_program("this run allocated and freed a different number of times");
+  }
+  return verdict_pass();
+}
+
+@rule fn effect_frames_balance(t: Trace) -> Verdict {
+  if (!trace_balanced(t, "effect_enter", "effect_leave")) {
+    return verdict_fail_program("an effect frame was entered and never left");
+  }
+  return verdict_pass();
+}
+```
+
+A failing verdict fails that test, because a rule about what a program does
+while it runs belongs to the run that produced it. The events are what the
+interpreter saw, and a program path no test reaches produces no events, so a
+trace rule says what a run did and never what every run would do. That is the
+same standard the differential harness is held to.
+
+## A rule that proposes
+
+A rule that knows what the code should have said can say it:
+
+```mettle
+@rule fn helpers_are_inline(p: Program) -> Verdict {
+  for f in p.functions {
+    if (f.name == "helper" && !f.is_inline) {
+      return verdict_fix(f.site, "a helper has to be @inline",
+                         "@inline fn helper(n: int32) -> int32 {{");
+    }
+  }
+  return verdict_pass();
+}
+```
+
+The build fails as it would for any other failing verdict, and the diagnostic
+carries the proposed line as ordinary Mettle. Nothing is written. `--fix`
+writes it, one line per proposal, says which rule asked and what it put there,
+and stops: the rewritten program is compiled from scratch on the next build,
+with the rule that asked for the change run against the result like any other.
+A rule may not exempt its own output.
 
 ## A rule that explains itself
 

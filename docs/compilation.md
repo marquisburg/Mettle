@@ -110,6 +110,7 @@ divergence. See [ML-driven IR optimization](ml-opt.md).
 | `--proof-budget=N` | Fail the build when the declared-type prover spends more than N steps. |
 | `--report-effects` | What each function performs and needs, and what the [effect](effects.md) pass spent getting there. |
 | `--report-twins` | What each `reference` twin was checked against, and on how many generated input sets. See [Translation validation](translation-validation.md). |
+| `--fix` | Apply the replacement lines that failing `@rule`s proposed, and say which rule asked for each. See [Rules](rules.md). |
 | `--effect-budget=N` | Fail the build when the effect pass spends more than N steps. |
 | `--report-target` | The target in effect, printed as a `TargetDesc` in Mettle; `mettle target <triple>` prints a built-in one and `--target desc.mettle` builds for a described one. See [Bare metal](bare-metal.md). |
 | `--check-proofs` | Trap at run time when a value the compiler proved to be a [declared type](types.md) is not one. Survives `--release`, and costs nothing in a program with no declared types. |

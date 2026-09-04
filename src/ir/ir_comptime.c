@@ -1,6 +1,18 @@
 /* mettle test / mettle trace: compile-time execution DX surfaces.
  * See ir_comptime.h. */
 #include "ir_comptime.h"
+#include "ir_trace.h"
+
+/* What to do with a trace once a test has produced one. The driver installs
+   this; nothing here knows what a rule is. */
+static int (*g_trace_rules_hook)(void *, const char *);
+static void *g_trace_rules_context;
+
+void ir_comptime_set_trace_rules(int (*hook)(void *, const char *),
+                                 void *context) {
+  g_trace_rules_hook = hook;
+  g_trace_rules_context = context;
+}
 #include "ir_interp.h"
 #include "../common.h"
 #include <stdio.h>
@@ -191,9 +203,18 @@ int ir_comptime_run_tests(IRProgram *program, ErrorReporter *reporter,
       continue;
     }
     ir_interp_recheck_inferred_purity(machine, 1);
+    if (ir_trace_collecting()) {
+      ir_trace_begin(ict_display_name(fn->name));
+    }
     IRInterpValue result = {0, 0, 0};
     IRInterpStatus status =
         ir_interp_run(machine, fn, NULL, 0, &result, ICT_TEST_FUEL);
+    if (ir_trace_collecting() && g_trace_rules_hook &&
+        !g_trace_rules_hook(g_trace_rules_context, display)) {
+      totals.failed++;
+      ir_interp_destroy(machine);
+      continue;
+    }
 
     switch (status) {
     case IR_INTERP_OK: {

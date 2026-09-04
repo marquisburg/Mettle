@@ -109,7 +109,11 @@ typedef struct {
   int report_rules;
   long long rule_budget;
   int rule_budget_set;
+  /* The checker that owns std/rule's records, handed to the trace-rule hook
+     so it can lay out a Trace while the tests are running. */
+  void *trace_rule_checker;
   int report_twins;
+  int apply_rule_fixes;
   int why_mode;
   const char *why_subject;
   const char *why_what;

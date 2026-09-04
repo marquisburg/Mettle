@@ -82,6 +82,19 @@ export struct Program {
   file: string;
 }
 
+export struct Event {
+  kind: string;
+  name: string;
+  site: Site;
+  value: int64;
+}
+
+export struct Trace {
+  events: Event[];
+  test: string;
+  file: string;
+}
+
 export struct MachineLoop {
   line: int64;
   column: int64;
@@ -114,6 +127,7 @@ export struct Verdict {
   outcome: int64;
   site: Site;
   message: string;
+  fix: string;
 }
 
 export fn VERDICT_PASS() -> int64 { return 0; }
@@ -127,6 +141,11 @@ export fn verdict_pass() -> Verdict {
 
 export fn verdict_fail(site: Site, message: string) -> Verdict {
   var v: Verdict = { outcome: 1, site: site, message: message };
+  return v;
+}
+
+export fn verdict_fix(site: Site, message: string, replacement: string) -> Verdict {
+  var v: Verdict = { outcome: 1, site: site, message: message, fix: replacement };
   return v;
 }
 
@@ -309,4 +328,29 @@ export fn machine_performs(f: MachineFunction, effect: string) -> bool {
     if (e == effect) { return true; }
   }
   return false;
+}
+
+export fn trace_count(t: Trace, kind: string) -> int64 {
+  var n: int64 = 0;
+  for e in t.events {
+    if (e.kind == kind) { n = n + 1; }
+  }
+  return n;
+}
+
+export fn trace_balanced(t: Trace, opened: string, closed: string) -> bool {
+  var depth: int64 = 0;
+  for e in t.events {
+    if (e.kind == opened) { depth = depth + 1; }
+    if (e.kind == closed) { depth = depth - 1; }
+    if (depth < 0) { return false; }
+  }
+  return depth == 0;
+}
+
+export fn trace_first(t: Trace, kind: string) -> int64 {
+  for i in 0..t.events.length {
+    if (t.events[i].kind == kind) { return i; }
+  }
+  return -1;
 }
