@@ -54,6 +54,8 @@ struct ComptimeBindingSlot {
   SourceSpan origin;
 };
 
+#define COMPTIME_MAX_ROUNDS 4096
+
 static int binding_push(TypeChecker *checker, const char *name,
                         ComptimeValue value, Type *declared, SourceSpan origin,
                         const char *note);
@@ -221,6 +223,10 @@ void type_checker_report_expansion(const TypeChecker *checker, FILE *out) {
     return;
   }
   size_t sites = type_checker_expansion_site_count(checker);
+  if (checker->comptime_text_bytes > 0) {
+    fprintf(out, "comptime text: %zu bytes built while compiling\n",
+            checker->comptime_text_bytes);
+  }
   if (sites == 0) {
     /* An absence worth stating: a program that expanded nothing paid nothing,
      * and saying so is the difference between a cost you avoided and a cost
@@ -229,8 +235,13 @@ void type_checker_report_expansion(const TypeChecker *checker, FILE *out) {
     return;
   }
 
-  fprintf(out, "comptime expansion: %zu site%s, %zu nodes generated\n", sites,
-          sites == 1 ? "" : "s", type_checker_expansion_total_nodes(checker));
+  fprintf(out,
+          "comptime expansion: %zu site%s, %zu nodes generated, %zu round%s to "
+          "settle\n",
+          sites, sites == 1 ? "" : "s",
+          type_checker_expansion_total_nodes(checker),
+          checker->expansion_rounds,
+          checker->expansion_rounds == 1 ? "" : "s");
   for (size_t i = 0; i < checker->expansions->cost_count; i++) {
     const ComptimeSiteCost *cost = &checker->expansions->costs[i];
     fprintf(out, "  %s:%zu:%zu  %s  %zu iteration%s, %zu nodes\n",
@@ -245,7 +256,8 @@ void type_checker_report_expansion(const TypeChecker *checker, FILE *out) {
  * that cost the most -- the same shape as @simd! and @noalloc refusing to
  * under-deliver quietly. */
 int type_checker_check_expansion_budget(TypeChecker *checker, size_t budget) {
-  size_t total = type_checker_expansion_total_nodes(checker);
+  size_t total = type_checker_expansion_total_nodes(checker) +
+                 checker->comptime_text_bytes;
   if (total <= budget) {
     return 1;
   }
@@ -1157,7 +1169,7 @@ int type_checker_declare_expansion_binding(TypeChecker *checker,
 }
 
 static int expand_one_round(TypeChecker *checker, ASTNode *block,
-                            int module_scope) {
+                            int module_scope, int one_directive) {
   if (!checker || !block || block->type != AST_PROGRAM) {
     return 1;
   }
@@ -1193,6 +1205,7 @@ static int expand_one_round(TypeChecker *checker, ASTNode *block,
   ASTNode **expanded = NULL;
   size_t expanded_count = 0;
   size_t expanded_capacity = 0;
+  size_t retired = 0;
   int ok = 1;
 
   for (size_t i = 0; i < program->declaration_count && ok; i++) {
@@ -1204,7 +1217,13 @@ static int expand_one_round(TypeChecker *checker, ASTNode *block,
 
     ComptimeDeclScope outer = {0, 0};
 
-    if (child && child->type == AST_COMPTIME_FOR) {
+    /* One directive per round at module scope: the types the last one
+     * generated are registered before this one resolves its sequence, which is
+     * what lets a directive reflect on what an earlier directive wrote. A
+     * directive left for the next round is copied over untouched. */
+    if (child && child->type == AST_COMPTIME_FOR &&
+        !(one_directive && retired > 0)) {
+      retired++;
       /* A directive this expansion generated is expanded under the binding
        * that generated it, so a nested `comptime for` at module scope can
        * still read the outer field. Inside a block the enclosing scope does
@@ -1318,11 +1337,22 @@ static int expand_one_round(TypeChecker *checker, ASTNode *block,
     return 0;
   }
 
-  /* Committed. The `comptime for` nodes are unreachable now, and their bodies
-   * were cloned, so retiring them cannot touch an expansion. */
+  /* Committed. The `comptime for` nodes this round consumed are unreachable
+   * now, and their bodies were cloned, so retiring them cannot touch an
+   * expansion. A directive held back for the next round is still in the list
+   * and is left alone. */
   for (size_t i = 0; i < program->declaration_count; i++) {
     ASTNode *child = program->declarations[i];
-    if (child && child->type == AST_COMPTIME_FOR) {
+    int carried = 0;
+    if (!child || child->type != AST_COMPTIME_FOR) {
+      continue;
+    }
+    for (size_t k = 0; k < expanded_count && !carried; k++) {
+      if (expanded[k] == child) {
+        carried = 1;
+      }
+    }
+    if (!carried) {
       ast_destroy_node(child);
     }
   }
@@ -1342,7 +1372,7 @@ int type_checker_expand_comptime_block(TypeChecker *checker, ASTNode *block,
   if (!module_scope) {
     /* A nested directive inside a block is reached again when that block is
      * checked, so one round is all a block ever needs. */
-    return expand_one_round(checker, block, 0);
+    return expand_one_round(checker, block, 0, 0);
   }
 
   /* A directive that generates a directive leaves the new one in the module,
@@ -1351,11 +1381,20 @@ int type_checker_expand_comptime_block(TypeChecker *checker, ASTNode *block,
    * ones it uncovers came from a shallower nesting level in the source, so the
    * rounds are bounded by how deeply the program nested them. */
   for (;;) {
-    if (!expand_one_round(checker, block, 1)) {
+    Program *program;
+    size_t remaining = 0;
+    if (!expand_one_round(checker, block, 1, 1)) {
       return 0;
     }
-    Program *program = (Program *)block->data;
-    size_t remaining = 0;
+    checker->expansion_rounds++;
+    /* Register what this round generated before the next directive resolves
+     * its sequence. That is the fixed point the abstraction kind needs: a
+     * generated type is a type, and the next directive reflects on it the way
+     * it reflects on a written one. */
+    if (!type_checker_register_generated_types(checker, block)) {
+      return 0;
+    }
+    program = (Program *)block->data;
     for (size_t i = 0; program && i < program->declaration_count; i++) {
       ASTNode *child = program->declarations[i];
       if (child && child->type == AST_COMPTIME_FOR) {
@@ -1364,6 +1403,14 @@ int type_checker_expand_comptime_block(TypeChecker *checker, ASTNode *block,
     }
     if (remaining == 0) {
       return 1;
+    }
+    if (checker->expansion_rounds > COMPTIME_MAX_ROUNDS) {
+      type_checker_set_error_at_location(
+          checker, block->location,
+          "'comptime for' expansion did not settle after %d rounds; a "
+          "directive that generates a directive has to reach an end",
+          COMPTIME_MAX_ROUNDS);
+      return 0;
     }
   }
 }

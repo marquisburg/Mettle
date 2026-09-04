@@ -1,0 +1,51 @@
+// A wire format generated for both ends.
+//
+// One table describes the fields on the wire. The encoder and the decoder are
+// generated from it, so they cannot drift: there is no second copy to forget.
+// The tag each field carries is built while compiling by concatenating a
+// prefix with the field's code, which is why the two ends agree on it by
+// construction and not by convention.
+//
+// `mettle expand` prints the generated encoder and decoder as ordinary Mettle,
+// and the built tags as the string literals they folded to.
+import "std/io";
+
+struct WireField {
+  name: string;
+  code: int32;
+  shift: int32;
+}
+
+const WIRE: WireField[3] = [
+  { name: "kind", code: 1, shift: 0 },
+  { name: "size", code: 2, shift: 8 },
+  { name: "flags", code: 3, shift: 16 },
+];
+
+comptime for f in WIRE.rows {
+  const ident("TAG_", f.name): string = "wire/" + textof(f.code);
+
+  fn ident("encode_", f.name)(frame: int32, value: int32) -> int32 {
+    return frame | ((value & 255) << f.shift);
+  }
+
+  fn ident("decode_", f.name)(frame: int32) -> int32 {
+    return (frame >> f.shift) & 255;
+  }
+}
+
+fn send(kind: int32, size: int32, flags: int32) -> int32 {
+  var frame: int32 = 0;
+  frame = encode_kind(frame, kind);
+  frame = encode_size(frame, size);
+  frame = encode_flags(frame, flags);
+  return frame;
+}
+
+fn main() -> int32 {
+  var frame: int32 = send(7, 200, 3);
+  println("tags {TAG_kind} {TAG_size} {TAG_flags}");
+  println("frame {frame}");
+  println("read {decode_kind(frame)} {decode_size(frame)} {decode_flags(frame)}");
+  return 0;
+}

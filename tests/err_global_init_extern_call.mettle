@@ -1,0 +1,12 @@
+// A global's initializer is laid out before the program runs. A call to a
+// function this program defines is computed by the interpreter while
+// compiling; a call to an extern has no body here to run, so there is nothing
+// to lay out and the build says so with a source location.
+
+extern fn host_seed() -> int32;
+
+var limit: int32 = host_seed();
+
+fn main() -> int32 {
+  return limit;
+}

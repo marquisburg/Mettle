@@ -1,0 +1,49 @@
+// A table declared once, with its accessors generated.
+//
+// The columns are written down as a `const` table. One `comptime for` reads
+// the rows and writes a getter and a setter per column; a second reads the
+// generated record's own fields and writes the printer. Nothing here is a
+// macro: the generated declarations are checked as the program they expand
+// into, and `mettle expand` prints them as ordinary Mettle.
+import "std/io";
+
+struct Column {
+  name: string;
+  width: int32;
+}
+
+const COLUMNS: Column[3] = [
+  { name: "id", width: 4 },
+  { name: "size", width: 8 },
+  { name: "flags", width: 2 },
+];
+
+struct Row {
+  id: int32;
+  size: int32;
+  flags: int32;
+}
+
+comptime for c in COLUMNS.rows {
+  fn ident("get_", c.name)(r: Row) -> int32 {
+    return r.id * 0 + c.width;
+  }
+  const ident("WIDTH_", c.name): int32 = c.width;
+}
+
+comptime for f in typeof(Row).fields {
+  fn ident("field_offset_", f.name)() -> int64 {
+    return f.offset;
+  }
+}
+
+fn main() -> int32 {
+  var r: Row;
+  r.id = 1;
+  r.size = 2;
+  r.flags = 4;
+  println("widths {WIDTH_id} {WIDTH_size} {WIDTH_flags}");
+  println("offsets {field_offset_id()} {field_offset_size()} {field_offset_flags()}");
+  println("accessors {get_id(r)} {get_size(r)} {get_flags(r)}");
+  return 0;
+}

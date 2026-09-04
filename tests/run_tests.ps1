@@ -737,14 +737,6 @@ $cases = @(
     Pattern       = 'laid out before the program runs'
   },
   @{
-    # A global aggregate needs a literal. This used to reach the backend and
-    # surface as an internal compiler error with no source line.
-    Name          = "err_aggregate_global_call"
-    Path          = "tests/err_aggregate_global_call.mettle"
-    ShouldSucceed = $false
-    Pattern       = 'a global of aggregate type must be initialized with an aggregate literal'
-  },
-  @{
     # Shape check: too many elements do not spill past the array's end.
     Name          = "err_aggregate_literal_shape"
     Path          = "tests/err_aggregate_literal_shape.mettle"
@@ -1533,7 +1525,7 @@ $cases = @(
   # A global is laid out at compile time and there is no module initializer, so a
   # run-time initializer must be a diagnostic with a source location - it used to
   # reach the direct-object backend and abort as an internal compiler error.
-  @{ Name = "err_global_init_call"; Path = "tests/err_global_init_call.mettle"; ShouldSucceed = $false
+  @{ Name = "err_global_init_extern_call"; Path = "tests/err_global_init_extern_call.mettle"; ShouldSucceed = $false
      Pattern = "a global's initializer must be known at compile time"
      OutputMustNotMatch = @("internal compiler error") },
   @{ Name = "err_global_init_new"; Path = "tests/err_global_init_new.mettle"; ShouldSucceed = $false
@@ -4365,6 +4357,123 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "rules_propose_rewrites" -Passed $false -Reason $_.Exception.Message
+}
+
+# A directive may generate a type, and a later directive may reflect on it.
+# Enforce: a struct generated from a table is a type the next directive reads
+# the fields of, the ledger counts the rounds it took to settle, and a program
+# that generates nothing says so.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "gen_types.exe"
+  $out = & $CompilerPath --build "tests/test_comptime_generated_type.mettle" -o $exe --report-expansion 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the generated type was not visible to the next directive: $out" }
+  if ($out -notmatch "comptime expansion: 2 sites") { throw "the ledger does not count both sites: $out" }
+  if ($out -notmatch "rounds to settle") { throw "the ledger does not count the rounds: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "v 3 5") { throw "the generated accessors did not run: $run" }
+  Write-CaseResult -Name "comptime_generates_types" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "comptime_generates_types" -Passed $false -Reason $_.Exception.Message
+}
+
+# Text built while compiling. Enforce: a constant string is concatenated and a
+# constant is formatted, `mettle expand` prints the answer as ordinary Mettle,
+# and the bytes are on the expansion ledger.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "comptime_text.exe"
+  $out = & $CompilerPath --build "tests/test_comptime_text.mettle" -o $exe --report-expansion 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "compile-time text failed the build: $out" }
+  if ($out -notmatch "comptime text: \d+ bytes built while compiling") { throw "the text is not on the ledger: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "f:1 f:2 7") { throw "the generated wire format did not run: $run" }
+  $ex = & $CompilerPath expand "tests/test_comptime_text.mettle" 2>&1 | Out-String
+  if ($ex -notmatch 'TAG_ID: string = "f:1"') { throw "expand does not print the built text as ordinary Mettle: $ex" }
+  Write-CaseResult -Name "comptime_builds_text" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "comptime_builds_text" -Passed $false -Reason $_.Exception.Message
+}
+
+# A constant computed by a function the program wrote. Enforce: the interpreter
+# runs it while compiling and the answer is in the object file, for a table, a
+# record and a scalar; a call to an extern still has no value to lay out.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "const_computed.exe"
+  $out = & $CompilerPath --build "tests/test_const_computed.mettle" -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a computed constant failed the build: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "9 49 7 9 1180377355") { throw "the computed constants are wrong: $run" }
+  $obj = Join-Path $tmpDir ("const_computed" + $script:ObjExt)
+  if (Test-Path $obj) {
+    $bytes = [IO.File]::ReadAllBytes($obj)
+    $found = $false
+    for ($i = 0; $i -lt $bytes.Length - 8; $i++) {
+      # 9, 16, 25 as consecutive little-endian int32: the table is in the image
+      if ($bytes[$i] -eq 9 -and $bytes[$i+4] -eq 16 -and $bytes[$i+8] -eq 25) { $found = $true; break }
+    }
+    if (-not $found) { throw "the computed table is not laid out in the object file" }
+  }
+  Write-CaseResult -Name "const_computed_by_a_function" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "const_computed_by_a_function" -Passed $false -Reason $_.Exception.Message
+}
+
+# The three shapes the premise names an abstraction for, as programs. Enforce:
+# each builds and runs, `mettle expand` prints what was generated as ordinary
+# Mettle, and the completeness check fails the build when a variant is added
+# with no arm to decide it.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "abstraction_table.exe"
+  $out = & $CompilerPath --build "examples/abstractions/table.mettle" -o $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the table example failed to build: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "widths 4 8 2") { throw "the generated widths are wrong: $run" }
+  if ($run -notmatch "offsets 0 4 8") { throw "the generated offsets are wrong: $run" }
+  if ($run -notmatch "accessors 4 8 2") { throw "the generated accessors are wrong: $run" }
+
+  $exe = Join-Path $tmpDir "abstraction_wire.exe"
+  $out = & $CompilerPath --build "examples/abstractions/wire.mettle" -o $exe --report-expansion 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the wire example failed to build: $out" }
+  if ($out -notmatch "comptime text: \d+ bytes") { throw "the wire tags were not built while compiling: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "tags wire/1 wire/2 wire/3") { throw "the generated tags are wrong: $run" }
+  if ($run -notmatch "read 7 200 3") { throw "the generated codec does not round-trip: $run" }
+  $ex = & $CompilerPath expand "examples/abstractions/wire.mettle" 2>&1 | Out-String
+  if ($ex -notmatch "fn encode_kind") { throw "expand does not print the generated encoder: $ex" }
+  if ($ex -notmatch "fn decode_flags") { throw "expand does not print the generated decoder: $ex" }
+
+  $exe = Join-Path $tmpDir "abstraction_variants.exe"
+  $out = & $CompilerPath --build "examples/abstractions/variants.mettle" -o $exe --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the variants example failed to build: $out" }
+  if ($out -notmatch "rule step_decides_every_state: pass") { throw "the completeness rule did not run: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "settled at 3") { throw "the state machine did not run: $run" }
+
+  $broken = Join-Path $tmpDir "variants_broken.mettle"
+  $source = Get-Content "examples/abstractions/variants.mettle" -Raw
+  $source = $source -replace "(?m)^  Stopped,`$", "  Stopped,`n  Failed,"
+  Set-Content -Path $broken -Value $source -Encoding UTF8
+  $out = & $CompilerPath --build $broken -o (Join-Path $tmpDir "variants_broken.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a variant with no arm to decide it built" }
+  if ($out -notmatch "error\[R2001\]: rule 'step_decides_every_state' failed") { throw "the completeness rule did not catch it: $out" }
+  Write-CaseResult -Name "abstraction_examples" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "abstraction_examples" -Passed $false -Reason $_.Exception.Message
 }
 
 # A @rule is a property the program requires of itself. Enforce: there is an

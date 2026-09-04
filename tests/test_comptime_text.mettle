@@ -1,0 +1,22 @@
+import "std/io";
+
+struct WireField { name: string; code: int32; }
+
+const WIRE: WireField[2] = [ { name: "id", code: 1 }, { name: "size", code: 2 } ];
+
+const TAG_ID: string = "f:" + textof(1);
+
+comptime for f in WIRE.rows {
+  const ident("TAG_", f.name): string = "f:" + textof(f.code);
+  fn ident("encode_", f.name)(v: int32) -> int32 {
+    return v * 16 + f.code;
+  }
+  fn ident("decode_", f.name)(w: int32) -> int32 {
+    return w / 16;
+  }
+}
+
+fn main() -> int32 {
+  print("{TAG_id} {TAG_size} {decode_id(encode_id(7))}");
+  return 0;
+}

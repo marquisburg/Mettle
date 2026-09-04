@@ -2498,6 +2498,24 @@ static Type *type_checker_infer_named_builtin(TypeChecker *checker,
     return checker->builtin_int64;
   }
 
+  /* `textof(x)` is the compile-time spelling of a constant. It answers a
+     string, and it answers one only where the value is known while compiling:
+     a wire tag built from a table is the same tag at both ends because it was
+     built once, here. */
+  if (strcmp(call->function_name, "textof") == 0) {
+    ComptimeValue folded = comptime_none();
+    if (call->argument_count != 1 || !call->arguments[0] ||
+        !type_checker_eval_comptime(checker, expression, &folded) ||
+        folded.kind != COMPTIME_STRING) {
+      type_checker_set_error_at_location(
+          checker, expression->location,
+          "textof(x) needs one value the compiler already knows: a constant, "
+          "a compile-time binding, or an expression over those");
+      return NULL;
+    }
+    return checker->builtin_string;
+  }
+
   if (strcmp(call->function_name, "fieldof") == 0) {
     ComptimeValue field = comptime_none();
     if (!type_checker_eval_fieldof(checker, call, expression->location,

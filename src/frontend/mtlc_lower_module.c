@@ -2,6 +2,7 @@
  * table from the frontend, so codegen needs neither the AST nor the frontend
  * type/symbol tables. FRONTEND-side adapter (driver, not libmtlc). */
 #include "frontend/mtlc_lower_module.h"
+#include "ir/ir_interp.h"
 #include "frontend/mtlc_frontend.h" // mtlc_type_from_frontend
 #include "common.h"                 // mettle_fnv1a_hash
 
@@ -601,6 +602,116 @@ static IRInitReloc *populate_aggregate_initializer(IRModuleSymbol *entry,
   return relocs;
 }
 
+/* A `const` whose initializer is a call to a function the program wrote. The
+ * interpreter runs it here, where the function's IR exists and nothing has run
+ * yet, and the answer becomes the bytes in the object file. The budget is the
+ * interpreter's fuel: a table that does not finish computing is a build that
+ * says so rather than one that hangs.
+ *
+ * This is the same interpreter that runs `@test`, holds the optimizer to
+ * `--verify` and runs the rules. There is no second evaluator with a smaller
+ * language in it, which is the point: any function the interpreter can run can
+ * compute a constant. */
+#define MTLC_CONST_CALL_FUEL 20000000LL
+
+static long long g_const_call_steps;
+
+long long mtlc_lower_const_call_steps(void) { return g_const_call_steps; }
+
+static IRFunction *const_call_target(IRProgram *program,
+                                     const ASTNode *initializer,
+                                     const CallExpression **out_call) {
+  const CallExpression *call;
+  if (!initializer || initializer->type != AST_FUNCTION_CALL ||
+      !initializer->data) {
+    return NULL;
+  }
+  call = (const CallExpression *)initializer->data;
+  if (!call->function_name || call->object) {
+    return NULL;
+  }
+  for (size_t i = 0; i < program->function_count; i++) {
+    IRFunction *fn = program->functions[i];
+    if (fn && fn->name && fn->instruction_count > 0 &&
+        strcmp(fn->name, call->function_name) == 0) {
+      *out_call = call;
+      return fn;
+    }
+  }
+  return NULL;
+}
+
+static int const_call_arguments(TypeChecker *tc, SymbolTable *st,
+                                IRProgram *program, const CallExpression *call,
+                                IRInterpValue *args, size_t capacity,
+                                size_t *out_count) {
+  (void)st;
+  (void)program;
+  if (call->argument_count > capacity) {
+    return 0;
+  }
+  for (size_t i = 0; i < call->argument_count; i++) {
+    ComptimeValue folded = comptime_none();
+    if (!type_checker_eval_comptime(tc, call->arguments[i], &folded)) {
+      return 0;
+    }
+    memset(&args[i], 0, sizeof(args[i]));
+    if (folded.kind == COMPTIME_INT) {
+      args[i].i = folded.as.int_value;
+    } else if (folded.kind == COMPTIME_FLOAT) {
+      args[i].is_float = 1;
+      args[i].f = folded.as.float_value;
+    } else {
+      return 0;
+    }
+  }
+  *out_count = call->argument_count;
+  return 1;
+}
+
+/* Run the call and answer what it returned. `out_bytes` is filled for an
+   aggregate result the caller asked to lay out. */
+static int const_call_run(IRProgram *program, TypeChecker *tc, SymbolTable *st,
+                          const ASTNode *initializer, IRInterpValue *out_value,
+                          IRInterpMachine **out_machine) {
+  const CallExpression *call = NULL;
+  IRFunction *fn = const_call_target(program, initializer, &call);
+  IRInterpValue args[8];
+  size_t arg_count = 0;
+  IRInterpMachine *machine;
+  IRInterpStatus status;
+  if (!fn || !call) {
+    return 0;
+  }
+  if (fn->parameter_count != call->argument_count) {
+    return 0;
+  }
+  machine = ir_interp_create(program);
+  if (!machine) {
+    return 0;
+  }
+  if (!const_call_arguments(tc, st, program, call, args,
+                            sizeof(args) / sizeof(args[0]), &arg_count)) {
+    ir_interp_destroy(machine);
+    return 0;
+  }
+  memset(out_value, 0, sizeof(*out_value));
+  status = ir_interp_run(machine, fn, args, arg_count, out_value,
+                         MTLC_CONST_CALL_FUEL);
+  g_const_call_steps +=
+      MTLC_CONST_CALL_FUEL - ir_interp_fuel_remaining(machine);
+  if (status != IR_INTERP_OK) {
+    ir_interp_destroy(machine);
+    return 0;
+  }
+  if (out_machine) {
+    *out_machine = machine;
+  } else {
+    ir_interp_destroy(machine);
+  }
+  return 1;
+}
+
 static void populate_scalar_initializer(IRProgram *program, TypeChecker *tc,
                                         SymbolTable *st, IRModuleSymbol *entry,
                                         ASTNode *initializer) {
@@ -634,8 +745,57 @@ static void populate_scalar_initializer(IRProgram *program, TypeChecker *tc,
      * and let the backend emit a relocation. */
     entry->init_symbol_ref = (char *)addressed;
   } else {
+    IRInterpValue answered;
+    if (const_call_run(program, tc, st, initializer, &answered, NULL)) {
+      entry->has_initializer = 1;
+      entry->init_is_float = answered.is_float;
+      if (answered.is_float) {
+        double d = answered.f;
+        memcpy(&entry->init_bits, &d, sizeof(d));
+      } else {
+        entry->init_bits = answered.i;
+      }
+      return;
+    }
     entry->has_unfoldable_initializer = 1;
   }
+}
+
+/* An array `const` computed by a function: the interpreter runs it, and the
+   buffer it returns becomes the object file's bytes. */
+static int populate_computed_array(IRProgram *program, TypeChecker *tc,
+                                   SymbolTable *st, IRModuleSymbol *entry,
+                                   ASTNode *initializer, const Type *vtype) {
+  IRInterpValue answered;
+  IRInterpMachine *machine = NULL;
+  size_t bytes;
+  unsigned char *image;
+  if (!vtype || vtype->size == 0 ||
+      (vtype->kind != TYPE_ARRAY && vtype->kind != TYPE_STRUCT)) {
+    return 0;
+  }
+  if (!const_call_run(program, tc, st, initializer, &answered, &machine)) {
+    return 0;
+  }
+  bytes = vtype->size;
+  image = calloc(bytes ? bytes : 1, 1);
+  if (!image) {
+    ir_interp_destroy(machine);
+    return 0;
+  }
+  {
+    long long got = ir_interp_read_bytes(
+        machine, (unsigned long long)answered.i, image, bytes);
+    if (got != (long long)bytes) {
+      free(image);
+      ir_interp_destroy(machine);
+      return 0;
+    }
+  }
+  ir_interp_destroy(machine);
+  entry->init_bytes = image;
+  entry->init_bytes_size = bytes;
+  return 1;
 }
 
 static void populate_variable_symbol(IRProgram *program, TypeChecker *tc,
@@ -670,6 +830,12 @@ static void populate_variable_symbol(IRProgram *program, TypeChecker *tc,
       if (vd->initializer->type == AST_AGGREGATE_LITERAL) {
         aggregate_relocs =
             populate_aggregate_initializer(&entry, vd->initializer);
+      } else if (vtype && (vtype->kind == TYPE_ARRAY ||
+                           vtype->kind == TYPE_STRUCT)) {
+        if (!populate_computed_array(program, tc, st, &entry, vd->initializer,
+                                     vtype)) {
+          entry.has_unfoldable_initializer = 1;
+        }
       } else {
         populate_scalar_initializer(program, tc, st, &entry, vd->initializer);
       }

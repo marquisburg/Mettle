@@ -314,6 +314,10 @@ fn abs_fast(x: int32) -> int32 reference abs_slow { ... }
 @rule fn no_recursion(p: Program) -> Verdict explain R1001 "..." { ... }
 ```
 
+`textof(x)` joins the `sizeof` / `typeof` / `fieldof` / `layoutof` family: it
+answers a constant's text, so a name or a tag can be built while compiling.
+[Control flow](control-flow.md) covers it beside `comptime for`.
+
 `@naked` and `@interrupt` are for code the operating system is not running.
 [Bare metal](bare-metal.md) covers both, along with inline assembly.
 

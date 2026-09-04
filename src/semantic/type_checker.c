@@ -630,6 +630,9 @@ static int type_checker_register_types(TypeChecker *checker, Program *prog,
                   decl->type != AST_TYPE_DECLARATION)) {
       continue;
     }
+    if (decl->type_registered) {
+      continue;
+    }
     type_checker_enter_expansion_decl(checker, decl, &expansion);
     if ((expansion.bindings_pushed > 0) == generated_only) {
       if (pending) {
@@ -671,6 +674,7 @@ static int type_checker_register_types(TypeChecker *checker, Program *prog,
       pending[i] = 0;
       remaining--;
       settled++;
+      decl->type_registered = 1;
       type_checker_enter_expansion_decl(checker, decl, &expansion);
       if (decl->type == AST_TYPE_DECLARATION
               ? !type_checker_process_type_declaration(checker, decl)
@@ -714,6 +718,17 @@ static int type_checker_register_types(TypeChecker *checker, Program *prog,
 
   free(pending);
   return ok;
+}
+
+int type_checker_register_generated_types(TypeChecker *checker,
+                                          ASTNode *program) {
+  Program *prog = program && program->type == AST_PROGRAM
+                      ? (Program *)program->data
+                      : NULL;
+  if (!checker || !prog) {
+    return 1;
+  }
+  return type_checker_register_types(checker, prog, 1);
 }
 
 int type_checker_check_program(TypeChecker *checker, ASTNode *program) {

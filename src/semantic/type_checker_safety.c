@@ -772,6 +772,107 @@ static int type_checker_eval_comptime_member(TypeChecker *checker,
                                              ASTNode *expression,
                                              ComptimeValue *out_value);
 
+/* Compile-time text. A wire format has two ends, and the tag on the wire has
+ * to be the same string in both; the only way to make that true by construction
+ * is to build it once, while compiling, from the same table both ends read.
+ *
+ * The cost is on the same ledger as everything else the expansion spends: every
+ * byte built is counted, and `--expansion-budget` bounds the total, so a
+ * program cannot generate a megabyte of text without saying so. */
+#define COMPTIME_TEXT_MAX 65536
+
+static const char *comptime_text_of(TypeChecker *checker, ComptimeValue value) {
+  char buffer[64];
+  switch (value.kind) {
+  case COMPTIME_STRING:
+    return value.as.string.value;
+  case COMPTIME_INT:
+    snprintf(buffer, sizeof(buffer), "%lld", value.as.int_value);
+    return string_intern(buffer);
+  case COMPTIME_FLOAT:
+    snprintf(buffer, sizeof(buffer), "%g", value.as.float_value);
+    return string_intern(buffer);
+  default:
+    (void)checker;
+    return NULL;
+  }
+}
+
+static int comptime_join(TypeChecker *checker, const char *left,
+                         const char *right, ComptimeValue *out_value) {
+  size_t total;
+  char *joined;
+  if (!left || !right) {
+    return 0;
+  }
+  total = strlen(left) + strlen(right);
+  if (total >= COMPTIME_TEXT_MAX) {
+    return 0;
+  }
+  joined = malloc(total + 1);
+  if (!joined) {
+    return 0;
+  }
+  memcpy(joined, left, strlen(left));
+  memcpy(joined + strlen(left), right, strlen(right) + 1);
+  *out_value = comptime_string(string_intern(joined));
+  free(joined);
+  checker->comptime_text_bytes += total;
+  return out_value->as.string.value != NULL;
+}
+
+static int comptime_binary(TypeChecker *checker, ASTNode *expression,
+                           ComptimeValue *out_value) {
+  BinaryExpression *binary = (BinaryExpression *)expression->data;
+  ComptimeValue left = comptime_none();
+  ComptimeValue right = comptime_none();
+  const char *op;
+  if (!binary || !binary->operator|| !binary->left || !binary->right) {
+    return 0;
+  }
+  op = binary->operator;
+  if (!type_checker_eval_comptime(checker, binary->left, &left) ||
+      !type_checker_eval_comptime(checker, binary->right, &right)) {
+    return 0;
+  }
+  if (strcmp(op, "+") == 0 &&
+      (left.kind == COMPTIME_STRING || right.kind == COMPTIME_STRING)) {
+    return comptime_join(checker, comptime_text_of(checker, left),
+                         comptime_text_of(checker, right), out_value);
+  }
+  if (left.kind == COMPTIME_INT && right.kind == COMPTIME_INT) {
+    long long a = left.as.int_value;
+    long long b = right.as.int_value;
+    if (strcmp(op, "+") == 0) {
+      *out_value = comptime_int(a + b);
+    } else if (strcmp(op, "-") == 0) {
+      *out_value = comptime_int(a - b);
+    } else if (strcmp(op, "*") == 0) {
+      *out_value = comptime_int(a * b);
+    } else if (strcmp(op, "/") == 0 && b != 0) {
+      *out_value = comptime_int(a / b);
+    } else if (strcmp(op, "%") == 0 && b != 0) {
+      *out_value = comptime_int(a % b);
+    } else if (strcmp(op, "<") == 0) {
+      *out_value = comptime_int(a < b);
+    } else if (strcmp(op, "<=") == 0) {
+      *out_value = comptime_int(a <= b);
+    } else if (strcmp(op, ">") == 0) {
+      *out_value = comptime_int(a > b);
+    } else if (strcmp(op, ">=") == 0) {
+      *out_value = comptime_int(a >= b);
+    } else if (strcmp(op, "==") == 0) {
+      *out_value = comptime_int(a == b);
+    } else if (strcmp(op, "!=") == 0) {
+      *out_value = comptime_int(a != b);
+    } else {
+      return 0;
+    }
+    return 1;
+  }
+  return 0;
+}
+
 int type_checker_eval_comptime(TypeChecker *checker, ASTNode *expression,
                                ComptimeValue *out_value) {
   if (!checker || !expression || !out_value) {
@@ -872,8 +973,26 @@ int type_checker_eval_comptime(TypeChecker *checker, ASTNode *expression,
       *out_value = comptime_int(digest);
       return 1;
     }
+    if (strcmp(call->function_name, "textof") == 0 &&
+        call->argument_count == 1) {
+      ComptimeValue inner = comptime_none();
+      const char *text;
+      if (!type_checker_eval_comptime(checker, call->arguments[0], &inner)) {
+        return 0;
+      }
+      text = comptime_text_of(checker, inner);
+      if (!text) {
+        return 0;
+      }
+      *out_value = comptime_string(string_intern(text));
+      checker->comptime_text_bytes += strlen(text);
+      return out_value->as.string.value != NULL;
+    }
     return 0;
   }
+
+  case AST_BINARY_EXPRESSION:
+    return comptime_binary(checker, expression, out_value);
 
   case AST_MEMBER_ACCESS:
     return type_checker_eval_comptime_member(checker, expression, out_value);

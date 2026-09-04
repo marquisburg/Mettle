@@ -1,0 +1,39 @@
+import "std/io";
+
+struct Point { x: int32; y: int32; }
+
+fn squares() -> int32[8] {
+  var t: int32[8];
+  var i: int64 = 0;
+  while (i < 8) {
+    t[i] = (int32)(i * i);
+    i = i + 1;
+  }
+  return t;
+}
+
+fn origin() -> Point {
+  var p: Point;
+  p.x = 7;
+  p.y = 9;
+  return p;
+}
+
+fn mix(seed: int32) -> int32 {
+  var v: int32 = seed;
+  var i: int32 = 0;
+  while (i < 8) {
+    v = v * 31 + i;
+    i = i + 1;
+  }
+  return v;
+}
+
+const SQUARES: int32[8] = squares();
+var ORIGIN: Point = origin();
+var SEED: int32 = mix(7);
+
+fn main() -> int32 {
+  print("{SQUARES[3]} {SQUARES[7]} {ORIGIN.x} {ORIGIN.y} {SEED}");
+  return 0;
+}

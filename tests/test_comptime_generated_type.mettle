@@ -1,0 +1,26 @@
+import "std/io";
+
+struct Column { name: string; width: int32; }
+
+const COLUMNS: Column[1] = [ { name: "alpha", width: 4 } ];
+
+comptime for c in COLUMNS.rows {
+  struct ident("Row_", c.name) {
+    value: int32;
+    tag: int32;
+  }
+}
+
+comptime for f in typeof(Row_alpha).fields {
+  fn ident("read_alpha_", f.name)(r: Row_alpha) -> int32 {
+    return r.value;
+  }
+}
+
+fn main() -> int32 {
+  var a: Row_alpha;
+  a.value = 3;
+  a.tag = 5;
+  print("v {read_alpha_value(a)} {a.tag}");
+  return 0;
+}

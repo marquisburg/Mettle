@@ -1,0 +1,58 @@
+// A set of variants with a completeness check.
+//
+// The state machine's `step` has to decide every state. It carries a
+// `default:` arm, so the compiler's own exhaustiveness check is satisfied and
+// a new variant would quietly fall into it. A `@rule` reads the checked
+// program, asks which variants `step` actually named, and fails the build on
+// the one it did not: adding a variant without adding an arm is a build that
+// stops, not a bug that waits.
+import "std/io";
+import "std/rule";
+
+enum State {
+  Idle,
+  Running,
+  Draining,
+  Stopped,
+}
+
+fn step(s: State) -> State {
+  switch (s) {
+    case State.Idle:
+      return State.Running;
+    case State.Running:
+      return State.Draining;
+    case State.Draining:
+      return State.Stopped;
+    case State.Stopped:
+      return State.Stopped;
+    default:
+      return State.Stopped;
+  }
+}
+
+@rule fn step_decides_every_state(p: Program) -> Verdict explain R2001 "A state machine that does not decide a state falls through to whatever the last arm left behind. Add an arm for the variant named above, or delete the variant." {
+  for f in p.functions {
+    if (f.name != "step") { continue; }
+    for t in p.types {
+      if (t.name != "State") { continue; }
+      for v in t.variants {
+        if (!function_matches(f, "State", v)) {
+          return verdict_fail(f.site, "step does not decide every State");
+        }
+      }
+    }
+  }
+  return verdict_pass();
+}
+
+fn main() -> int32 {
+  var s: State = State.Idle;
+  var n: int32 = 0;
+  while (n < 4) {
+    s = step(s);
+    n = n + 1;
+  }
+  println("settled at {(int32)s}");
+  return 0;
+}

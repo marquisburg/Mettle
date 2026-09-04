@@ -83,6 +83,11 @@ typedef struct ASTNode {
      proof records the predicate itself, type-checked in this scope with the
      binding standing for this value. Lowering emits it as the check. */
   struct ASTNode *proven_predicate;
+  /* This declaration's type has been registered. Module-scope expansion
+     sweeps the declarations again after every directive it retires, so a
+     generated type is visible to the next one; the mark is what keeps the
+     second sweep from declaring the same type twice. */
+  int type_registered;
   const char *proven_binding;
 } ASTNode;
 

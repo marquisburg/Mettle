@@ -150,11 +150,23 @@ static int layoutable_global_initializer(TypeChecker *checker,
     return cast && cast->operand &&
            layoutable_global_initializer(checker, declared, cast->operand, 0);
   }
-  /* `sizeof(T)` is a compile-time integer; every other call needs to run. */
+  /* `sizeof(T)` is a compile-time integer. A call to a function this program
+     defines is one too: the interpreter runs it while compiling and the answer
+     is what gets laid out. Everything else needs the program to be running. */
   case AST_FUNCTION_CALL: {
     const CallExpression *call = (const CallExpression *)expression->data;
-    return call && call->function_name &&
-           strcmp(call->function_name, "sizeof") == 0;
+    const Symbol *callee;
+    if (!call || !call->function_name) {
+      return 0;
+    }
+    if (strcmp(call->function_name, "sizeof") == 0) {
+      return 1;
+    }
+    callee = (checker && !call->object)
+                 ? symbol_table_lookup(checker->symbol_table,
+                                       call->function_name)
+                 : NULL;
+    return callee && callee->kind == SYMBOL_FUNCTION && !callee->is_extern;
   }
   default:
     return 0;
@@ -1403,19 +1415,60 @@ static int type_checker_declare_comptime_const(
   return 1;
 }
 
+/* A `const string` whose initializer the compile-time evaluator can fold
+ * becomes the literal it folds to, right here. Everything after this point --
+ * layout, lowering, `mettle expand` -- sees one ordinary string literal, which
+ * is the whole trick: a tag built while compiling is a tag written down, and
+ * both ends of a wire format read the same one. */
+static int type_checker_fold_const_string(TypeChecker *checker,
+                                          VarDeclaration *var_decl,
+                                          ASTNode *declaration,
+                                          const Type *var_type) {
+  ComptimeValue folded = comptime_none();
+  ASTNode *replacement;
+  if (!checker || !var_decl || !var_decl->is_const || !var_decl->initializer ||
+      !var_type || var_type->kind != TYPE_STRING ||
+      var_decl->initializer->type == AST_STRING_LITERAL) {
+    return 0;
+  }
+  if (!type_checker_eval_comptime(checker, var_decl->initializer, &folded) ||
+      folded.kind != COMPTIME_STRING || !folded.as.string.value) {
+    return 0;
+  }
+  replacement = ast_create_string_literal(folded.as.string.value,
+                                          strlen(folded.as.string.value),
+                                          var_decl->initializer->location);
+  if (!replacement) {
+    return 0;
+  }
+  for (size_t i = 0; declaration && i < declaration->child_count; i++) {
+    if (declaration->children[i] == var_decl->initializer) {
+      declaration->children[i] = replacement;
+    }
+  }
+  var_decl->initializer = replacement;
+  return 1;
+}
+
 static int type_checker_check_global_initializer(
     TypeChecker *checker, ASTNode *declaration,
     VarDeclaration *var_decl, Type *var_type, Scope *current_scope,
     int *poisoned_io) {
   int poisoned = *poisoned_io;
+  type_checker_fold_const_string(checker, var_decl, declaration, var_type);
   /* A global's storage is laid out in the object file, so its value has to be
    * known at compile time. For an aggregate that means an aggregate literal
    * and nothing else -- a call or any other run-time expression has no image
    * to lay out, and there is no module initializer to run one in. Caught here
    * rather than in codegen so the report carries a source location. */
+  /* A call to a function the program wrote is the other shape a global
+   * aggregate can take: the interpreter runs it while compiling and the answer
+   * becomes the bytes in the object file. Everything else about it is
+   * unchanged, including that a value it cannot compute stops the build. */
   if (!poisoned && var_decl->initializer && !var_decl->is_extern && var_type &&
       (var_type->kind == TYPE_STRUCT || var_type->kind == TYPE_ARRAY) &&
       var_decl->initializer->type != AST_AGGREGATE_LITERAL &&
+      var_decl->initializer->type != AST_FUNCTION_CALL &&
       (!current_scope || current_scope->type == SCOPE_GLOBAL)) {
     type_checker_set_error_at_location(
         checker, var_decl->initializer->location,
@@ -1669,6 +1722,17 @@ static int type_checker_declare_variable(
   if (var_decl->is_const && var_decl->initializer &&
       var_decl->initializer->type == AST_AGGREGATE_LITERAL) {
     var_symbol->constant_initializer = var_decl->initializer;
+  }
+  /* A `const string` carries its text as a compile-time value, so a later
+     constant can be built from it and a directive can read it. */
+  if (var_decl->is_const && var_decl->initializer &&
+      var_decl->initializer->type == AST_STRING_LITERAL &&
+      var_decl->initializer->data) {
+    const StringLiteral *literal =
+        (const StringLiteral *)var_decl->initializer->data;
+    if (literal->value) {
+      var_symbol->comptime_value = comptime_string(string_intern(literal->value));
+    }
   }
   if (has_folded_value) {
     var_symbol->has_constant_value = 1;

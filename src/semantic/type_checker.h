@@ -182,6 +182,12 @@ typedef struct {
   } *loop_trips;
   size_t loop_trip_count;
   size_t loop_trip_capacity;
+  /* How many rounds module-scope expansion took to settle. Each round retires
+     one directive and registers the types it generated. */
+  size_t expansion_rounds;
+  /* Bytes of text the compile-time evaluator built, on the expansion ledger
+     because that is where the budget is. */
+  size_t comptime_text_bytes;
   long long proof_steps;
   size_t proofs_attempted;
   size_t proofs_proven;
@@ -224,6 +230,10 @@ type_checker_create_with_error_reporter(SymbolTable *symbol_table,
                                         ErrorReporter *error_reporter);
 void type_checker_destroy(TypeChecker *checker);
 int type_checker_check_program(TypeChecker *checker, ASTNode *program);
+/* Register the types the expansion has generated so far, so the next directive
+   can reflect on them. Idempotent: a declaration is registered once. */
+int type_checker_register_generated_types(TypeChecker *checker,
+                                          struct ASTNode *program);
 Type *type_checker_infer_type(TypeChecker *checker, ASTNode *expression);
 int type_checker_are_compatible(Type *type1, Type *type2);
 

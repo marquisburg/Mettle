@@ -283,6 +283,59 @@ comptime for op in OPS.rows {
 A row of a struct answers to its own columns, and to `.index`. A row of a plain
 value is that value, so a `const int32[4]` binds an `int32` each time round.
 
+A directive may generate a type, and a later directive may reflect on it.
+Module-scope expansion retires one directive per round and registers the types
+that round generated before the next one resolves its sequence, so a struct
+written by the first directive is a type the second reads the fields of. The
+ledger counts the rounds it took to settle:
+
+```text
+comptime expansion: 2 sites, 11 nodes generated, 2 rounds to settle
+```
+
+A directive that generates a directive that generates a directive settles the
+same way, and a chain that does not settle after 4096 rounds is a build that
+says so.
+
+## Text built while compiling
+
+`textof(x)` is the compile-time spelling of a constant, and `+` joins strings
+the compiler already knows:
+
+```mettle
+const TAG_ID: string = "wire/" + textof(1);
+```
+
+A `const string` whose initializer folds becomes the literal it folds to, so
+everything after that point sees one ordinary string literal, `mettle expand`
+prints it as one, and both ends of a generated wire format read the same tag
+because there is only one. The bytes are on the expansion ledger and under
+`--expansion-budget`, so text built while compiling is a cost with a name.
+
+## Constants computed by a function
+
+A global's initializer may be a call to a function this program defines. The
+compile-time interpreter runs it, and what it returns is what gets laid out in
+the object file:
+
+```mettle
+fn squares() -> int32[8] {
+  var t: int32[8];
+  var i: int64 = 0;
+  while (i < 8) { t[i] = (int32)(i * i); i = i + 1; }
+  return t;
+}
+
+const SQUARES: int32[8] = squares();
+```
+
+There is no second evaluator with a smaller language in it: this is the same
+interpreter that runs `@test`, holds the optimizer to `--verify` and runs the
+rules, so any function it can run can compute a constant. It runs under a fuel
+budget, so a table that does not finish computing is a build that stops rather
+than one that hangs. A call to an `extern` has no body here to run, and is
+refused with a source location as it always was.
+
 A compile-time binding of a type's field cannot become a run-time value.
 Assigning `f` itself to an `int64` is an error, because generated code gets the
 trust hand-written code gets. A table's columns are ordinary constants, so they
