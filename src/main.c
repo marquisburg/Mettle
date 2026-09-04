@@ -37,6 +37,7 @@
 #include "ir/ir_effects.h"
 #include "ir/ir_purity.h"
 #include "ir/ir_twins.h"
+#include "ir/ir_machine.h"
 #include "ir/ir_explain_ledger.h"
 #include "ir/ir_interp.h"
 #include <ctype.h>
@@ -98,6 +99,46 @@ __declspec(dllimport) int __stdcall QueryPerformanceCounter(MettleQpcTicks *coun
 #define PROFILE_PHASE_COUNT METTLE_COMPILER_PHASE_COUNT
 
 static int explain_rule_code(const char *code, const char *path);
+
+/* A rule over the machine survives the first rule phase and every pass after
+   it, because what it reads does not exist until code generation is done. */
+static int main_keep_machine_rule(const IRFunction *rule) {
+  return ir_rule_kind(rule) == IR_RULE_OVER_MACHINE;
+}
+
+/* Asked before lowering, because lowering is where the loop markers the
+   verdict machinery reports on are put in. A rule that reads the machine needs
+   those markers, so the question cannot wait until the IR exists. */
+static int program_declares_machine_rule(const ASTNode *program) {
+  const Program *data;
+  if (!program || program->type != AST_PROGRAM || !program->data) {
+    return 0;
+  }
+  data = (const Program *)program->data;
+  for (size_t i = 0; i < data->declaration_count; i++) {
+    const ASTNode *decl = data->declarations[i];
+    const FunctionDeclaration *fd;
+    const char *type;
+    const char *base;
+    if (!decl || decl->type != AST_FUNCTION_DECLARATION || !decl->data) {
+      continue;
+    }
+    fd = (const FunctionDeclaration *)decl->data;
+    if (!fd->is_rule || fd->parameter_count != 1 || !fd->parameter_types ||
+        !fd->parameter_types[0]) {
+      continue;
+    }
+    type = fd->parameter_types[0];
+    base = strrchr(type, '.');
+    if (base) {
+      type = base + 1;
+    }
+    if (strcmp(type, "Machine") == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
 
 static int compiler_options_use_profile_runtime(const CompilerOptions *options) {
   return options &&
@@ -5627,6 +5668,8 @@ int compile_file(const char *input_filename, const char *output_filename,
   const int arm64_object_output = compile_targets_arm64_object(options);
   IREffectResults *effect_results = NULL;
   IRTwinSnapshots *twin_snapshots = NULL;
+  int machine_rules_pending = 0;
+  int explain_forced_for_rules = 0;
 
   compiler_profile_init(&profile, options && options->profile);
 
@@ -5969,6 +6012,19 @@ int compile_file(const char *input_filename, const char *output_filename,
             "rules run, the checks a declared type deleted, and the beliefs "
             "the build rested on\n");
   }
+  /* A rule over the machine reads what the passes decided, so the collection
+   * has to be armed before any of them run. It reuses the report the optimizer
+   * already writes for --explain, silenced: a rule sees exactly what a reader
+   * would, and there is no second set of call sites to drift from the first. */
+  if (program_declares_machine_rule(program)) {
+    machine_rules_pending = 1;
+    ir_machine_set_collect(1);
+    if (!options->explain) {
+      ir_explain_set_quiet(1);
+      options->explain = 1;
+      explain_forced_for_rules = 1;
+    }
+  }
   ir_lowering_set_explain(options->explain && options->optimize &&
                           !options->emit_ptx && !options->emit_spirv);
   ir_lowering_set_refinement_checks(options->check_proofs || options->test_mode ||
@@ -6131,6 +6187,10 @@ int compile_file(const char *input_filename, const char *output_filename,
     }
   }
 
+  /* A rule over the machine reads what the passes decided, so the collection
+   * has to be armed before they run. It reuses the report the optimizer already
+   * writes for --explain, silenced: a rule sees exactly what a reader would,
+   * and there is no second set of call sites to drift from the first. */
   if (ir_program_has_rules(ir_program) || options->report_rules) {
     IRRuleImage rule_image;
     char *rule_error = NULL;
@@ -6145,13 +6205,17 @@ int compile_file(const char *input_filename, const char *output_filename,
       result = 1;
       goto cleanup;
     }
-    rules_ok = ir_rules_run_checked(
+    rules_ok = ir_rules_run_kind(
         ir_program, &rule_image, error_reporter,
         options->report_rules ? stdout : NULL,
         options->rule_budget_set ? options->rule_budget : 0,
-        options->test_mode, &rule_stats);
+        options->test_mode, IR_RULE_OVER_PROGRAM, &rule_stats);
     ir_rule_image_free(&rule_image);
-    ir_program_drop_rules(ir_program);
+    if (machine_rules_pending) {
+      ir_program_drop_rules_except(ir_program, main_keep_machine_rule);
+    } else {
+      ir_program_drop_rules(ir_program);
+    }
     if (!rules_ok) {
       error_reporter_print_errors(error_reporter);
       result = 1;
@@ -6410,6 +6474,44 @@ int compile_file(const char *input_filename, const char *output_filename,
     ir_explain_backend_flush();
   }
 
+  /* The second rule phase. The program is code by now, so what a rule reads is
+   * what the machine got: a frame size, a spill count, an instruction count,
+   * whether each loop vectorized, whether each call inlined, and the effects
+   * the function holds. A failing verdict stops the build before anything is
+   * written, the same as the first phase. */
+  if (machine_rules_pending) {
+    IRRuleImage machine_image;
+    char *machine_error = NULL;
+    IRRuleStats machine_stats;
+    int machine_ok;
+    if (explain_forced_for_rules) {
+      options->explain = 0;
+    }
+    if (!rule_reflect_build_machine(type_checker, ir_program, input_filename,
+                                    mtlc_target()->triple, effect_results,
+                                    &machine_image, &machine_error)) {
+      fprintf(stderr, "Error: %s\n",
+              machine_error ? machine_error
+                            : "could not reflect the machine");
+      free(machine_error);
+      result = 1;
+      goto cleanup;
+    }
+    machine_ok = ir_rules_run_kind(
+        ir_program, &machine_image, error_reporter,
+        options->report_rules ? stdout : NULL,
+        options->rule_budget_set ? options->rule_budget : 0, 0,
+        IR_RULE_OVER_MACHINE, &machine_stats);
+    ir_rule_image_free(&machine_image);
+    ir_program_drop_rules(ir_program);
+    machine_rules_pending = 0;
+    if (!machine_ok) {
+      error_reporter_print_errors(error_reporter);
+      result = 1;
+      goto cleanup;
+    }
+  }
+
   compiler_set_phase(PROFILE_PHASE_WRITE_OUTPUT);
   phase_start = compiler_profile_begin(&profile);
   if (arm64_object_output) {
@@ -6543,6 +6645,9 @@ int compile_file(const char *input_filename, const char *output_filename,
   }
 
 cleanup:
+  ir_machine_set_collect(0);
+  ir_machine_reset();
+  ir_explain_set_quiet(0);
   if (options && options->explain && !options->optimize) {
     ir_explain_ledger_standalone(input_filename);
   }

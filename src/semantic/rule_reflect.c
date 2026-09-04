@@ -1,4 +1,5 @@
 #include "rule_reflect.h"
+#include "../ir/ir_machine.h"
 #include "import_resolver.h"
 #include "type_checker_internal.h"
 #include <stdint.h>
@@ -38,10 +39,31 @@ typedef struct {
   size_t forbid_count;
   const char **provides;
   size_t provide_count;
+  IRRuleSite *allocations;
+  size_t allocation_count;
+  size_t allocation_capacity;
+  IRRuleSite *frees;
+  size_t free_count;
+  size_t free_capacity;
+  const char **writes_globals;
+  size_t write_count;
+  size_t write_capacity;
+  int returns_pointer;
   int scc_index;
   int scc_lowlink;
   int scc_on_stack;
 } RFunction;
+
+typedef struct {
+  const char *name;
+  const char *module;
+  IRRuleSite site;
+  const char *type_name;
+  const char **written_by;
+  size_t written_count;
+  size_t written_capacity;
+  int address_taken;
+} RGlobal;
 
 typedef struct {
   const char *name;
@@ -87,6 +109,9 @@ typedef struct {
   char **owned;
   size_t owned_count;
   size_t owned_capacity;
+  RGlobal *globals;
+  size_t global_count;
+  size_t global_capacity;
   RFunction *current;
 } Reflect;
 
@@ -227,16 +252,96 @@ static int add_match(Reflect *reflect, RFunction *function, const Type *owner,
                             &function->match_capacity, kept);
 }
 
+/* Where a function allocates, where it frees, and which module-scope bindings
+ * it writes. These are the facts an arena or a region discipline is written
+ * against, and they come from the same walk that already finds the callees, so
+ * a rule sees exactly what the call graph does: a name it can follow, and a
+ * gap where it cannot. */
+static int add_site_fact(IRRuleSite **sites, size_t *count, size_t *capacity,
+                         SourceLocation location) {
+  IRRuleSite site;
+  if (!grow((void **)sites, capacity, *count, sizeof(IRRuleSite))) {
+    return 0;
+  }
+  site.file = location.filename;
+  site.line = location.line;
+  site.column = location.column;
+  (*sites)[(*count)++] = site;
+  return 1;
+}
+
+static RGlobal *find_global(Reflect *reflect, const char *name) {
+  if (!name) {
+    return NULL;
+  }
+  for (size_t i = 0; i < reflect->global_count; i++) {
+    if (strcmp(reflect->globals[i].name, name) == 0) {
+      return &reflect->globals[i];
+    }
+  }
+  return NULL;
+}
+
+static int note_global_write(Reflect *reflect, RFunction *function,
+                             const char *name) {
+  RGlobal *global = find_global(reflect, name);
+  if (!global) {
+    return 1;
+  }
+  if (!add_unique(&function->writes_globals, &function->write_count,
+                  &function->write_capacity, global->name)) {
+    return 0;
+  }
+  return add_unique(&global->written_by, &global->written_count,
+                    &global->written_capacity, function->qualified);
+}
+
+static int allocator_name(const char *name) {
+  static const char *const names[] = {"malloc",  "calloc",  "realloc",
+                                      "strdup",  "new",     NULL};
+  const char *shown = strip_import_prefix(name ? name : "");
+  for (size_t i = 0; names[i]; i++) {
+    if (strcmp(shown, names[i]) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int walk_body(Reflect *reflect, ASTNode *node) {
   if (!node) {
     return 1;
   }
   RFunction *current = reflect->current;
+  if (node->type == AST_NEW_EXPRESSION) {
+    if (!add_site_fact(&current->allocations, &current->allocation_count,
+                       &current->allocation_capacity, node->location)) {
+      return 0;
+    }
+  } else if (node->type == AST_ASSIGNMENT && node->data) {
+    const Assignment *assign = (const Assignment *)node->data;
+    if (assign->variable_name &&
+        !note_global_write(reflect, current, assign->variable_name)) {
+      return 0;
+    }
+  }
   if (node->type == AST_FUNCTION_CALL && node->data) {
     CallExpression *call = (CallExpression *)node->data;
     if (call->is_indirect_call) {
       current->has_indirect_calls = 1;
     } else if (call->function_name) {
+      const char *shown = strip_import_prefix(call->function_name);
+      if (strcmp(shown, "free") == 0) {
+        if (!add_site_fact(&current->frees, &current->free_count,
+                           &current->free_capacity, node->location)) {
+          return 0;
+        }
+      } else if (allocator_name(call->function_name)) {
+        if (!add_site_fact(&current->allocations, &current->allocation_count,
+                           &current->allocation_capacity, node->location)) {
+          return 0;
+        }
+      }
       RFunction *callee = find_function(reflect, call->function_name);
       const char *spelling =
           callee ? callee->qualified : strip_import_prefix(call->function_name);
@@ -289,6 +394,27 @@ static int walk_body(Reflect *reflect, ASTNode *node) {
     }
   }
   return 1;
+}
+
+static int collect_global(Reflect *reflect, ASTNode *decl) {
+  const VarDeclaration *var = (const VarDeclaration *)decl->data;
+  RGlobal *entry;
+  if (!var || !var->name || var->is_const) {
+    return 1;
+  }
+  if (!grow((void **)&reflect->globals, &reflect->global_capacity,
+            reflect->global_count, sizeof(RGlobal))) {
+    return 0;
+  }
+  entry = &reflect->globals[reflect->global_count++];
+  memset(entry, 0, sizeof(*entry));
+  entry->name = var->name;
+  entry->module = module_of(decl->location.filename);
+  entry->site.file = decl->location.filename;
+  entry->site.line = decl->location.line;
+  entry->site.column = decl->location.column;
+  entry->type_name = var->type_name ? var->type_name : "";
+  return note_module(reflect, entry->module);
 }
 
 static int collect_function(Reflect *reflect, ASTNode *decl) {
@@ -653,11 +779,14 @@ static int build_image(Reflect *reflect, const char *root_file,
   const Type *site_type = lookup_qualified(checker, "std/rule.Site");
   const Type *effect_info_type =
       lookup_qualified(checker, "std/rule.EffectInfo");
+  const Type *global_info_type =
+      lookup_qualified(checker, "std/rule.GlobalInfo");
   if (!program_type || !function_type || !type_info_type ||
-      !field_info_type || !site_type || !effect_info_type) {
+      !field_info_type || !site_type || !effect_info_type ||
+      !global_info_type) {
     *error_message = strdup("a @rule needs the Program, Function, TypeInfo, "
-                            "FieldInfo, EffectInfo and Site records from "
-                            "std/rule");
+                            "FieldInfo, EffectInfo, GlobalInfo and Site "
+                            "records from std/rule");
     return 0;
   }
   Image image;
@@ -750,11 +879,96 @@ static int build_image(Reflect *reflect, const char *root_file,
           put_string_array(&image, fn->provides, fn->provide_count);
       put_slice(&image, base + field_offset(function_type, "provides", &image),
                 provides, fn->provide_count);
+      {
+        size_t allocations =
+            fn->allocation_count
+                ? image_reserve(&image, site_type->size * fn->allocation_count,
+                                site_type->alignment)
+                : 0;
+        for (size_t a = 0; a < fn->allocation_count; a++) {
+          put_site(&image, site_type, allocations + a * site_type->size,
+                   &fn->allocations[a]);
+        }
+        put_slice(&image,
+                  base + field_offset(function_type, "allocations", &image),
+                  allocations, fn->allocation_count);
+      }
+      {
+        size_t frees = fn->free_count
+                           ? image_reserve(&image,
+                                           site_type->size * fn->free_count,
+                                           site_type->alignment)
+                           : 0;
+        for (size_t a = 0; a < fn->free_count; a++) {
+          put_site(&image, site_type, frees + a * site_type->size,
+                   &fn->frees[a]);
+        }
+        put_slice(&image, base + field_offset(function_type, "frees", &image),
+                  frees, fn->free_count);
+      }
+      {
+        size_t writes =
+            put_string_array(&image, fn->writes_globals, fn->write_count);
+        put_slice(&image,
+                  base + field_offset(function_type, "writes_globals", &image),
+                  writes, fn->write_count);
+      }
+      image_put_bool(
+          &image, base + field_offset(function_type, "returns_pointer", &image),
+          fn->returns_pointer);
     }
     if (!add_site(out, &site_capacity, fn->site)) {
       image.failed = 1;
     }
+    for (size_t a = 0; a < fn->allocation_count && !image.failed; a++) {
+      if (!add_site(out, &site_capacity, fn->allocations[a])) {
+        image.failed = 1;
+      }
+    }
+    for (size_t a = 0; a < fn->free_count && !image.failed; a++) {
+      if (!add_site(out, &site_capacity, fn->frees[a])) {
+        image.failed = 1;
+      }
+    }
   }
+
+  size_t globals_offset = 0;
+  if (reflect->global_count > 0) {
+    globals_offset =
+        image_reserve(&image, global_info_type->size * reflect->global_count,
+                      global_info_type->alignment);
+    for (size_t i = 0; i < reflect->global_count && !image.failed; i++) {
+      RGlobal *global = &reflect->globals[i];
+      size_t base = globals_offset + i * global_info_type->size;
+      size_t writers =
+          put_string_array(&image, global->written_by, global->written_count);
+      image_put_string(&image,
+                       base + field_offset(global_info_type, "name", &image),
+                       global->name);
+      image_put_string(&image,
+                       base + field_offset(global_info_type, "module", &image),
+                       global->module);
+      put_site(&image, site_type,
+               base + field_offset(global_info_type, "site", &image),
+               &global->site);
+      image_put_string(
+          &image, base + field_offset(global_info_type, "type_name", &image),
+          global->type_name);
+      put_slice(&image,
+                base + field_offset(global_info_type, "written_by", &image),
+                writers, global->written_count);
+      image_put_bool(
+          &image,
+          base + field_offset(global_info_type, "address_taken", &image),
+          global->address_taken);
+      if (!add_site(out, &site_capacity, global->site)) {
+        image.failed = 1;
+      }
+    }
+  }
+  put_slice(&image,
+            program_offset + field_offset(program_type, "globals", &image),
+            globals_offset, reflect->global_count);
 
   size_t effects_offset = 0;
   if (checker->effect_count > 0) {
@@ -918,6 +1132,198 @@ static int build_image(Reflect *reflect, const char *root_file,
   return 1;
 }
 
+/* The machine image: what became of the program once it was code. Everything
+ * in it was recorded by the passes as they decided, and nothing in it is IR or
+ * a pass's internal state -- a frame size, a spill count, an instruction count,
+ * whether a loop vectorized, whether a call was inlined, and the effects the
+ * function was proven to hold. std/rule owns the shape; III.3's line is that a
+ * rule sees a snapshot and never the machinery that produced it. */
+static int machine_name_is_rule(const IRProgram *program, const char *name) {
+  if (!program || !name) {
+    return 0;
+  }
+  for (size_t i = 0; i < program->function_count; i++) {
+    const IRFunction *fn = program->functions[i];
+    if (fn && fn->is_rule && fn->name && strcmp(fn->name, name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int rule_reflect_build_machine(TypeChecker *checker, const IRProgram *program,
+                               const char *root_file, const char *target,
+                               const IREffectResults *effects,
+                               IRRuleImage *out, char **error_message) {
+  const Type *machine_type = lookup_qualified(checker, "std/rule.Machine");
+  const Type *function_type =
+      lookup_qualified(checker, "std/rule.MachineFunction");
+  const Type *loop_type = lookup_qualified(checker, "std/rule.MachineLoop");
+  Image image;
+  size_t machine_offset;
+  size_t functions_offset;
+  size_t count = 0;
+  size_t site_capacity = 0;
+  size_t total = ir_machine_function_count();
+  if (!checker || !out || !error_message) {
+    return 0;
+  }
+  memset(out, 0, sizeof(*out));
+  *error_message = NULL;
+  if (!machine_type || !function_type || !loop_type) {
+    *error_message = strdup("a @rule over the machine needs the Machine, "
+                            "MachineFunction and MachineLoop records from "
+                            "std/rule");
+    return 0;
+  }
+  for (size_t i = 0; i < total; i++) {
+    const IRMachineFunction *fn = ir_machine_function_at(i);
+    if (fn && !machine_name_is_rule(program, fn->name)) {
+      count++;
+    }
+  }
+  memset(&image, 0, sizeof(image));
+  machine_offset = image_reserve(&image, machine_type->size,
+                                 machine_type->alignment);
+  functions_offset =
+      count ? image_reserve(&image, function_type->size * count,
+                            function_type->alignment)
+            : 0;
+  for (size_t i = 0, slot = 0; i < total && !image.failed; i++) {
+    const IRMachineFunction *fn = ir_machine_function_at(i);
+    size_t base;
+    size_t loops_offset = 0;
+    if (!fn || machine_name_is_rule(program, fn->name)) {
+      continue;
+    }
+    base = functions_offset + slot * function_type->size;
+    slot++;
+    image_put_string(&image, base + field_offset(function_type, "name", &image),
+                     fn->name);
+    image_put_string(&image, base + field_offset(function_type, "file", &image),
+                     fn->file ? fn->file : root_file);
+    image_put_u64(&image, base + field_offset(function_type, "line", &image),
+                  (unsigned long long)fn->line);
+    image_put_u64(&image, base + field_offset(function_type, "column", &image),
+                  (unsigned long long)fn->column);
+    image_put_u64(&image,
+                  base + field_offset(function_type, "frame_bytes", &image),
+                  (unsigned long long)fn->frame_bytes);
+    image_put_u64(&image, base + field_offset(function_type, "spills", &image),
+                  (unsigned long long)fn->spills);
+    image_put_u64(&image,
+                  base + field_offset(function_type, "instructions", &image),
+                  (unsigned long long)fn->instructions);
+    image_put_bool(
+        &image, base + field_offset(function_type, "register_allocated",
+                                    &image),
+        fn->register_allocated);
+    image_put_u64(&image,
+                  base + field_offset(function_type, "inlined_calls", &image),
+                  (unsigned long long)fn->inlined_calls);
+    image_put_u64(&image,
+                  base + field_offset(function_type, "calls_left", &image),
+                  (unsigned long long)fn->calls_left);
+    if (fn->loop_count > 0) {
+      loops_offset = image_reserve(&image, loop_type->size * fn->loop_count,
+                                   loop_type->alignment);
+      for (size_t l = 0; l < fn->loop_count; l++) {
+        size_t lb = loops_offset + l * loop_type->size;
+        image_put_u64(&image, lb + field_offset(loop_type, "line", &image),
+                      (unsigned long long)fn->loops[l].line);
+        image_put_u64(&image, lb + field_offset(loop_type, "column", &image),
+                      (unsigned long long)fn->loops[l].column);
+        image_put_bool(&image,
+                       lb + field_offset(loop_type, "vectorized", &image),
+                       fn->loops[l].vectorized);
+        image_put_string(&image, lb + field_offset(loop_type, "kind", &image),
+                         fn->loops[l].kind ? fn->loops[l].kind : "");
+      }
+    }
+    put_slice(&image, base + field_offset(function_type, "loops", &image),
+              loops_offset, fn->loop_count);
+    {
+      const char **performs = NULL;
+      size_t perform_count = 0;
+      const char **needs = NULL;
+      size_t need_count = 0;
+      size_t offsets = 0;
+      if (effects && ir_effect_results_lookup(effects, fn->name, &performs,
+                                              &perform_count, &needs,
+                                              &need_count)) {
+        offsets = put_string_array(&image, performs, perform_count);
+      } else {
+        perform_count = 0;
+      }
+      put_slice(&image, base + field_offset(function_type, "effects", &image),
+                offsets, perform_count);
+    }
+    {
+      IRRuleSite site;
+      site.file = fn->file ? fn->file : root_file;
+      site.line = fn->line;
+      site.column = fn->column;
+      if (!add_site(out, &site_capacity, site)) {
+        image.failed = 1;
+      }
+      for (size_t l = 0; l < fn->loop_count && !image.failed; l++) {
+        site.line = fn->loops[l].line;
+        site.column = fn->loops[l].column;
+        if (!add_site(out, &site_capacity, site)) {
+          image.failed = 1;
+        }
+      }
+    }
+  }
+  put_slice(&image, machine_offset + field_offset(machine_type, "functions",
+                                                  &image),
+            functions_offset, count);
+  image_put_string(&image,
+                   machine_offset + field_offset(machine_type, "target",
+                                                 &image),
+                   target ? target : "");
+  image_put_string(&image,
+                   machine_offset + field_offset(machine_type, "file", &image),
+                   root_file ? root_file : "");
+  {
+    size_t pool_base = image.size;
+    unsigned char *joined = NULL;
+    if (image.pool_size > 0) {
+      size_t total = image.size + image.pool_size;
+      joined = realloc(image.bytes, total ? total : 1);
+      if (!joined) {
+        image.failed = 1;
+      } else {
+        memcpy(joined + image.size, image.pool, image.pool_size);
+        image.bytes = joined;
+        image.size = total;
+      }
+    }
+    for (size_t i = 0; i < image.string_count && !image.failed; i++) {
+      image_put_pointer(&image, image.string_fields[i],
+                        pool_base + image.string_offsets[i]);
+    }
+  }
+  free(image.pool);
+  free(image.string_fields);
+  free(image.string_offsets);
+  if (image.failed) {
+    free(image.bytes);
+    free(image.pointers);
+    free(out->sites);
+    memset(out, 0, sizeof(*out));
+    *error_message = strdup("could not lay out the machine the rules read");
+    return 0;
+  }
+  out->bytes = image.bytes;
+  out->size = image.size;
+  out->pointer_offsets = image.pointers;
+  out->pointer_count = image.pointer_count;
+  out->function_count = count;
+  out->type_count = 0;
+  return 1;
+}
+
 static void dump_program(Reflect *reflect) {
   fprintf(stderr, "rule program: %zu functions, %zu types, %zu modules\n",
           reflect->function_count, reflect->type_count,
@@ -951,7 +1357,14 @@ static void reflect_free(Reflect *reflect) {
     free(reflect->functions[i].qualified);
     free(reflect->functions[i].callees);
     free(reflect->functions[i].matches);
+    free(reflect->functions[i].allocations);
+    free(reflect->functions[i].frees);
+    free(reflect->functions[i].writes_globals);
   }
+  for (size_t i = 0; i < reflect->global_count; i++) {
+    free(reflect->globals[i].written_by);
+  }
+  free(reflect->globals);
   for (size_t i = 0; i < reflect->owned_count; i++) {
     free(reflect->owned[i]);
   }
@@ -1009,6 +1422,8 @@ int rule_reflect_build(TypeChecker *checker, ASTNode *program,
     }
     if (decl->type == AST_FUNCTION_DECLARATION) {
       ok = collect_function(&reflect, decl);
+    } else if (decl->type == AST_VAR_DECLARATION) {
+      ok = collect_global(&reflect, decl);
     } else if (decl->type == AST_STRUCT_DECLARATION ||
                decl->type == AST_ENUM_DECLARATION ||
                decl->type == AST_TYPE_DECLARATION) {

@@ -10,4 +10,11 @@ int rule_reflect_build(TypeChecker *checker, ASTNode *program,
                        const IREffectResults *effects, IRRuleImage *out,
                        char **error_message);
 
+/* The snapshot a `@rule fn (m: Machine)` reads, built after code generation
+   from what the passes recorded as they decided. */
+int rule_reflect_build_machine(TypeChecker *checker, const IRProgram *program,
+                               const char *root_file, const char *target,
+                               const IREffectResults *effects,
+                               IRRuleImage *out, char **error_message);
+
 #endif

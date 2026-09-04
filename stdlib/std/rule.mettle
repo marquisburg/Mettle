@@ -27,6 +27,15 @@ export struct TypeInfo {
   variants: string[];
 }
 
+export struct GlobalInfo {
+  name: string;
+  module: string;
+  site: Site;
+  type_name: string;
+  written_by: string[];
+  address_taken: bool;
+}
+
 export struct Function {
   name: string;
   qualified: string;
@@ -50,6 +59,10 @@ export struct Function {
   requires: string[];
   forbids: string[];
   provides: string[];
+  allocations: Site[];
+  frees: Site[];
+  writes_globals: string[];
+  returns_pointer: bool;
 }
 
 export struct EffectInfo {
@@ -64,6 +77,35 @@ export struct Program {
   types: TypeInfo[];
   modules: string[];
   effects: EffectInfo[];
+  globals: GlobalInfo[];
+  target: string;
+  file: string;
+}
+
+export struct MachineLoop {
+  line: int64;
+  column: int64;
+  vectorized: bool;
+  kind: string;
+}
+
+export struct MachineFunction {
+  name: string;
+  file: string;
+  line: int64;
+  column: int64;
+  frame_bytes: int64;
+  spills: int64;
+  instructions: int64;
+  register_allocated: bool;
+  inlined_calls: int64;
+  calls_left: int64;
+  loops: MachineLoop[];
+  effects: string[];
+}
+
+export struct Machine {
+  functions: MachineFunction[];
   target: string;
   file: string;
 }
@@ -204,6 +246,67 @@ export fn function_matches(f: Function, owner: string, variant: string) -> bool 
       if (m[owner.length + 1 + i] != variant[i]) { same = false; }
     }
     if (same) { return true; }
+  }
+  return false;
+}
+
+
+export fn function_allocates(f: Function) -> bool {
+  return f.allocations.length > 0;
+}
+
+export fn function_frees(f: Function) -> bool {
+  return f.frees.length > 0;
+}
+
+export fn function_writes_global(f: Function, name: string) -> bool {
+  for g in f.writes_globals {
+    if (g == name) { return true; }
+  }
+  return false;
+}
+
+export fn global_written_by(g: GlobalInfo, function_name: string) -> bool {
+  for w in g.written_by {
+    if (w == function_name) { return true; }
+  }
+  return false;
+}
+
+export fn program_global_index(p: Program, name: string) -> int64 {
+  for i in 0..p.globals.length {
+    if (p.globals[i].name == name) { return i; }
+  }
+  return -1;
+}
+
+export fn machine_function_index(m: Machine, name: string) -> int64 {
+  for i in 0..m.functions.length {
+    if (m.functions[i].name == name) { return i; }
+  }
+  return -1;
+}
+
+export fn machine_site(f: MachineFunction) -> Site {
+  var s: Site = { file: f.file, line: f.line, column: f.column };
+  return s;
+}
+
+export fn machine_loop_site(f: MachineFunction, l: MachineLoop) -> Site {
+  var s: Site = { file: f.file, line: l.line, column: l.column };
+  return s;
+}
+
+export fn machine_all_loops_vectorized(f: MachineFunction) -> bool {
+  for l in f.loops {
+    if (!l.vectorized) { return false; }
+  }
+  return true;
+}
+
+export fn machine_performs(f: MachineFunction, effect: string) -> bool {
+  for e in f.effects {
+    if (e == effect) { return true; }
   }
   return false;
 }

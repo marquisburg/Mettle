@@ -34,7 +34,15 @@ typedef struct {
   long long steps;
 } IRRuleStats;
 
+typedef enum {
+  IR_RULE_OVER_PROGRAM,
+  IR_RULE_OVER_MACHINE,
+  IR_RULE_OVER_TRACE
+} IRRuleKind;
+
+IRRuleKind ir_rule_kind(const IRFunction *rule);
 int ir_program_has_rules(const IRProgram *program);
+int ir_program_has_rules_of(const IRProgram *program, IRRuleKind kind);
 
 int ir_rules_run(IRProgram *program, const IRRuleImage *image,
                  ErrorReporter *reporter, FILE *report, long long budget,
@@ -46,6 +54,12 @@ int ir_rules_run_checked(IRProgram *program, const IRRuleImage *image,
                          ErrorReporter *reporter, FILE *report,
                          long long budget, int cross_check,
                          IRRuleStats *stats);
+
+/* Run only the rules that ask for `kind`. The image has to be the one that
+   kind names; nothing here checks that, because the caller built both. */
+int ir_rules_run_kind(IRProgram *program, const IRRuleImage *image,
+                      ErrorReporter *reporter, FILE *report, long long budget,
+                      int cross_check, IRRuleKind kind, IRRuleStats *stats);
 
 
 #endif

@@ -55,7 +55,8 @@ frontend can drive instead. The documentation is organized the same way.
   catches the optimizer's own bugs, and `reference` twins, which point the same
   differential at two functions the program says agree.
 - [Rewrite rules](rewrite-rules.md): `rewrite`, identities from your own code
-- [Rules](rules.md): `@rule`, a property the program requires of itself, checked on every build
+- [Rules](rules.md): `@rule` over the checked program or over the machine it
+  became, a property the program requires of itself, checked on every build
   that the compiler proves, applies, and checks. `--report-rules` and
   `--rule-budget=N` keep the cost on a ledger, as `--report-proofs` /
   `--proof-budget=N` and `--report-effects` / `--effect-budget=N` do for the

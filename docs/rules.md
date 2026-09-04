@@ -129,6 +129,78 @@ rules: 2 run, 2 passed, 0 failed, 0 gaps, 2485 steps
 `N` gives no verdict. A program with no rules pays nothing: no reflection is
 built and no interpreter runs.
 
+## Three things a rule can read
+
+A rule takes exactly one argument, and its type is the question:
+
+| Parameter | What it holds | When it runs |
+|-----------|---------------|--------------|
+| `Program` | The checked program: every function with its callees, effects, allocations and frees; every declared type with its size, alignment and layout; the modules; the globals with what writes each; the target. | After type checking, before any code is generated. |
+| `Machine` | What the program became: per function, its frame size, spill count, instruction count, whether the register-allocating backend took it, how many calls were inlined, and whether each loop vectorized, beside the effects it holds. | After code generation, before anything is written. |
+
+There is no second keyword and no decorator to write. The parameter type is
+the whole dispatch, and a signature that is neither is refused with the three
+it could have been.
+
+```mettle
+@rule fn hot_loops_vectorize(m: Machine) -> Verdict {
+  for f in m.functions {
+    if (f.name == "total") {
+      for l in f.loops {
+        if (!l.vectorized) {
+          return verdict_fail(machine_loop_site(f, l), "this loop has to vectorize");
+        }
+      }
+    }
+  }
+  return verdict_pass();
+}
+```
+
+That is `@simd!` written by the program instead of by the compiler, and the
+same shape says a frame stays under a size, a function keeps its call, or a
+hot path reaches codegen with the register allocator. The optimization
+contracts the compiler ships are the built-in special case of this.
+
+The image is a snapshot, and it is the whole of what crosses the line. There is
+no IR in it, no pass state, no allocator, no scheduler. III.3 is why: a rule
+sees what a programmer at that point in the pipeline would see, and libmtlc
+stays free to change how it got there. Reading the snapshot costs the program
+nothing at run time, because a rule never links.
+
+## Rules over what the program does with memory
+
+The `Program` image carries the facts an arena or a region discipline is
+written against: where each function allocates, where it frees, which globals
+it writes, and for each global, every function that writes it.
+
+```mettle
+@rule fn only_the_arena_allocates(p: Program) -> Verdict {
+  for f in p.functions {
+    if (f.module != "") { continue; }
+    if (function_allocates(f) && f.name != "arena_take") {
+      return verdict_fail(f.allocations[0], "only arena_take may allocate");
+    }
+  }
+  return verdict_pass();
+}
+
+@rule fn one_writer_per_global(p: Program) -> Verdict {
+  for g in p.globals {
+    if (g.written_by.length > 1) {
+      return verdict_fail(g.site, "this global is written by more than one function");
+    }
+  }
+  return verdict_pass();
+}
+```
+
+These come from the same walk that finds the callees, so they see what the call
+graph sees: a name the compiler can follow, and nothing behind a function
+pointer. A rule that cares about what it cannot see reads `has_indirect_calls`
+and answers `verdict_gap`, which is the standard the borrow analyser is held to
+and the standard a rule is held to.
+
 ## A rule that explains itself
 
 A rule knows why it exists and the compiler does not. It can say so, and claim

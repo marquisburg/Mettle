@@ -248,9 +248,16 @@ int type_checker_validate_rule_signature(TypeChecker *checker,
                                                 FunctionDeclaration *func_decl,
                                                 Type **param_types,
                                                 Type *return_type) {
-  int shape_ok = func_decl->parameter_count == 1 && param_types &&
-                 type_checker_type_is_named(param_types[0],
-                                            "std/rule.Program") &&
+  /* Three images, one shape. Which one a rule asks for is its parameter type:
+     the checked program, the machine it became, or the trace it produced. */
+  int subject_ok = func_decl->parameter_count == 1 && param_types &&
+                   (type_checker_type_is_named(param_types[0],
+                                               "std/rule.Program") ||
+                    type_checker_type_is_named(param_types[0],
+                                               "std/rule.Machine") ||
+                    type_checker_type_is_named(param_types[0],
+                                               "std/rule.Trace"));
+  int shape_ok = subject_ok &&
                  type_checker_type_is_named(return_type, "std/rule.Verdict");
   if (shape_ok && !func_decl->is_extern && func_decl->body) {
     return 1;
@@ -258,11 +265,13 @@ int type_checker_validate_rule_signature(TypeChecker *checker,
   type_checker_set_error_at_location(
       checker, declaration->location,
       "a @rule is declared `@rule fn %s(p: Program) -> Verdict` with a body, "
-      "taking the Program and returning the Verdict from std/rule",
+      "taking one of Program, Machine or Trace and returning the Verdict "
+      "from std/rule",
       func_decl->name ? func_decl->name : "name");
   if (checker->error_reporter) {
     error_reporter_set_last_label(checker->error_reporter,
-                                  "signature is not (Program) -> Verdict");
+                                  "signature is not (Program|Machine|Trace) "
+                                  "-> Verdict");
   }
   return 0;
 }

@@ -16,6 +16,46 @@ void ir_rule_image_free(IRRuleImage *image) {
   memset(image, 0, sizeof(*image));
 }
 
+/* Which image a rule asks for. A rule takes exactly one argument and its type
+ * is the question: `Program` is the checked program, `Machine` is what became
+ * of it once it was code, `Trace` is what happened when it ran. The parameter
+ * type is the whole dispatch; there is no second keyword and no decorator to
+ * write. */
+IRRuleKind ir_rule_kind(const IRFunction *rule) {
+  const char *type;
+  if (!rule || !rule->is_rule || rule->parameter_count != 1 ||
+      !rule->parameter_types || !rule->parameter_types[0]) {
+    return IR_RULE_OVER_PROGRAM;
+  }
+  type = rule->parameter_types[0];
+  {
+    const char *base = strrchr(type, '.');
+    if (base) {
+      type = base + 1;
+    }
+  }
+  if (strcmp(type, "Machine") == 0) {
+    return IR_RULE_OVER_MACHINE;
+  }
+  if (strcmp(type, "Trace") == 0) {
+    return IR_RULE_OVER_TRACE;
+  }
+  return IR_RULE_OVER_PROGRAM;
+}
+
+int ir_program_has_rules_of(const IRProgram *program, IRRuleKind kind) {
+  if (!program) {
+    return 0;
+  }
+  for (size_t i = 0; i < program->function_count; i++) {
+    const IRFunction *fn = program->functions[i];
+    if (fn && fn->is_rule && ir_rule_kind(fn) == kind) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 int ir_program_has_rules(const IRProgram *program) {
   if (!program) {
     return 0;
@@ -539,6 +579,13 @@ int ir_rules_run_checked(IRProgram *program, const IRRuleImage *image,
                          ErrorReporter *reporter, FILE *report,
                          long long budget, int cross_check,
                          IRRuleStats *stats) {
+  return ir_rules_run_kind(program, image, reporter, report, budget,
+                           cross_check, IR_RULE_OVER_PROGRAM, stats);
+}
+
+int ir_rules_run_kind(IRProgram *program, const IRRuleImage *image,
+                      ErrorReporter *reporter, FILE *report, long long budget,
+                      int cross_check, IRRuleKind kind, IRRuleStats *stats) {
   IRRuleStats local;
   int failed_build = 0;
   if (!stats) {
@@ -551,7 +598,7 @@ int ir_rules_run_checked(IRProgram *program, const IRRuleImage *image,
   long long fuel = budget > 0 ? budget : IR_RULE_DEFAULT_FUEL;
   for (size_t i = 0; i < program->function_count; i++) {
     IRFunction *rule = program->functions[i];
-    if (!rule || !rule->is_rule) {
+    if (!rule || !rule->is_rule || ir_rule_kind(rule) != kind) {
       continue;
     }
     if (!run_one_rule(program, rule, image, reporter, report, fuel, stats,

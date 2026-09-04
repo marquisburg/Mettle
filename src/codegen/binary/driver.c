@@ -786,7 +786,7 @@ int code_generator_generate_program_binary_object(CodeGenerator *generator) {
   for (size_t i = 0; i < function_count; i++) {
     IRFunction *ir_function =
         generator->ir_program->functions[emit_order ? emit_order[i] : i];
-    if (!ir_function) {
+    if (!ir_function || ir_function->is_rule) {
       continue;
     }
     if (!code_generator_emit_binary_function(generator, ir_function)) {

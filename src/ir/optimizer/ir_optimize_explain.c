@@ -1,5 +1,6 @@
 #include "ir_optimize_internal.h"
 #include "common.h"
+#include "../ir_machine.h"
 #include "../ir_explain_memory.h"
 #include "../ir_explain_safety.h"
 #include "../ir_explain_ledger.h"
@@ -294,6 +295,13 @@ static MTLC_THREAD_LOCAL size_t g_safety_spanned = 0;
 static MTLC_THREAD_LOCAL size_t g_safety_exempt = 0;
 static MTLC_THREAD_LOCAL size_t g_safety_extent_tests = 0;
 static MTLC_THREAD_LOCAL size_t g_safety_region_calls = 0;
+
+/* A `@rule fn (m: Machine)` needs what the optimizer decided and nothing
+ * printed. The collection is the same collection; only the report is silenced,
+ * so a rule reads exactly what a reader would have. */
+static MTLC_THREAD_LOCAL int g_explain_quiet = 0;
+
+void ir_explain_set_quiet(int quiet) { g_explain_quiet = quiet; }
 
 void ir_optimize_set_explain(int enabled, const char *focus_file) {
   g_explain = enabled;
@@ -1197,11 +1205,48 @@ void ir_explain_function_after(const IRFunction *function) {
   }
 }
 
+/* The machine snapshot a `@rule fn (m: Machine)` reads. A remark already says
+ * which function, which loop or call, and what became of it, so this is where
+ * the snapshot is filled: one source for what the optimizer decided, and no
+ * second set of call sites to drift from it. */
+static void ir_machine_from_remark(const char *function_name,
+                                   const char *entity, size_t line,
+                                   size_t column, int positive,
+                                   const char *headline, const char *file) {
+  if (!ir_machine_collecting() || !function_name || !entity) {
+    return;
+  }
+  if (strcmp(entity, "loop") == 0) {
+    /* Only a vectorization verdict counts. A loop collects several remarks --
+     * a prefetch, an unroll, an alignment -- and none of them says whether it
+     * vectorized, so reading "something good happened here" as "it vectorized"
+     * would be the compiler telling a rule what the rule wanted to hear. */
+    if (headline && strncmp(headline, "NOT vectorized", 14) == 0) {
+      ir_machine_note_loop(function_name, file, line, column, 0, NULL);
+    } else if (headline && strncmp(headline, "vectorized", 10) == 0) {
+      ir_machine_note_loop(function_name, file, line, column, 1, headline);
+    }
+    return;
+  }
+  if (strncmp(entity, "call to ", 8) == 0) {
+    if (headline && strncmp(headline, "inlined", 7) == 0) {
+      ir_machine_note_call(function_name, file, 1);
+    } else if (headline && strncmp(headline, "not inlined", 11) == 0) {
+      ir_machine_note_call(function_name, file, 0);
+    }
+  }
+}
+
 void ir_explain_remark(const char *function_name, const char *entity,
                        SourceLocation location, int positive,
                        const char *headline, const char *reason,
                        const char *fix, const char *verified) {
   g_last_remark_recorded = 0;
+  if (!g_explain_hypothesis && headline) {
+    ir_machine_from_remark(function_name, entity, location.line,
+                           location.column, positive, headline,
+                           location.filename);
+  }
   if (!g_explain || g_explain_hypothesis || !headline ||
       !ir_explain_location_enabled(&location)) {
     return;
@@ -3534,6 +3579,10 @@ static void ir_explain_splice_plan(void) {
 }
 
 void ir_explain_finalize(int force_stderr) {
+  if (g_explain_quiet) {
+    g_report_len = 0;
+    return;
+  }
   if (!g_explain || !g_report_buf || g_report_len == 0) {
     return;
   }

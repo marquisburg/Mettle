@@ -946,6 +946,8 @@ int ir_program_register_type(IRProgram *program, const char *name,
                              MtlcType *type);
 MtlcType *ir_program_lookup_type(const IRProgram *program, const char *name);
 int ir_program_drop_rules(IRProgram *program);
+int ir_program_drop_rules_except(IRProgram *program,
+                                 int (*keep)(const IRFunction *));
 
 /* Module symbol table. add copies the proto (deep-copying owned strings and the
  * param_types array; MtlcType* stay borrowed) and returns the stored entry, or

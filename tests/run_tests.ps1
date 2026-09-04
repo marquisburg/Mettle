@@ -4260,6 +4260,61 @@ catch {
   Write-CaseResult -Name "declared_types_refine_structs" -Passed $false -Reason $_.Exception.Message
 }
 
+# A rule may read the machine the program became. Enforce: a rule over frame
+# sizes and vectorized loops passes where it should, a rule that demands a loop
+# vectorize fails at that loop when it did not, and the rule bodies stay out of
+# the binary.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "rule_machine.exe"
+  $out = & $CompilerPath --build --release "tests/test_rule_machine.mettle" -o $exe --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the machine rules failed the build: $out" }
+  if ($out -notmatch "rule frames_stay_small: pass, \d+ steps") { throw "no ledger line for the frame rule: $out" }
+  if ($out -notmatch "rule hot_loops_vectorize: pass, \d+ steps") { throw "no ledger line for the loop rule: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "t 128") { throw "the program did not run: $run" }
+  if (Test-FileContainsText -Path $exe -Text "frames_stay_small") { throw "a machine rule reached the binary" }
+  $bad = Join-Path $tmpDir "rule_machine_fail.exe"
+  $out = & $CompilerPath --build --release "tests/test_rule_machine_fail.mettle" -o $bad 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a machine rule that should fail did not" }
+  if ($out -notmatch "error\[R0002\]: rule 'every_loop_vectorizes' failed") { throw "the failure does not name the rule: $out" }
+  if ($out -notmatch "MACHINE_RULE_MARKER_XYZ") { throw "the failure does not carry the rule's message: $out" }
+  if ($out -notmatch "test_rule_machine_fail\.mettle:7:3") { throw "the failure does not point at the loop: $out" }
+  Write-CaseResult -Name "rules_read_the_machine" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rules_read_the_machine" -Passed $false -Reason $_.Exception.Message
+}
+
+# A rule may read where the program allocates, where it frees, and which
+# function writes each global, so an arena discipline is a house rule. Enforce:
+# the disciplined program builds, and the one that allocates outside the arena
+# or writes a global from two places stops the build at the site.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "rule_borrow.exe"
+  $out = & $CompilerPath --build "tests/test_rule_borrow.mettle" -o $exe --report-rules 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the borrow rules failed a disciplined program: $out" }
+  if ($out -notmatch "rule only_the_arena_allocates: pass") { throw "no ledger line for the allocation rule: $out" }
+  if ($out -notmatch "rule one_writer_per_global: pass") { throw "no ledger line for the global rule: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "w 8") { throw "the program did not run: $run" }
+  $bad = Join-Path $tmpDir "rule_borrow_fail.exe"
+  $out = & $CompilerPath --build "tests/test_rule_borrow_fail.mettle" -o $bad 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "an undisciplined program built" }
+  if ($out -notmatch "rule 'only_the_arena_allocates' failed") { throw "the allocation rule did not fail: $out" }
+  if ($out -notmatch "test_rule_borrow_fail\.mettle:14:26") { throw "the failure does not point at the allocation: $out" }
+  if ($out -notmatch "rule 'one_writer_per_global' failed") { throw "the global rule did not fail: $out" }
+  Write-CaseResult -Name "rules_read_borrow_facts" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "rules_read_borrow_facts" -Passed $false -Reason $_.Exception.Message
+}
+
 # A @rule is a property the program requires of itself. Enforce: there is an
 # input on which the build actually fails, and the failure names the site the
 # rule pointed at and the rule that pointed there.

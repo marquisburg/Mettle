@@ -1,0 +1,38 @@
+import "std/io";
+import "std/rule";
+import "std/mem";
+
+var arena_top: int64 = 0;
+
+fn arena_take(n: int64) -> int64 {
+  arena_top = arena_top + n;
+  return arena_top;
+}
+
+fn worker(n: int64) -> int64 {
+  return arena_take(n);
+}
+
+@rule fn only_the_arena_allocates(p: Program) -> Verdict {
+  for f in p.functions {
+    if (f.module != "") { continue; }
+    if (function_allocates(f) && f.name != "arena_take") {
+      return verdict_fail(f.allocations[0], "only arena_take may allocate");
+    }
+  }
+  return verdict_pass();
+}
+
+@rule fn one_writer_per_global(p: Program) -> Verdict {
+  for g in p.globals {
+    if (g.written_by.length > 1) {
+      return verdict_fail(g.site, "this global is written by more than one function");
+    }
+  }
+  return verdict_pass();
+}
+
+fn main() -> int32 {
+  print("w {worker(8)}");
+  return 0;
+}

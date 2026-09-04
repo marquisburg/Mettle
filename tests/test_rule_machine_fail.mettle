@@ -1,0 +1,30 @@
+import "std/io";
+import "std/rule";
+
+fn scatter(a: int32*, idx: int32*, n: int64) -> int64 {
+  var s: int64 = 0;
+  var i: int64 = 0;
+  while (i < n) {
+    s = s + (int64)a[(int64)idx[i]];
+    i = i + 1;
+  }
+  return s;
+}
+
+@rule fn every_loop_vectorizes(m: Machine) -> Verdict {
+  for f in m.functions {
+    for l in f.loops {
+      if (!l.vectorized) {
+        return verdict_fail(machine_loop_site(f, l), "MACHINE_RULE_MARKER_XYZ this loop has to vectorize");
+      }
+    }
+  }
+  return verdict_pass();
+}
+
+fn main() -> int32 {
+  var buf: int32[8];
+  var idx: int32[8];
+  print("t {scatter(&buf[0], &idx[0], 8)}");
+  return 0;
+}

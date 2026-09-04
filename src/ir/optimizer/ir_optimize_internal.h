@@ -781,6 +781,7 @@ void ir_optimize_set_simd_report(int enabled);
  * report. `focus_file` (NULL = no filter) limits remarks to that file so
  * imported modules don't flood the report. */
 void ir_optimize_set_explain(int enabled, const char *focus_file);
+void ir_explain_set_quiet(int quiet);
 int ir_explain_enabled(void);
 int ir_explain_location_enabled(const SourceLocation *location);
 int ir_explain_file_enabled(const char *filename);

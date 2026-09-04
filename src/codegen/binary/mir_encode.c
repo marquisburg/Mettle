@@ -1,4 +1,9 @@
 #include "codegen/binary/mir.h"
+#include "ir/ir_machine.h"
+
+/* What the last encoded function spilled, read by the caller that knows the
+   function's name. Set only while a machine rule is collecting. */
+long long mir_encode_last_spills = 0;
 #include "codegen/binary/mir_annotate.h"
 #include "codegen/binary/simd_internal.h"
 #include "codegen/code_generator_internal.h"
@@ -1865,6 +1870,15 @@ static int mir_layout_frame(MirFunction *fn) {
     return enc_err(fn, "stack frame too large");
   }
   ctx->raw_frame_size = raw;
+  if (ir_machine_collecting()) {
+    long long spilled = 0;
+    for (size_t v = 0; v < fn->vreg_count; v++) {
+      if (fn->vregs[v].spill_offset != 0) {
+        spilled++;
+      }
+    }
+    mir_encode_last_spills = spilled;
+  }
   return 1;
 }
 

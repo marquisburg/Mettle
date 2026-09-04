@@ -1921,13 +1921,20 @@ void ir_program_destroy(IRProgram *program) {
 }
 
 int ir_program_drop_rules(IRProgram *program) {
+  return ir_program_drop_rules_except(program, NULL);
+}
+
+/* Drop the rule bodies, except the ones `keep` answers for. A rule over the
+   machine outlives the first phase because the machine does not exist yet. */
+int ir_program_drop_rules_except(IRProgram *program,
+                                 int (*keep)(const IRFunction *)) {
   size_t kept = 0;
   if (!program) {
     return 0;
   }
   for (size_t i = 0; i < program->function_count; i++) {
     IRFunction *function = program->functions[i];
-    if (!function || !function->is_rule) {
+    if (!function || !function->is_rule || (keep && keep(function))) {
       program->functions[kept++] = function;
       continue;
     }
@@ -6154,6 +6161,7 @@ int ir_program_eliminate_dead_functions(IRProgram *program, int keep_exports) {
         found_main = 1;
       } else if (program->functions[i]->is_kernel ||
                  program->functions[i]->rewrite_role ||
+                 program->functions[i]->is_rule ||
                  (keep_exports && program->functions[i]->is_exported)) {
         /* A GPU entry point is launched by the driver against the emitted
          * module, so no instruction in this program has to name it. `export fn`

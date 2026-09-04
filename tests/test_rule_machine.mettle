@@ -1,0 +1,42 @@
+import "std/io";
+import "std/rule";
+
+fn total(a: int32*, n: int64) -> int64 {
+  var s: int64 = 0;
+  var i: int64 = 0;
+  while (i < n) {
+    s = s + (int64)a[i];
+    i = i + 1;
+  }
+  return s;
+}
+
+@rule fn frames_stay_small(m: Machine) -> Verdict {
+  for f in m.functions {
+    if (f.frame_bytes > 4096) {
+      return verdict_fail(machine_site(f), "this function's frame is over 4096 bytes");
+    }
+  }
+  return verdict_pass();
+}
+
+@rule fn hot_loops_vectorize(m: Machine) -> Verdict {
+  for f in m.functions {
+    if (f.name == "total") {
+      for l in f.loops {
+        if (!l.vectorized) {
+          return verdict_fail(machine_loop_site(f, l), "this loop has to vectorize");
+        }
+      }
+    }
+  }
+  return verdict_pass();
+}
+
+fn main() -> int32 {
+  var buf: int32[64];
+  var i: int64 = 0;
+  while (i < 64) { buf[i] = 2; i = i + 1; }
+  print("t {total(&buf[0], 64)}");
+  return 0;
+}

@@ -1,4 +1,7 @@
 #include "codegen/binary/mir.h"
+#include "ir/ir_machine.h"
+
+extern long long mir_encode_last_spills;
 #include "codegen/binary/strength_rules.h"
 
 #include "codegen/binary/mir_annotate.h"
@@ -62,6 +65,10 @@ static int mir_trace_bail(const IRFunction *fn, const char *reason) {
   if (ir_explain_enabled() && fn && fn->name) {
     ir_explain_backend_function(fn->name, mir_function_filename(fn), 0, reason,
                                 g_mir_gate_fn_size);
+    if (ir_machine_collecting()) {
+      ir_machine_note_backend(fn->name, mir_function_filename(fn),
+                              (long long)g_mir_gate_fn_size, 0);
+    }
   }
   return 0;
 }
@@ -2643,6 +2650,11 @@ int mir_function_is_eligible(CodeGenerator *generator,
     ir_explain_backend_function(ir_function->name,
                                 mir_function_filename(ir_function), 1, NULL,
                                 g_mir_gate_fn_size);
+  }
+  if (ir_machine_collecting() && ir_function->name) {
+    ir_machine_note_backend(ir_function->name,
+                            mir_function_filename(ir_function),
+                            (long long)g_mir_gate_fn_size, 1);
   }
   return 1;
 }
@@ -10581,6 +10593,11 @@ int code_generator_binary_emit_function_via_mir(
   }
   mir_annotate_end_function();
 
+  if (ir_machine_collecting() && ir_function->name) {
+    ir_machine_note_frame(ir_function->name,
+                          (long long)context->frame_size,
+                          mir_encode_last_spills);
+  }
   free(dirty_masks);
   free(wb.names);
   free(wb.all);
