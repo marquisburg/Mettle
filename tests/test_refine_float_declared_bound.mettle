@@ -1,0 +1,28 @@
+// The same accumulator over a length nobody wrote down as a literal. `n` is a
+// `Count`, and a `Count` is at most 64, so the loop runs at most 64 times and
+// the accumulator carries a bound that follows from it. The bound came out of
+// a type the compiler proved, not out of anything the program asserted.
+import "std/io";
+
+type Unit = float64 where value >= 0.0 && value <= 1.0;
+type Total = float64 where value >= 0.0 && value <= 70.0;
+type Count = int64 where value >= 0 && value <= 64;
+
+fn bounded(a: Unit*, n: Count) -> float64 {
+  var s: Total = (Total)0.0;
+  var i: int64 = 0;
+  while (i < n) {
+    s = s + a[i];
+    i = i + 1;
+  }
+  return (float64)s;
+}
+
+fn main() -> int32 {
+  var buf: Unit[64];
+  var i: int64 = 0;
+  while (i < 64) { buf[i] = (Unit)0.5; i = i + 1; }
+  var len: Count = (Count)40;
+  print("b {bounded(&buf[0], len)}");
+  return 0;
+}

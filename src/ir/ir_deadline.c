@@ -347,6 +347,42 @@ static int iv_entry(const IRFunction *fn, const IRBasicBlock *blocks,
   return seen;
 }
 
+/* The constant a symbol holds where the loop starts. A limit written as a
+ * literal is the easy case; a limit held in a binding the program set once
+ * before the loop and never touches inside it is the same fact spelled
+ * differently, and refusing that one would make a deadline something only
+ * loops with a magic number in them could carry. */
+static int symbol_constant_before(const IRFunction *fn,
+                                  const IRBasicBlock *blocks, size_t count,
+                                  const char *member, size_t header,
+                                  const char *name, long long *out) {
+  size_t limit = blocks[header].first_instruction;
+  int seen = 0;
+  for (size_t b = 0; b < count; b++) {
+    if (!member[b]) {
+      continue;
+    }
+    for (size_t i = 0; i < blocks[b].instruction_count; i++) {
+      if (operand_is(&blocks[b].instructions[i].dest, name)) {
+        return 0;
+      }
+    }
+  }
+  for (size_t i = 0; i < limit && i < fn->instruction_count; i++) {
+    const IRInstruction *insn = &fn->instructions[i];
+    if (!operand_is(&insn->dest, name)) {
+      continue;
+    }
+    if (insn->op == IR_OP_ASSIGN && insn->lhs.kind == IR_OPERAND_INT) {
+      *out = insn->lhs.int_value;
+      seen = 1;
+      continue;
+    }
+    seen = 0;
+  }
+  return seen;
+}
+
 static long long loop_trip_count(const IRFunction *fn,
                                  const IRBasicBlock *blocks, size_t count,
                                  const char *member, size_t header) {
@@ -370,12 +406,17 @@ static long long loop_trip_count(const IRFunction *fn,
   if (!test || test->op != IR_OP_BINARY || !test->text || test->is_float) {
     return DEADLINE_UNBOUNDED;
   }
-  if (test->lhs.kind != IR_OPERAND_SYMBOL || !test->lhs.name ||
-      test->rhs.kind != IR_OPERAND_INT) {
+  if (test->lhs.kind != IR_OPERAND_SYMBOL || !test->lhs.name) {
+    return DEADLINE_UNBOUNDED;
+  }
+  if (test->rhs.kind == IR_OPERAND_INT) {
+    limit = test->rhs.int_value;
+  } else if (test->rhs.kind != IR_OPERAND_SYMBOL || !test->rhs.name ||
+             !symbol_constant_before(fn, blocks, count, member, header,
+                                     test->rhs.name, &limit)) {
     return DEADLINE_UNBOUNDED;
   }
   iv = test->lhs.name;
-  limit = test->rhs.int_value;
   if (strcmp(test->text, "<") == 0) {
     /* the bound is exclusive as written */
   } else if (strcmp(test->text, "<=") == 0) {

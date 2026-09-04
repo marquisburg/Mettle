@@ -605,7 +605,22 @@ initialiser gave it, so a `while (k < 100)` bounds `k` above and `var k: int32
 never 5 again. A write anywhere in the function that moves the counter the
 other way, or by an amount the compiler cannot bound, ends it. A float
 accumulator inside a loop whose trip count the compiler bounded gets the same
-treatment, widened over the whole run and not to the value it ends with.
+treatment, widened over the whole run and not to the value it ends with. The
+trip count does not have to come from a literal: a loop over a length whose
+declared type carries a maximum runs at most that many times, so
+
+```mettle
+type Count = int64 where value >= 0 && value <= 64;
+
+fn total(a: Unit*, n: Count) -> float64 {
+  var s: Total = (Total)0.0;
+  var i: int64 = 0;
+  while (i < n) { s = s + a[i]; i = i + 1; }
+  return (float64)s;
+}
+```
+
+proves, and the same function over a plain `int64` length does not.
 
 **A relation to another value.** A predicate may name a binding that is not in
 scope where the type is declared:
@@ -706,8 +721,9 @@ the compiler proves or refuses, never a hint. The cost of one instruction
 comes from the target description, the cost of a call is the callee's own
 longest path plus the description's call cost, and the cost of a loop is its
 body times a trip count taken from the loop's own bound: the induction
-variable's entry value, its step, and the constant it is tested against. A
-path costing more than the bound is `D0001`.
+variable's entry value, its step, and what it is tested against, which may be
+a constant or a binding the function set once before the loop. A path costing
+more than the bound is `D0001`.
 
 ```text
 error[D0001]: 'tick' declares a deadline of 60 cycles, and its longest path

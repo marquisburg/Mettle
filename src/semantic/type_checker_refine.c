@@ -909,6 +909,17 @@ static int constant_range(TypeChecker *checker, const ASTNode *expr, Range *out,
       *out = range_exact(symbol->constant_integer_value);
       return 1;
     }
+    /* A declared type bounds a loop the same way a literal does. `for i in
+     * 0..n` where `n: Count` and `Count` is `int32 where value <= 1024` runs
+     * at most 1024 times, and that is a fact the compiler proved rather than
+     * one it was told, so the trip count and everything the trip count bounds
+     * follow from it. Reading the type is a lookup, so this stays the cheap
+     * walk the trip counter needs. */
+    if (symbol && symbol->type && symbol->type->refined_base &&
+        symbol->type->refine_has_range) {
+      *out = range_of_type(symbol->type);
+      return out->has_max;
+    }
     return 0;
   }
   case AST_CAST_EXPRESSION: {

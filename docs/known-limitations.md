@@ -115,9 +115,12 @@ overlap. A deadline is a comparison against work, and it is exact about what
 it compares.
 
 A loop's trip count is read from its own bound: an induction variable with a
-constant entry value, a constant step, and a constant it is tested against. A
-loop bounded by anything else, including a global the compiler could fold, is
-unbounded here and is refused unless `--pgo` supplies a measured count. A
+constant entry value, a constant step, and a limit that is either a constant
+or a binding the function set once before the loop and never writes inside it.
+A loop bounded by anything else is unbounded here and is refused unless
+`--pgo` supplies a measured count. A global is one of those: another function
+could write it, and the deadline pass does not ask the whole program whether
+anyone does. A
 recursive call is unbounded. A call through a pointer, a call with no body in
 this program, and an `asm` block are unbounded.
 
@@ -409,9 +412,12 @@ be given a proof to proceed on; it refuses rather than emitting a run-time
 overlap test, so there is no test for a proof to remove either.
 
 A float accumulator carries a declared bound only where the compiler bounded
-the loop's trip count, which means a counter with a constant initialiser, a
-constant step and a constant limit. A loop over a runtime length gives the
-accumulator no bound, so a declared type on it is refused.
+the loop's trip count: a counter with a constant initialiser, a constant step,
+and a limit that is either a constant or a binding whose declared type carries
+a maximum. `for i in 0..n` where `n: Count` and `Count` is
+`int64 where value <= 64` runs at most 64 times, and the accumulator carries a
+bound that follows. A length with no declared bound gives the accumulator
+none, so a declared type on it is refused.
 
 The interpreter watches every declared-`@pure` and every inferred read-only
 frame under `mettle test` and traps on a write inside one, but that watch can

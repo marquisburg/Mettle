@@ -4175,6 +4175,23 @@ try {
   if ($out -notmatch "declared type pins it to 0\.\.70") { throw "the refusal does not name the bound: $out" }
   if ($out -notmatch "the declared bound does not survive the rewrite") { throw "the refusal does not say what failed: $out" }
   if ($out -notmatch "floating-point reassociation") { throw "the licence taken elsewhere is not on the belief ledger: $out" }
+  $exe = Join-Path $tmpDir "refine_float_declared_bound.exe"
+  $out = & $CompilerPath --build "tests/test_refine_float_declared_bound.mettle" -o $exe --report-proofs 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a length with a declared bound did not bound the accumulator: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "proof Total for ``s \+ a\[i\]``") { throw "the accumulator was not proven: $out" }
+  if ($flat -notmatch "interval 0\.\.65") { throw "the interval did not come from the declared length: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "b 20") { throw "the bounded accumulator did not run: $run" }
+
+  $loose = Join-Path $tmpDir "refine_float_loose.mettle"
+  $source = Get-Content "tests/test_refine_float_declared_bound.mettle" -Raw
+  $source = $source -replace "n: Count", "n: int64" -replace "var len: Count = \(Count\)40;", "var len: int64 = 40;"
+  Set-Content -Path $loose -Value $source -Encoding UTF8
+  $out = & $CompilerPath --build $loose -o (Join-Path $tmpDir "refine_float_loose.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "an accumulator over an unbounded length was proven anyway" }
+  if ($out -notmatch "error\[P0001\]") { throw "the unbounded length was not refused: $out" }
+
   Write-CaseResult -Name "float_predicates_bound_reassociation" -Passed $true
 }
 catch {
@@ -4746,6 +4763,14 @@ try {
   if ($LASTEXITCODE -eq 0) { throw "a cost model pricing an instruction at nothing was accepted" }
   $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
   if ($flat -notmatch "an instruction costs between 1 and") { throw "the empty cost was not refused: $out" }
+
+  $exe = Join-Path $tmpDir "deadline_local_bound.exe"
+  $out = & $CompilerPath --build "tests/test_deadline_local_bound.mettle" -o $exe --report-deadlines 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a loop bounded by a binding was called unbounded: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "deadline tick: \d+ of 400 cycles") { throw "the bound from the binding was not used: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "total 9841") { throw "the bounded program did not run: $run" }
 
   Write-CaseResult -Name "deadlines_are_proven_from_a_cost_model" -Passed $true
 }
