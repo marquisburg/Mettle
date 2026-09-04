@@ -6625,9 +6625,21 @@ int compile_file(const char *input_filename, const char *output_filename,
 
   {
     IRDeadlineStats deadline_stats;
-    if (!ir_deadline_run(ir_program, error_reporter,
-                         options->target_triple ? options->target_triple
-                                                : "x86_64",
+    IRDeadlineCosts deadline_costs;
+    const MtlcTargetDescription *machine = mtlc_target_current_description();
+    memset(&deadline_costs, 0, sizeof(deadline_costs));
+    deadline_costs.op = machine ? machine->cost_op : 1;
+    deadline_costs.load = machine ? machine->cost_load : 4;
+    deadline_costs.store = machine ? machine->cost_store : 1;
+    deadline_costs.branch = machine ? machine->cost_branch : 1;
+    deadline_costs.multiply = machine ? machine->cost_multiply : 3;
+    deadline_costs.multiply_float = machine ? machine->cost_multiply_float : 4;
+    deadline_costs.divide = machine ? machine->cost_divide : 26;
+    deadline_costs.divide_float = machine ? machine->cost_divide_float : 14;
+    deadline_costs.call = machine ? machine->cost_call : 4;
+    deadline_costs.allocate = machine ? machine->cost_allocate : 120;
+    deadline_costs.described = options->target_desc_path != NULL;
+    if (!ir_deadline_run(ir_program, error_reporter, &deadline_costs,
                          options->check_deadlines && !options->test_mode,
                          options->report_deadlines ? stdout : NULL,
                          &deadline_stats)) {

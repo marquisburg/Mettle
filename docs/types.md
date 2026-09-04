@@ -703,15 +703,32 @@ fn tick(seed: int32) -> int32 where cycles < 400 { ... }
 
 `where cycles < N` reads the same way `where value >= 0` does. It is a claim
 the compiler proves or refuses, never a hint. The cost of one instruction
-comes from a model of the target, the cost of a call is the callee's own
-longest path, and the cost of a loop is its body times a trip count taken from
-the loop's own bound: the induction variable's entry value, its step, and the
-constant it is tested against. A path costing more than the bound is `D0001`.
+comes from the target description, the cost of a call is the callee's own
+longest path plus the description's call cost, and the cost of a loop is its
+body times a trip count taken from the loop's own bound: the induction
+variable's entry value, its step, and the constant it is tested against. A
+path costing more than the bound is `D0001`.
 
 ```text
 error[D0001]: 'tick' declares a deadline of 60 cycles, and its longest path
 costs 191 on this target
 ```
+
+The model is data. `mettle target <triple>` prints it with the rest of the
+description, and `--target mine.mettle` builds against a different one, which
+is how a machine the compiler has never seen gets its deadlines costed:
+
+```mettle
+  cost_op: 1,
+  cost_load: 4,
+  cost_multiply: 3,
+  cost_divide: 26,
+  cost_call: 4,
+```
+
+`--report-deadlines` prints the model in force and says whether it came from a
+description or is the target's own, so a number can always be traced to the
+machine it was costed against.
 
 The model costs the IR as lowered, before the optimizer runs, so the number is
 an upper bound on the work the program asked for and not a prediction of one

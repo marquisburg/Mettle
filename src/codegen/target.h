@@ -80,6 +80,20 @@ typedef struct {
   int vector_width;
   char address_spaces[MTLC_TARGET_DESC_MAX_NAMES][16];
   size_t address_space_count;
+  /* What one instruction of each kind costs on this machine. Nothing in the
+   * emitter reads these; the deadline pass is their only consumer, which is
+   * why a description may choose them freely where it may not choose the
+   * calling convention. */
+  int cost_op;
+  int cost_load;
+  int cost_store;
+  int cost_branch;
+  int cost_multiply;
+  int cost_multiply_float;
+  int cost_divide;
+  int cost_divide_float;
+  int cost_call;
+  int cost_allocate;
   int described_convention;
 } MtlcTargetDescription;
 

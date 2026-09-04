@@ -21,6 +21,23 @@
 #include "../error/error_reporter.h"
 #include <stdio.h>
 
+/* What one instruction of each kind costs. This comes from the target
+ * description, so a machine a program described is costed with the model that
+ * description carries and not with one the compiler kept to itself. */
+typedef struct {
+  long long op;
+  long long load;
+  long long store;
+  long long branch;
+  long long multiply;
+  long long multiply_float;
+  long long divide;
+  long long divide_float;
+  long long call;
+  long long allocate;
+  int described;
+} IRDeadlineCosts;
+
 typedef struct {
   size_t declared;
   size_t proven;
@@ -30,7 +47,7 @@ typedef struct {
 } IRDeadlineStats;
 
 int ir_deadline_run(IRProgram *program, ErrorReporter *reporter,
-                    const char *target_name, int instrument, FILE *report,
+                    const IRDeadlineCosts *costs, int instrument, FILE *report,
                     IRDeadlineStats *stats);
 
 #endif /* IR_DEADLINE_H */

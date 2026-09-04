@@ -309,6 +309,17 @@ otherwise is refused and told which emitter fact it contradicted. The
 register file's callee-saved set is fixed per architecture and is not
 described.
 
+A description also carries what an instruction costs: `cost_op`, `cost_load`,
+`cost_store`, `cost_branch`, `cost_multiply`, `cost_multiply_float`,
+`cost_divide`, `cost_divide_float`, `cost_call` and `cost_allocate`. Nothing
+in the emitter reads them, which is why a description may choose them freely
+where it may not choose the calling convention: their only consumer is the
+deadline prover, so a machine a program described gets its `where cycles < N`
+costed against the model that description carries. A description that says
+nothing about costs keeps the machine's own; one that says anything has to say
+all of it, because a model with a hole in it would price an instruction at
+nothing.
+
 `--report-target` prints the description in effect, built-in or described, so
 a build can be read back as the machine it was made for.
 

@@ -336,9 +336,11 @@ transitively. [Rules](rules.md) covers what a rule is and what it sees.
 `TargetDesc`, the record a target description is written as: `name`, `arch`,
 `os`, `format`, `pointer_bits`, `stack_alignment`, `shadow_space`,
 `red_zone`, `int_args`, `float_args`, `indirect_return`, `separate_classes`,
-`widths`, `vector_width` and `address_spaces`. `mettle target <triple>`
-prints one for every built-in target and `--target desc.mettle` reads one
-back. [Bare metal](bare-metal.md) covers what a description may change.
+`widths`, `vector_width`, `address_spaces`, and the ten `cost_` fields that
+say what an instruction of each kind costs on the machine. `mettle target
+<triple>` prints one for every built-in target and `--target desc.mettle`
+reads one back. [Bare metal](bare-metal.md) covers what a description may
+change, and [Types](types.md) covers what the cost fields are read for.
 
 ## std/net
 

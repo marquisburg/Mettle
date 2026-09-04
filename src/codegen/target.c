@@ -242,6 +242,19 @@ static void describe_entry(const MtlcTargetEntry *entry, const char *triple,
     out->widths[1] = 16;
     out->width_count = 2;
   }
+  out->cost_op = 1;
+  out->cost_load = 4;
+  out->cost_store = 1;
+  out->cost_branch = 1;
+  out->cost_multiply = 3;
+  out->cost_multiply_float = 4;
+  out->cost_divide = 26;
+  out->cost_divide_float = 14;
+  out->cost_call = 4;
+  out->cost_allocate = 120;
+  if (entry->arch == MTLC_TARGET_ARCH_AARCH64) {
+    out->cost_divide_float = 12;
+  }
   if (entry->arch == MTLC_TARGET_ARCH_X86_64) {
     out->stack_alignment = 16;
     out->vector_width = 256;
@@ -450,6 +463,57 @@ int mtlc_target_describe(const MtlcTargetDescription *description, char *error,
              "a CPU target has no named address spaces; those belong to the "
              "GPU targets, which are not described this way");
     return 0;
+  }
+  {
+    /* A description that says nothing about costs keeps the machine's own.
+     * One that says anything has to say all of it, because a cost model with
+     * a hole in it would silently price an instruction at nothing. */
+    static const char *const cost_names[] = {
+        "cost_op",       "cost_load",   "cost_store",
+        "cost_branch",   "cost_multiply", "cost_multiply_float",
+        "cost_divide",   "cost_divide_float", "cost_call",
+        "cost_allocate"};
+    int *given[10];
+    const int *fallback[10];
+    MtlcTargetDescription *mutable_description =
+        (MtlcTargetDescription *)description;
+    size_t c;
+    int any = 0;
+    given[0] = &mutable_description->cost_op;
+    given[1] = &mutable_description->cost_load;
+    given[2] = &mutable_description->cost_store;
+    given[3] = &mutable_description->cost_branch;
+    given[4] = &mutable_description->cost_multiply;
+    given[5] = &mutable_description->cost_multiply_float;
+    given[6] = &mutable_description->cost_divide;
+    given[7] = &mutable_description->cost_divide_float;
+    given[8] = &mutable_description->cost_call;
+    given[9] = &mutable_description->cost_allocate;
+    fallback[0] = &builtin.cost_op;
+    fallback[1] = &builtin.cost_load;
+    fallback[2] = &builtin.cost_store;
+    fallback[3] = &builtin.cost_branch;
+    fallback[4] = &builtin.cost_multiply;
+    fallback[5] = &builtin.cost_multiply_float;
+    fallback[6] = &builtin.cost_divide;
+    fallback[7] = &builtin.cost_divide_float;
+    fallback[8] = &builtin.cost_call;
+    fallback[9] = &builtin.cost_allocate;
+    for (c = 0; c < 10; c++) {
+      any |= *given[c] != 0;
+    }
+    for (c = 0; c < 10; c++) {
+      if (!any) {
+        *given[c] = *fallback[c];
+        continue;
+      }
+      if (*given[c] < 1 || *given[c] > 1000000) {
+        snprintf(error, error_size,
+                 "`%s` is %d; an instruction costs between 1 and 1000000",
+                 cost_names[c], *given[c]);
+        return 0;
+      }
+    }
   }
   if (entry->os != MTLC_TARGET_OS_NONE ||
       (entry->arch != MTLC_TARGET_ARCH_X86_64 &&
@@ -688,7 +752,17 @@ void mtlc_target_print_description(FILE *out,
   for (i = 0; i < d->address_space_count; i++) {
     fprintf(out, "%s\"%s\"", i ? ", " : "", d->address_spaces[i]);
   }
-  fprintf(out, "]\n};\n");
+  fprintf(out, "],\n");
+  fprintf(out, "  cost_op: %d,\n", d->cost_op);
+  fprintf(out, "  cost_load: %d,\n", d->cost_load);
+  fprintf(out, "  cost_store: %d,\n", d->cost_store);
+  fprintf(out, "  cost_branch: %d,\n", d->cost_branch);
+  fprintf(out, "  cost_multiply: %d,\n", d->cost_multiply);
+  fprintf(out, "  cost_multiply_float: %d,\n", d->cost_multiply_float);
+  fprintf(out, "  cost_divide: %d,\n", d->cost_divide);
+  fprintf(out, "  cost_divide_float: %d,\n", d->cost_divide_float);
+  fprintf(out, "  cost_call: %d,\n", d->cost_call);
+  fprintf(out, "  cost_allocate: %d\n};\n", d->cost_allocate);
 }
 
 int mtlc_target_syscall_max_arguments(const MtlcTarget *target) {

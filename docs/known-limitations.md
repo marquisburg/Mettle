@@ -99,11 +99,14 @@ emulator reports it rather than pretending it printed them.
 
 ## Deadlines
 
-The cost model is the compiler's. A target description says what registers and
-widths a machine has; it does not say what an instruction costs, so a program
-cannot supply a cost model of its own and a new machine's deadlines are costed
-with the model the compiler already has. That is the same wall the emitters
-sit behind.
+The cost model comes from the target description, which carries `cost_op`,
+`cost_load`, `cost_store`, `cost_branch`, `cost_multiply`,
+`cost_multiply_float`, `cost_divide`, `cost_divide_float`, `cost_call` and
+`cost_allocate`. A description that says nothing about costs keeps the
+machine's own; one that says anything has to say all of it, since a model with
+a hole in it would price an instruction at nothing. Those ten numbers are the
+whole model: there is no per-opcode table, no distinction between the widths
+of an add, and no way to say that two instructions issue together.
 
 Costs are taken over the IR as lowered, before the optimizer runs. The number
 is an upper bound on the work the program asked for, not a prediction of one

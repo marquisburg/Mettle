@@ -14,4 +14,14 @@ export struct TargetDesc {
   widths: int64[8];
   vector_width: int64;
   address_spaces: string[8];
+  cost_op: int64;
+  cost_load: int64;
+  cost_store: int64;
+  cost_branch: int64;
+  cost_multiply: int64;
+  cost_multiply_float: int64;
+  cost_divide: int64;
+  cost_divide_float: int64;
+  cost_call: int64;
+  cost_allocate: int64;
 }

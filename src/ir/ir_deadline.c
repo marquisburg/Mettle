@@ -12,7 +12,7 @@ IRFunction *ir_program_find_function(IRProgram *program, const char *name);
 typedef struct {
   IRProgram *program;
   ErrorReporter *reporter;
-  const char *target;
+  const IRDeadlineCosts *costs;
   long long *cost;
   int *state;
   int *evidence;
@@ -22,8 +22,8 @@ typedef struct {
   const IRFunction *report_for;
 } Ctx;
 
-static long long op_cost(const char *target, const IRInstruction *insn) {
-  int wide = target && strncmp(target, "aarch64", 7) == 0;
+static long long op_cost(const IRDeadlineCosts *costs,
+                        const IRInstruction *insn) {
   switch (insn->op) {
   case IR_OP_NOP:
   case IR_OP_LABEL:
@@ -33,41 +33,41 @@ static long long op_cost(const char *target, const IRInstruction *insn) {
   case IR_OP_BRANCH_ZERO:
   case IR_OP_BRANCH_EQ:
   case IR_OP_RETURN:
-    return 1;
+    return costs->branch;
   case IR_OP_LOAD:
-    return 4;
+    return costs->load;
   case IR_OP_STORE:
-    return 1;
+    return costs->store;
   case IR_OP_ASSIGN:
   case IR_OP_ADDRESS_OF:
   case IR_OP_CAST:
   case IR_OP_UNARY:
-    return 1;
+    return costs->op;
   case IR_OP_ROTATE_ADD:
-    return 2;
+    return costs->op * 2;
   case IR_OP_BINARY:
     if (!insn->text) {
-      return 1;
+      return costs->op;
     }
     if (strcmp(insn->text, "*") == 0) {
-      return insn->is_float ? 4 : 3;
+      return insn->is_float ? costs->multiply_float : costs->multiply;
     }
     if (strcmp(insn->text, "/") == 0) {
-      return insn->is_float ? (wide ? 12 : 14) : 26;
+      return insn->is_float ? costs->divide_float : costs->divide;
     }
     if (strcmp(insn->text, "%") == 0) {
-      return 26;
+      return costs->divide;
     }
-    return 1;
+    return costs->op;
   case IR_OP_NEW:
-    return 120;
+    return costs->allocate;
   case IR_OP_INLINE_ASM:
     return DEADLINE_UNBOUNDED;
   case IR_OP_CALL_INDIRECT:
   case IR_OP_GPU_LAUNCH:
     return DEADLINE_UNBOUNDED;
   default:
-    return 2;
+    return costs->op * 2;
   }
 }
 
@@ -87,7 +87,7 @@ static long long call_cost(Ctx *ctx, const IRInstruction *insn) {
     if (inner == DEADLINE_UNBOUNDED) {
       return DEADLINE_UNBOUNDED;
     }
-    return inner + 4;
+    return inner + ctx->costs->call;
   }
 }
 
@@ -448,7 +448,7 @@ static long long compute_cost(Ctx *ctx, IRFunction *fn, int *evidence,
     for (size_t i = 0; i < blocks[b].instruction_count; i++) {
       const IRInstruction *insn = &blocks[b].instructions[i];
       long long one = insn->op == IR_OP_CALL ? call_cost(ctx, insn)
-                                             : op_cost(ctx->target, insn);
+                                             : op_cost(ctx->costs, insn);
       if (one == DEADLINE_UNBOUNDED) {
         free(weight);
         free(back);
@@ -670,7 +670,7 @@ static int instrument_function(Ctx *ctx, IRFunction *fn, long long proven) {
     }
     for (size_t b = 0; b < count; b++) {
       for (size_t i = 0; i < blocks[b].instruction_count; i++) {
-        long long one = op_cost(ctx->target, &blocks[b].instructions[i]);
+        long long one = op_cost(ctx->costs, &blocks[b].instructions[i]);
         weight[b] += one == DEADLINE_UNBOUNDED ? 0 : one;
       }
     }
@@ -698,12 +698,12 @@ static int instrument_function(Ctx *ctx, IRFunction *fn, long long proven) {
 }
 
 int ir_deadline_run(IRProgram *program, ErrorReporter *reporter,
-                    const char *target_name, int instrument, FILE *report,
+                    const IRDeadlineCosts *costs, int instrument, FILE *report,
                     IRDeadlineStats *stats) {
   Ctx ctx;
   IRDeadlineStats local;
   int ok = 1;
-  if (!program) {
+  if (!program || !costs) {
     return 1;
   }
   memset(&ctx, 0, sizeof(ctx));
@@ -714,7 +714,7 @@ int ir_deadline_run(IRProgram *program, ErrorReporter *reporter,
   memset(stats, 0, sizeof(*stats));
   ctx.program = program;
   ctx.reporter = reporter;
-  ctx.target = target_name;
+  ctx.costs = costs;
   ctx.count = program->function_count;
   ctx.cost = calloc(ctx.count ? ctx.count : 1, sizeof(long long));
   ctx.state = calloc(ctx.count ? ctx.count : 1, sizeof(int));
@@ -799,6 +799,15 @@ int ir_deadline_run(IRProgram *program, ErrorReporter *reporter,
   if (report && stats->declared == 0) {
     fprintf(report, "deadlines: none declared\n");
   } else if (report) {
+    fprintf(report,
+            "cost model: op %lld, load %lld, store %lld, branch %lld, "
+            "multiply %lld/%lld, divide %lld/%lld, call %lld, allocate %lld "
+            "(%s)\n",
+            costs->op, costs->load, costs->store, costs->branch,
+            costs->multiply, costs->multiply_float, costs->divide,
+            costs->divide_float, costs->call, costs->allocate,
+            costs->described ? "from the target description"
+                             : "the target's own");
     fprintf(report,
             "deadlines: %zu declared, %zu proven, %zu held on evidence\n",
             stats->declared, stats->proven, stats->on_evidence);

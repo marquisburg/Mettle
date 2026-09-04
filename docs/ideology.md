@@ -934,7 +934,8 @@ only where proven.
   `where cycles < N` is costed from a model of the target, refused when the
   path costs more (D0001) and refused again when the path cannot be bounded
   at all (D0002), with `--check-deadlines` counting what a path really cost
-  while the program ran. Proven by `execution_model_is_the_programs`,
+  while the program ran. The cost model is part of the target description, so
+  the numbers a deadline is judged against are data a program can supply. Proven by `execution_model_is_the_programs`,
   `engine_example`, `two_threads_writing_one_global`,
   `task_ownership_crosses_the_handover`, `schedule_is_data_the_compiler_reads`
   and `deadlines_are_proven_from_a_cost_model`. Gapped, and written into

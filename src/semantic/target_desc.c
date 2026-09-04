@@ -1,4 +1,5 @@
 #include "target_desc.h"
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -214,6 +215,44 @@ static int read_fields(const AggregateLiteral *literal,
           return 0;
         }
         out->widths[out->width_count++] = (int)number;
+      }
+    } else if (strncmp(field, "cost_", 5) == 0) {
+      static const struct {
+        const char *name;
+        size_t offset;
+      } costs[] = {
+          {"cost_op", offsetof(MtlcTargetDescription, cost_op)},
+          {"cost_load", offsetof(MtlcTargetDescription, cost_load)},
+          {"cost_store", offsetof(MtlcTargetDescription, cost_store)},
+          {"cost_branch", offsetof(MtlcTargetDescription, cost_branch)},
+          {"cost_multiply", offsetof(MtlcTargetDescription, cost_multiply)},
+          {"cost_multiply_float",
+           offsetof(MtlcTargetDescription, cost_multiply_float)},
+          {"cost_divide", offsetof(MtlcTargetDescription, cost_divide)},
+          {"cost_divide_float",
+           offsetof(MtlcTargetDescription, cost_divide_float)},
+          {"cost_call", offsetof(MtlcTargetDescription, cost_call)},
+          {"cost_allocate", offsetof(MtlcTargetDescription, cost_allocate)},
+      };
+      size_t c;
+      if (!int_of(value, &number)) {
+        snprintf(error, error_size, "`%s` must be an integer literal", field);
+        return 0;
+      }
+      for (c = 0; c < sizeof(costs) / sizeof(costs[0]); c++) {
+        if (strcmp(field, costs[c].name) == 0) {
+          *(int *)((char *)out + costs[c].offset) = (int)number;
+          break;
+        }
+      }
+      if (c == sizeof(costs) / sizeof(costs[0])) {
+        snprintf(error, error_size,
+                 "`%s` is not a cost this machine has; the costs are cost_op, "
+                 "cost_load, cost_store, cost_branch, cost_multiply, "
+                 "cost_multiply_float, cost_divide, cost_divide_float, "
+                 "cost_call and cost_allocate",
+                 field);
+        return 0;
       }
     } else if (strcmp(field, "pointer_bits") == 0 ||
                strcmp(field, "stack_alignment") == 0 ||

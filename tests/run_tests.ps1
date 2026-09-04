@@ -4728,6 +4728,25 @@ try {
 
   $out = & $CompilerPath explain D0002 2>&1 | Out-String
   if ($out -notmatch "holds on evidence") { throw "explain D0002 says nothing: $out" }
+  $model = Join-Path $tmpDir "cost_model.mettle"
+  $printed = & $CompilerPath target x86_64-windows 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the target description did not print: $printed" }
+  if ($printed -notmatch "cost_multiply: 3") { throw "the description carries no cost model: $printed" }
+  Set-Content -Path $model -Value ($printed -replace "cost_multiply: 3", "cost_multiply: 30" -replace "cost_call: 4", "cost_call: 40") -Encoding ASCII
+  $out = & $CompilerPath --build "tests/test_deadline.mettle" -o (Join-Path $tmpDir "deadline_described.exe") --report-deadlines --target $model 2>&1 | Out-String
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "multiply 30/4") { throw "the described cost model was not read: $out" }
+  if ($flat -notmatch "from the target description") { throw "the report does not say where the model came from: $out" }
+  if ($LASTEXITCODE -eq 0) { throw "a described cost model that prices the path over its deadline built anyway" }
+  if ($flat -notmatch "error\[D0001\]") { throw "the described model did not change the verdict: $out" }
+
+  $hole = Join-Path $tmpDir "cost_hole.mettle"
+  Set-Content -Path $hole -Value ($printed -replace "cost_divide: 26", "cost_divide: 0") -Encoding ASCII
+  $out = & $CompilerPath --build "tests/test_deadline.mettle" -o (Join-Path $tmpDir "deadline_hole.exe") --target $hole 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a cost model pricing an instruction at nothing was accepted" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "an instruction costs between 1 and") { throw "the empty cost was not refused: $out" }
+
   Write-CaseResult -Name "deadlines_are_proven_from_a_cost_model" -Passed $true
 }
 catch {
