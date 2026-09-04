@@ -902,7 +902,13 @@ only where proven.
   whole call graph, refused with the chain that broke them (F0001 to F0003),
   carried on function types so a call through a pointer stays honest, read by
   rules, and re-checked under `mettle test` and `--check-effects` by a
-  machine that does not trust the analysis.
+  machine that does not trust the analysis. Saying where code runs says which
+  globals two threads share: one written from two disjoint requirement sets
+  is refused as F0006, and an effect both writers require is what orders
+  them, so a lock becomes a requirement the compiler carries rather than a
+  convention. The borrow analyser closed the other half, following a pointer
+  handed to a task (M0121, M0122) and re-asking the question at run time
+  under `--check-tasks`.
 - ~~A machine concept, the reachable half.~~ *(III.3)* Landed. A target's
   description is a Mettle `const` the compiler reads: `mettle target
   <triple>` prints every built-in one, `--target desc.mettle` builds for a

@@ -155,7 +155,9 @@ handled in this file. `type Percent = int32 where value >= 0 && value <=
 100;` declares a type that carries a rule, and a value becomes one only where
 the compiler proves it. `effect Render;` declares what a function may do or
 need: `fn mix() forbids Render`, `fn job() requires Worker`, inferred through
-the whole call graph and refused with the chain that broke it. A target is a
+the whole call graph and refused with the chain that broke it. Saying where
+code runs is enough to say which globals two threads share, so one written
+from two threads with nothing ordering them is refused too. A target is a
 Mettle `const` the compiler reads, so `mettle target x86_64-none` prints one
 and `--target mine.mettle` builds for it. [Rules](docs/rules.md),
 [Effects](docs/effects.md), [Types](docs/types.md) and

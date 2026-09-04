@@ -36,6 +36,14 @@ typedef struct {
 } NameEntry;
 
 typedef struct {
+  const char *name;
+  size_t *writers;
+  size_t *sites;
+  size_t writer_count;
+  size_t writer_capacity;
+} EGlobal;
+
+typedef struct {
   IRProgram *program;
   const IREffectInput *input;
   ErrorReporter *reporter;
@@ -49,6 +57,9 @@ typedef struct {
   int errors;
   long long steps;
   size_t rounds;
+  EGlobal *globals;
+  size_t global_count;
+  size_t global_capacity;
 } Ctx;
 
 struct IREffectResults {
@@ -431,6 +442,81 @@ static int extern_performs(Ctx *ctx, EFn *efn, const char *name,
   }
   if (alloc_bit >= 0) {
     note_source(efn, (size_t)alloc_bit, site);
+  }
+  return 1;
+}
+
+int ir_function_symbol_is_parameter(const IRFunction *function,
+                                    const char *symbol_name);
+int ir_instruction_writes_symbol(const IRInstruction *instruction);
+const char *ir_function_local_declared_type(const IRFunction *function,
+                                            const char *name);
+
+static int note_global_writer(Ctx *ctx, const char *name, size_t writer,
+                              size_t site) {
+  EGlobal *entry = NULL;
+  for (size_t i = 0; i < ctx->global_count; i++) {
+    if (strcmp(ctx->globals[i].name, name) == 0) {
+      entry = &ctx->globals[i];
+      break;
+    }
+  }
+  if (!entry) {
+    if (ctx->global_count == ctx->global_capacity) {
+      size_t grown = ctx->global_capacity ? ctx->global_capacity * 2 : 16;
+      EGlobal *table = realloc(ctx->globals, grown * sizeof(EGlobal));
+      if (!table) {
+        return 0;
+      }
+      ctx->globals = table;
+      ctx->global_capacity = grown;
+    }
+    entry = &ctx->globals[ctx->global_count++];
+    memset(entry, 0, sizeof(*entry));
+    entry->name = name;
+  }
+  for (size_t i = 0; i < entry->writer_count; i++) {
+    if (entry->writers[i] == writer) {
+      return 1;
+    }
+  }
+  if (entry->writer_count == entry->writer_capacity) {
+    size_t grown = entry->writer_capacity ? entry->writer_capacity * 2 : 4;
+    size_t *writers = realloc(entry->writers, grown * sizeof(size_t));
+    size_t *sites = NULL;
+    if (!writers) {
+      return 0;
+    }
+    entry->writers = writers;
+    sites = realloc(entry->sites, grown * sizeof(size_t));
+    if (!sites) {
+      return 0;
+    }
+    entry->sites = sites;
+    entry->writer_capacity = grown;
+  }
+  entry->sites[entry->writer_count] = site;
+  entry->writers[entry->writer_count++] = writer;
+  return 1;
+}
+
+static int scan_globals(Ctx *ctx, size_t index) {
+  const IRFunction *fn = ctx->fns[index].fn;
+  if (fn->is_rule || fn->rewrite_role) {
+    return 1;
+  }
+  for (size_t i = 0; i < fn->instruction_count; i++) {
+    const IRInstruction *insn = &fn->instructions[i];
+    if (!ir_instruction_writes_symbol(insn) || !insn->dest.name) {
+      continue;
+    }
+    if (ir_function_symbol_is_parameter(fn, insn->dest.name) ||
+        ir_function_local_declared_type(fn, insn->dest.name)) {
+      continue;
+    }
+    if (!note_global_writer(ctx, insn->dest.name, index, i)) {
+      return 0;
+    }
   }
   return 1;
 }
@@ -986,6 +1072,85 @@ static int check_obligations(Ctx *ctx) {
   return 1;
 }
 
+static int words_meet(const Word *a, const Word *b, size_t words) {
+  for (size_t i = 0; i < words; i++) {
+    if (a[i] & b[i]) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static size_t first_placed_bit(Ctx *ctx, const Word *needs,
+                               const Word *placed) {
+  for (size_t bit = 0; bit + 1 < ctx->bit_count; bit++) {
+    if (bit_test(needs, bit) && bit_test(placed, bit)) {
+      return bit;
+    }
+  }
+  return ctx->bit_count;
+}
+
+static int check_races(Ctx *ctx) {
+  Word *placed = words_new(ctx);
+  if (!placed) {
+    return 0;
+  }
+  for (size_t i = 0; i < ctx->fn_count; i++) {
+    for (size_t w = 0; w < ctx->words; w++) {
+      placed[w] |= ctx->fns[i].provides[w];
+    }
+  }
+  if (!words_any(placed, ctx->words)) {
+    free(placed);
+    return 1;
+  }
+  for (size_t g = 0; g < ctx->global_count; g++) {
+    EGlobal *entry = &ctx->globals[g];
+    for (size_t a = 0; a + 1 < entry->writer_count; a++) {
+      EFn *left = &ctx->fns[entry->writers[a]];
+      size_t left_bit = first_placed_bit(ctx, left->needs, placed);
+      if (left_bit == ctx->bit_count) {
+        continue;
+      }
+      for (size_t b = a + 1; b < entry->writer_count; b++) {
+        EFn *right = &ctx->fns[entry->writers[b]];
+        size_t right_bit = first_placed_bit(ctx, right->needs, placed);
+        char message[768];
+        if (right_bit == ctx->bit_count ||
+            words_meet(left->needs, right->needs, ctx->words)) {
+          continue;
+        }
+        snprintf(message, sizeof(message),
+                 "'%s' is written by '%s', which runs where '%s' is provided, "
+                 "and by '%s', which runs where '%s' is provided, and nothing "
+                 "either one needs orders the two writes",
+                 display_name(entry->name), display_name(right->fn->name),
+                 effect_name(ctx, right_bit), display_name(left->fn->name),
+                 effect_name(ctx, left_bit));
+        report(ctx, instruction_span(right, entry->sites[b]), message,
+               "two threads write this", "F0006");
+        if (ctx->reporter) {
+          char note[320];
+          snprintf(note, sizeof(note),
+                   "`%s` writes `%s` here, and it requires `%s`",
+                   display_name(left->fn->name), display_name(entry->name),
+                   effect_name(ctx, left_bit));
+          error_reporter_add_note_of_span(
+              ctx->reporter, instruction_span(left, entry->sites[a]), note);
+          snprintf(note, sizeof(note),
+                   "an effect both writers require would order them: give "
+                   "each `requires <lock>` and provide it around both");
+          error_reporter_add_note_of_span(
+              ctx->reporter, function_span(right->fn), note);
+        }
+      }
+    }
+  }
+  free(placed);
+  return 1;
+}
+
 static int emit_helper_call(IRFunction *fn, size_t index, const char *helper,
                             const char *const *texts, size_t text_count,
                             SourceLocation location) {
@@ -1256,6 +1421,11 @@ static void ctx_free(Ctx *ctx) {
     }
     free(efn->indirect_requires);
   }
+  for (size_t i = 0; i < ctx->global_count; i++) {
+    free(ctx->globals[i].writers);
+    free(ctx->globals[i].sites);
+  }
+  free(ctx->globals);
   free(ctx->fns);
   free(ctx->index);
 }
@@ -1396,6 +1566,61 @@ static void report_effects(Ctx *ctx, FILE *out) {
             display_name(efn->fn->name), used ? performs : "nothing",
             need_used ? needs : "nothing");
   }
+  {
+    Word *placed = words_new(ctx);
+    size_t shared = 0;
+    size_t ordered = 0;
+    for (size_t i = 0; placed && i < ctx->fn_count; i++) {
+      for (size_t w = 0; w < ctx->words; w++) {
+        placed[w] |= ctx->fns[i].provides[w];
+      }
+    }
+    for (size_t g = 0; placed && g < ctx->global_count; g++) {
+      EGlobal *entry = &ctx->globals[g];
+      char writers[512];
+      size_t used = 0;
+      size_t counted = 0;
+      int covered = 1;
+      for (size_t a = 0; a < entry->writer_count; a++) {
+        EFn *writer = &ctx->fns[entry->writers[a]];
+        size_t bit = first_placed_bit(ctx, writer->needs, placed);
+        int wrote;
+        if (bit == ctx->bit_count) {
+          continue;
+        }
+        counted++;
+        wrote = snprintf(writers + used, sizeof(writers) - used, "%s%s (%s)",
+                         used ? ", " : "", display_name(writer->fn->name),
+                         effect_name(ctx, bit));
+        if (wrote > 0) {
+          used += (size_t)wrote;
+        }
+      }
+      if (counted < 2) {
+        continue;
+      }
+      shared++;
+      for (size_t a = 0; a + 1 < entry->writer_count && covered; a++) {
+        for (size_t b = a + 1; b < entry->writer_count && covered; b++) {
+          EFn *left = &ctx->fns[entry->writers[a]];
+          EFn *right = &ctx->fns[entry->writers[b]];
+          if (first_placed_bit(ctx, left->needs, placed) == ctx->bit_count ||
+              first_placed_bit(ctx, right->needs, placed) == ctx->bit_count) {
+            continue;
+          }
+          covered = words_meet(left->needs, right->needs, ctx->words);
+        }
+      }
+      ordered += covered ? 1 : 0;
+      fprintf(out, "shared %s: %s, %s\n", display_name(entry->name), writers,
+              covered ? "ordered by an effect both require"
+                      : "nothing orders the writes");
+    }
+    fprintf(out, "shared globals: %zu written from more than one place, %zu "
+                 "ordered\n",
+            shared, ordered);
+    free(placed);
+  }
   fprintf(out,
           "effects: %zu functions, %zu with an effect, %zu fixpoint rounds, "
           "%lld steps\n",
@@ -1495,14 +1720,15 @@ int ir_effects_run(IRProgram *program, const IREffectInput *input,
     if (!ctx.fns[i].fn) {
       continue;
     }
-    ok = scan_function(&ctx, i);
+    ok = scan_function(&ctx, i) && scan_globals(&ctx, i);
   }
   if (ok) {
     propagate(&ctx);
     ok = !ctx.failed;
   }
   if (ok && !getenv("METTLE_TRUST_EFFECTS")) {
-    ok = check_forbids(&ctx) && check_roots(&ctx) && check_obligations(&ctx);
+    ok = check_forbids(&ctx) && check_roots(&ctx) && check_obligations(&ctx) &&
+         check_races(&ctx);
   }
   if (ok && ctx.errors == 0 && input->instrument) {
     ok = instrument(&ctx);

@@ -147,6 +147,7 @@ Effect diagnostics:
 | F0003 | A function value does not fit the effects its type declares |
 | F0004 | A function declared @pure performs something |
 | F0005 | The effect pass spent more than its budget |
+| F0006 | Two threads write one global and nothing orders them |
 
 [Effects](effects.md) covers the F codes in context.
 

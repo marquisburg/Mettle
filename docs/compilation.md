@@ -108,7 +108,7 @@ divergence. See [ML-driven IR optimization](ml-opt.md).
 | `--rule-budget=N` | Fail the build when the rules spend more than N interpreter steps together. |
 | `--report-proofs` | Every conversion into a [declared type](types.md) the prover settled: the type, the expression, the site, whether it was proven, what it cost, and the route that settled it. |
 | `--proof-budget=N` | Fail the build when the declared-type prover spends more than N steps. |
-| `--report-effects` | What each function performs and needs, and what the [effect](effects.md) pass spent getting there. |
+| `--report-effects` | What each function performs and needs, which globals more than one thread writes and what orders them, and what the [effect](effects.md) pass spent getting there. |
 | `--report-twins` | What each `reference` twin was checked against, and on how many generated input sets. See [Translation validation](translation-validation.md). |
 | `--fix` | Apply the replacement lines that failing `@rule`s proposed, and say which rule asked for each. See [Rules](rules.md). |
 | `--effect-budget=N` | Fail the build when the effect pass spends more than N steps. |

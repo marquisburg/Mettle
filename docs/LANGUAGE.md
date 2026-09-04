@@ -35,7 +35,7 @@ frontend, see [Writing a frontend](embedding.md).
 16. [Runtime model](runtime-model.md)
 17. [Rewrite rules](rewrite-rules.md)
 18. [Rules](rules.md)
-19. [Effects](effects.md)
+19. [Effects](effects.md), including which globals two threads share
 
 ## Beyond the CPU
 

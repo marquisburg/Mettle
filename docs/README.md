@@ -61,7 +61,7 @@ frontend can drive instead. The documentation is organized the same way.
   `--rule-budget=N` keep the cost on a ledger, as `--report-proofs` /
   `--proof-budget=N` and `--report-effects` / `--effect-budget=N` do for the
   declared-type prover and the effect pass.
-- [Effects](effects.md): `effect`, `with`, `forbids`, `requires`, `provides`; what a function does and needs, inferred through the call graph and proven on every build.
+- [Effects](effects.md): `effect`, `with`, `forbids`, `requires`, `provides`; what a function does and needs, inferred through the call graph and proven on every build, down to a global two threads write with nothing ordering them.
 - [ML-driven IR optimization](ml-opt.md): `--ml-opt` and its validation gate.
 - [The --explain-json schema](explain-json.md): the machine-readable
   optimization report.

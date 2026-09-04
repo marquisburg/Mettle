@@ -4476,6 +4476,61 @@ catch {
   Write-CaseResult -Name "abstraction_examples" -Passed $false -Reason $_.Exception.Message
 }
 
+# Where code runs is already in the program, in the effects it needs, so a
+# global two threads write is a fact rather than a guess. Enforce: two writers
+# whose requirements are disjoint fail the build naming both and both effects,
+# a requirement they share orders them and builds, --report-effects prints the
+# ledger line either way, and the check emits no code at all.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $out = & $CompilerPath --build "tests/test_race_split.mettle" -o (Join-Path $tmpDir "race_split.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "two threads writing one global with nothing ordering them built" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($out -notmatch "error\[F0006\]") { throw "the race was not refused under its own code: $out" }
+  if ($flat -notmatch "written by .draw.") { throw "the refusal does not name the second writer: $out" }
+  if ($flat -notmatch "and by .tick.") { throw "the refusal does not name the first writer: $out" }
+  if ($flat -notmatch "runs where .Sim. is provided") { throw "the refusal does not name where a writer runs: $out" }
+  if ($flat -notmatch "runs where .Render. is provided") { throw "the refusal does not name the other place: $out" }
+  if ($flat -notmatch "nothing either one needs orders the two writes") { throw "the refusal does not say what is missing: $out" }
+  if ($flat -notmatch "effect both writers require would order them") { throw "the refusal does not say what would fix it: $out" }
+
+  $exe = Join-Path $tmpDir "race_locked.exe"
+  $out = & $CompilerPath --build "tests/test_race_locked.mettle" -o $exe --report-effects --check-effects 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a shared requirement did not order the writes: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "shared g_frame: tick \(Sim\), draw \(Render\)") { throw "the ledger does not name the writers: $out" }
+  if ($flat -notmatch "ordered by an effect both require") { throw "the ledger does not say the writes are ordered: $out" }
+  if ($flat -notmatch "shared globals: 1 written from more than one place, 1 ordered") { throw "the ledger total is wrong: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the run-time effect checks refused the placement the verdict rests on: $run" }
+  if ($run -notmatch "frame 3") { throw "the locked program did not run: $run" }
+
+  $out = & $CompilerPath explain F0006 2>&1 | Out-String
+  if ($out -notmatch "spelled as a requirement") { throw "explain F0006 says nothing: $out" }
+
+  $plain = Join-Path $tmpDir "race_cost_checked.exe"
+  $trusted = Join-Path $tmpDir "race_cost_trusted.exe"
+  $out = & $CompilerPath --build "tests/test_race_locked.mettle" -o $plain 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the checked build failed: $out" }
+  $env:METTLE_TRUST_EFFECTS = "1"
+  $out = & $CompilerPath --build "tests/test_race_locked.mettle" -o $trusted 2>&1 | Out-String
+  Remove-Item Env:METTLE_TRUST_EFFECTS
+  if ($LASTEXITCODE -ne 0) { throw "the unchecked build failed: $out" }
+  $a = [System.IO.File]::ReadAllBytes($plain)
+  $b = [System.IO.File]::ReadAllBytes($trusted)
+  if ($a.Length -ne $b.Length) { throw "the race check changed the binary's size" }
+  for ($i = 0; $i -lt $a.Length; $i++) {
+    if ($a[$i] -ne $b[$i]) { throw "the race check changed the binary at byte $i" }
+  }
+  Write-CaseResult -Name "two_threads_writing_one_global" -Passed $true
+}
+catch {
+  $failed++
+  if (Test-Path Env:METTLE_TRUST_EFFECTS) { Remove-Item Env:METTLE_TRUST_EFFECTS }
+  Write-CaseResult -Name "two_threads_writing_one_global" -Passed $false -Reason $_.Exception.Message
+}
+
 # A pointer that crosses into a task stops being the sender's. Enforce: the
 # frame's address handed to a task fails the build, a write through a message
 # already handed over fails the build, the correct program builds and runs,

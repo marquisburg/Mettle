@@ -1,0 +1,39 @@
+// One counter, two threads, nothing ordering them. `tick` runs where Sim is
+// provided and `draw` runs where Render is, and no effect appears in both
+// requirement sets, so nothing in the program says which write lands last.
+import "std/io";
+import "std/thread";
+
+effect Sim;
+effect Render;
+
+var g_frame: int32 = 0;
+
+fn tick() requires Sim {
+  g_frame = g_frame + 1;
+}
+
+fn draw() requires Render {
+  g_frame = 0;
+}
+
+fn sim_main(arg: cstring) -> uint32 provides Sim {
+  tick();
+  return 0;
+}
+
+fn render_main(arg: cstring) -> uint32 provides Render {
+  draw();
+  return 0;
+}
+
+fn main() -> int32 {
+  var a: int64 = CreateThread(0, 0, &sim_main, 0, 0, 0);
+  var b: int64 = CreateThread(0, 0, &render_main, 0, 0, 0);
+  thread_join_infinite(a);
+  thread_join_infinite(b);
+  thread_close(a);
+  thread_close(b);
+  println("frame {g_frame}");
+  return 0;
+}

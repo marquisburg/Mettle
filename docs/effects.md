@@ -132,6 +132,55 @@ are the entry points, where nothing is provided: `main`, an `@interrupt` or
 `@naked` function, a `kernel`, a `@test`, and an exported function of a
 `--shared` library.
 
+## Two threads writing one global
+
+Once a program says where its code runs, it has already said which globals two
+threads share, and the compiler reads that rather than asking for it again. A
+global written by two functions whose requirements are disjoint is refused,
+naming both writers and the effect each one runs under:
+
+```mettle
+effect Sim;
+effect Render;
+
+var frame: int32 = 0;
+
+fn tick() requires Sim { frame = frame + 1; }
+fn draw() requires Render { frame = 0; }
+```
+
+```text
+error[F0006]: 'frame' is written by 'draw', which runs where 'Render' is
+provided, and by 'tick', which runs where 'Sim' is provided, and nothing
+either one needs orders the two writes
+```
+
+An effect both writers require is what orders them, because whoever provides
+it runs them one at a time. That is what a lock is, written as a requirement
+instead of a convention:
+
+```mettle
+effect FrameLock;
+
+fn tick() requires Sim, FrameLock { frame = frame + 1; }
+fn draw() requires Render, FrameLock { frame = 0; }
+```
+
+The claim is only ever made about effects a function somewhere `provides`. A
+program that declares none is not saying where its code runs, and this says
+nothing about it. `--report-effects` prints the ledger either way:
+
+```text
+shared frame: tick (Sim), draw (Render), ordered by an effect both require
+shared globals: 1 written from more than one place, 1 ordered
+```
+
+The verdict rests on the placement facts and nothing else, and those are what
+`mettle test` and `--check-effects` re-check at run time, so a program that
+lied about where a function runs is caught by the machine rather than by the
+analysis that drew this conclusion from it. The check itself emits no code: a
+build with it and a build with it skipped are byte-identical.
+
 ## Function types
 
 A function type may carry `with` and `requires`:

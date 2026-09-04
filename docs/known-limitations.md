@@ -107,6 +107,18 @@ named, and does not see the predicate itself.
 
 ## Effects
 
+A global written from two places is checked against the effects each writer
+needs. A heap object is not: two functions reaching the same allocation
+through pointers is the aliasing question, and the analysis does not answer
+it, so `F0006` speaks about globals only.
+
+The check needs both writers to need an effect something `provides`. One
+writer with no placed requirement means the program has not said where that
+code runs, and nothing is claimed. Any effect appearing in both requirement
+sets counts as the thing that orders them, because whoever provides it runs
+them one at a time; the compiler does not ask whether that effect is a lock,
+a phase or an initialised subsystem.
+
 A function type with no `with` clause is open, so a call through it performs
 `unknown`, and a function that `forbids` any effect cannot make one. Give the
 type a `with` clause; `with none` is the closed empty set.
