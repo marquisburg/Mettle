@@ -928,8 +928,9 @@ only where proven.
   handed to a task (M0121, M0122) and re-asking the question at run time
   under `--check-tasks`. A frame is data the compiler reads: a `const` of
   `std/schedule`'s `Schedule` names each phase, its effect, its entry and its
-  thread, and the compiler generates the dispatchers and the `quiesce` at
-  every phase boundary. That is not an injected yield: the program wrote the
+  thread and whether the threads meet at its boundary, and the compiler
+  generates the dispatchers, the joins, and the `quiesce` at every phase
+  boundary; a dispatcher runs for as many frames as its argument says. That is not an injected yield: the program wrote the
   order, and `mettle expand` prints what came out as ordinary Mettle. Time
   joined the list of things a program can declare and the compiler proves:
   `where cycles < N` is costed from a model of the target, refused when the

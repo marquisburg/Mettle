@@ -30,7 +30,7 @@ fn step_world() {
 }
 
 fn main() -> int32 {
-  FRAME_thread_0(0);
+  FRAME_thread_0((cstring)1);
   println("input {g_input} world {g_world}");
   return 0;
 }

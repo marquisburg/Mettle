@@ -1,0 +1,41 @@
+// A frame where the two threads have to meet. The simulate phase ends with
+// `joins: true`, so every thread waits at that boundary before any of them
+// starts the next frame. The counter behind it only ever rises: a thread
+// arriving for frame g leaves it at g times the number of threads, so there
+// is nothing to reset and nothing to race over.
+//
+// Without the join, the presenter could read a world the simulator had not
+// finished writing for that frame. With it, the two totals agree every time.
+import "std/io";
+import "std/schedule";
+import "std/thread";
+
+effect Sim;
+effect Render;
+
+var g_world: int32 = 0;
+var g_seen: int32 = 0;
+var g_frames: int32 = 0;
+
+const FRAME: Schedule[2] = [
+  { phase: "simulate", effect: "Sim", entry: "step_world", thread: 1, joins: true },
+  { phase: "present", effect: "Render", entry: "draw_world", thread: 0, joins: true },
+];
+
+fn step_world() {
+  g_world = g_world + 1;
+}
+
+fn draw_world() {
+  g_seen = g_seen + g_world;
+  g_frames = g_frames + 1;
+}
+
+fn main() -> int32 {
+  var worker: int64 = CreateThread(0, 0, &FRAME_thread_1, (cstring)4, 0, 0);
+  FRAME_thread_0((cstring)4);
+  thread_join_infinite(worker);
+  thread_close(worker);
+  println("world {g_world} seen {g_seen} frames {g_frames}");
+  return 0;
+}

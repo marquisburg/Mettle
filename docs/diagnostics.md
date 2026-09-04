@@ -182,6 +182,7 @@ Schedules:
 | H0004 | A schedule names an entry nothing declares |
 | H0005 | A schedule is a `var` |
 | H0006 | The dispatcher generated from a schedule did not parse |
+| H0007 | A phase joins the threads and there is nothing to build it out of |
 
 [The runtime model](runtime-model.md) covers the H codes in context.
 

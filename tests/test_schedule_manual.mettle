@@ -26,8 +26,8 @@ fn draw_world() {
 }
 
 fn main() -> int32 {
-  var worker: int64 = CreateThread(0, 0, &FRAME_thread_1, 0, 0, 0);
-  FRAME_thread_0(0);
+  var worker: int64 = CreateThread(0, 0, &FRAME_thread_1, (cstring)1, 0, 0);
+  FRAME_thread_0((cstring)1);
   thread_join_infinite(worker);
   thread_close(worker);
   println("input {g_input} world {g_world} drawn {g_drawn}");
@@ -39,15 +39,25 @@ fn FRAME_phase_sim() provides Sim { step_world(); }
 fn FRAME_phase_render() provides Render { draw_world(); }
 
 fn FRAME_thread_0(arg: cstring) -> uint32 {
-  FRAME_phase_input();
-  quiesce;
-  FRAME_phase_render();
-  quiesce;
+  var frames: int32 = (int32)(int64)arg;
+  var frame: int32 = 0;
+  while (frame < frames) {
+    FRAME_phase_input();
+    quiesce;
+    FRAME_phase_render();
+    quiesce;
+    frame = frame + 1;
+  }
   return 0;
 }
 
 fn FRAME_thread_1(arg: cstring) -> uint32 {
-  FRAME_phase_sim();
-  quiesce;
+  var frames: int32 = (int32)(int64)arg;
+  var frame: int32 = 0;
+  while (frame < frames) {
+    FRAME_phase_sim();
+    quiesce;
+    frame = frame + 1;
+  }
   return 0;
 }

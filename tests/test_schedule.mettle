@@ -35,8 +35,8 @@ fn draw_world() {
 }
 
 fn main() -> int32 {
-  var worker: int64 = CreateThread(0, 0, &FRAME_thread_1, 0, 0, 0);
-  FRAME_thread_0(0);
+  var worker: int64 = CreateThread(0, 0, &FRAME_thread_1, (cstring)1, 0, 0);
+  FRAME_thread_0((cstring)1);
   thread_join_infinite(worker);
   thread_close(worker);
   println("input {g_input} world {g_world} drawn {g_drawn}");

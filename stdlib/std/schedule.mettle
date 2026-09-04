@@ -14,8 +14,14 @@
 //
 //   const FRAME: Schedule[2] = [
 //     { phase: "input", effect: "Input", entry: "read_input", thread: 0 },
-//     { phase: "sim", effect: "Sim", entry: "step_world", thread: 1 },
+//     { phase: "sim", effect: "Sim", entry: "step_world", thread: 1, joins: true },
 //   ];
+//
+// A dispatcher runs its thread's phases for as many frames as its argument
+// says, so `FRAME_thread_0((cstring)60)` runs sixty. A phase with
+// `joins: true` ends where every thread has to arrive before any of them
+// starts the next frame; the wait is built out of `std/thread`'s atomics, so
+// a schedule with one in it needs that module imported.
 //
 // `mettle expand` prints what was generated, as ordinary Mettle.
 
@@ -24,4 +30,5 @@ export struct Schedule {
   effect: string;
   entry: string;
   thread: int32;
+  joins: bool;
 }

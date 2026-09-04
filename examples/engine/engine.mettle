@@ -162,9 +162,9 @@ fn draw_world() requires Render {
 }
 
 fn main() -> int32 {
-  var worker: int64 = CreateThread(0, 0, &FRAME_thread_1, 0, 0, 0);
+  var worker: int64 = CreateThread(0, 0, &FRAME_thread_1, (cstring)1, 0, 0);
   mettle_swap_stage(&priority, &priority_v2);
-  FRAME_thread_0(0);
+  FRAME_thread_0((cstring)1);
   thread_join_infinite(worker);
   thread_close(worker);
   println("jobs {g_taken} of {g_pushed}, drawn {g_drawn}, frames {g_frames}");

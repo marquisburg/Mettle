@@ -137,16 +137,18 @@ that depends on the target. A phase's entry is named as a string and has to be
 a function of the same module; a function reached through an import is not
 found by that name.
 
-The generated dispatcher runs a thread's phases in the order the schedule
-lists them and returns. It does not loop, and it does not start the other
-threads: the program writes the loop it wants around `FRAME_thread_0(0)` and
-hands `&FRAME_thread_1` to whatever spawns threads, because a loop the
-compiler wrote would be control flow at a point nobody named.
+A dispatcher runs its thread's phases for as many frames as its argument
+says, so the loop count comes from the program and not from the compiler. It
+still does not start the other threads: the program hands `&FRAME_thread_1` to
+whatever spawns threads, because which threading interface to use is a choice
+the compiler does not make for anyone.
 
-`quiesce` lands between phases on the thread that reaches it. There is no
-barrier across threads: two dispatchers running at once reach their own phase
-boundaries independently, and a program that needs them to meet writes the
-join itself.
+A phase with `joins: true` ends where the threads meet. A phase without one
+does not, and two dispatchers running at once reach their own boundaries
+independently. The counter behind a join is an `int32`, so a program runs at
+most two billion frames divided by its thread count before it wraps. A join
+spins rather than sleeping, which is right for a frame boundary two threads
+reach at nearly the same time and wrong for one they reach minutes apart.
 
 ## Compile-time expansion
 

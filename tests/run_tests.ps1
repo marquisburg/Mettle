@@ -4917,6 +4917,29 @@ try {
 
   $out = & $CompilerPath explain H0002 2>&1 | Out-String
   if ($out -notmatch "One effect per phase") { throw "explain H0002 says nothing: $out" }
+  $exe = Join-Path $tmpDir "schedule_joins.exe"
+  $out = & $CompilerPath --build "tests/test_schedule_joins.mettle" -o $exe --report-expansion 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "a joining schedule was refused: $out" }
+  $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
+  if ($flat -notmatch "schedules: 1 read as data, 2 phases, 6 functions generated") { throw "the joins were not generated: $out" }
+  for ($k = 0; $k -lt 5; $k++) {
+    $run = & $exe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "the joining frame did not finish: $run" }
+    if ($run -notmatch "world 4 seen 10 frames 4") { throw "the threads did not meet every frame: $run" }
+  }
+
+  $ex = & $CompilerPath expand "tests/test_schedule_joins.mettle" 2>&1 | Out-String
+  if ($ex -notmatch "fn FRAME_wait_simulate") { throw "expand does not print the wait: $ex" }
+  if ($ex -notmatch "while \(\(frame < frames\)\)") { throw "expand does not print the frame loop: $ex" }
+  if ($ex -notmatch "FRAME_arrived_simulate") { throw "expand does not print the counter: $ex" }
+
+  $lonely = Join-Path $tmpDir "schedule_lonely.mettle"
+  $source = Get-Content "tests/test_schedule_joins.mettle" -Raw
+  Set-Content -Path $lonely -Value ($source -replace 'import "std/thread";', "") -Encoding UTF8
+  $out = & $CompilerPath --build $lonely -o (Join-Path $tmpDir "schedule_lonely.exe") 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { throw "a join was generated with nothing to build it out of" }
+  if ($out -notmatch "error\[H0007\]") { throw "the missing atomics were not reported: $out" }
+
   Write-CaseResult -Name "schedule_is_data_the_compiler_reads" -Passed $true
 }
 catch {

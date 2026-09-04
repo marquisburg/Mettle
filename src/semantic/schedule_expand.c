@@ -13,6 +13,7 @@ typedef struct {
   const char *effect;
   const char *entry;
   long long thread;
+  int barrier;
   SourceLocation location;
 } SchedulePhase;
 
@@ -72,6 +73,30 @@ static const char *literal_string(ASTNode *node) {
   }
   literal = (StringLiteral *)node->data;
   return literal ? literal->value : NULL;
+}
+
+static int literal_bool(ASTNode *node, int *out) {
+  long long number = 0;
+  const char *name = NULL;
+  if (node && node->type == AST_NUMBER_LITERAL && node->data &&
+      !((const NumberLiteral *)node->data)->is_float) {
+    *out = ((const NumberLiteral *)node->data)->int_value != 0;
+    return 1;
+  }
+  if (!node || node->type != AST_IDENTIFIER || !node->data) {
+    return 0;
+  }
+  name = ((const Identifier *)node->data)->name;
+  if (name && strcmp(name, "true") == 0) {
+    *out = 1;
+    return 1;
+  }
+  if (name && strcmp(name, "false") == 0) {
+    *out = 0;
+    return 1;
+  }
+  (void)number;
+  return 0;
 }
 
 static int literal_integer(ASTNode *node, long long *out) {
@@ -178,6 +203,13 @@ static int read_phase(ErrorReporter *reporter, ASTNode *row,
       out->entry = literal_string(value);
     } else if (strcmp(field, "thread") == 0) {
       literal_integer(value, &out->thread);
+    } else if (strcmp(field, "joins") == 0) {
+      if (!literal_bool(value, &out->barrier)) {
+        schedule_error(reporter, out->location, "H0001",
+                       "a joining phase is written `joins: true`",
+                       "the 'joins' of a phase is not true or false");
+        return 0;
+      }
     }
   }
   if (!out->phase || !*out->phase || !out->effect || !*out->effect ||
@@ -233,6 +265,16 @@ static int check_phases(ErrorReporter *reporter, const Program *program,
                      phases[i].phase, phases[i].effect);
       ok = 0;
     }
+    if (phases[i].barrier &&
+        !module_declares_function(program, "atomic_inc_i32")) {
+      schedule_error(reporter, phases[i].location, "H0007",
+                     "add `import \"std/thread\";` beside the schedule",
+                     "phase '%s' ends where the threads join, and a join is built "
+                     "out of std/thread's atomics, which this module does not "
+                     "import",
+                     phases[i].phase);
+      ok = 0;
+    }
     if (!module_declares_function(program, phases[i].entry)) {
       schedule_error(reporter, phases[i].location, "H0004",
                      "the entry is a function of this module, named as it was "
@@ -244,6 +286,35 @@ static int check_phases(ErrorReporter *reporter, const Program *program,
     }
   }
   return ok;
+}
+
+/* A phase that ends at a barrier gets a counter and a wait. Every thread
+ * calls the wait, whether or not it runs that phase, because a barrier the
+ * threads that skip the phase walk past is not one. The counter only ever
+ * rises: a thread arriving for frame g leaves the count at g times the number
+ * of threads, so there is no reset to race over and no sense bit to flip. */
+static int build_barrier(SourceBuffer *buffer, const char *schedule,
+                         const SchedulePhase *phase, long long threads,
+                         size_t *generated) {
+  if (!buffer_add(buffer, "var ") || !buffer_add(buffer, schedule) ||
+      !buffer_add(buffer, "_arrived_") || !buffer_add(buffer, phase->phase) ||
+      !buffer_add(buffer, ": volatile int32 = 0;\n")) {
+    return 0;
+  }
+  if (!buffer_add(buffer, "fn ") || !buffer_add(buffer, schedule) ||
+      !buffer_add(buffer, "_wait_") || !buffer_add(buffer, phase->phase) ||
+      !buffer_add(buffer, "(generation: int32) {\n  atomic_inc_i32(&") ||
+      !buffer_add(buffer, schedule) || !buffer_add(buffer, "_arrived_") ||
+      !buffer_add(buffer, phase->phase) ||
+      !buffer_add(buffer, ");\n  while (") || !buffer_add(buffer, schedule) ||
+      !buffer_add(buffer, "_arrived_") || !buffer_add(buffer, phase->phase) ||
+      !buffer_add(buffer, " < generation * ") ||
+      !buffer_add_index(buffer, threads) ||
+      !buffer_add(buffer, ") { }\n}\n")) {
+    return 0;
+  }
+  (*generated)++;
+  return 1;
 }
 
 static int build_source(SourceBuffer *buffer, const char *schedule,
@@ -258,25 +329,39 @@ static int build_source(SourceBuffer *buffer, const char *schedule,
       return 0;
     }
     (*generated)++;
+    if (phases[i].barrier &&
+        !build_barrier(buffer, schedule, &phases[i], threads, generated)) {
+      return 0;
+    }
   }
   for (long long thread = 0; thread < threads; thread++) {
     if (!buffer_add(buffer, "fn ") || !buffer_add(buffer, schedule) ||
         !buffer_add(buffer, "_thread_") || !buffer_add_index(buffer, thread) ||
-        !buffer_add(buffer, "(arg: cstring) -> uint32 {\n")) {
+        !buffer_add(buffer, "(arg: cstring) -> uint32 {\n") ||
+        !buffer_add(buffer, "  var frames: int32 = (int32)(int64)arg;\n") ||
+        !buffer_add(buffer, "  var frame: int32 = 0;\n") ||
+        !buffer_add(buffer, "  while (frame < frames) {\n")) {
       return 0;
     }
     for (size_t i = 0; i < count; i++) {
-      if (phases[i].thread != thread) {
-        continue;
+      if (phases[i].thread == thread) {
+        if (!buffer_add(buffer, "    ") || !buffer_add(buffer, schedule) ||
+            !buffer_add(buffer, "_phase_") ||
+            !buffer_add(buffer, phases[i].phase) ||
+            !buffer_add(buffer, "();\n    quiesce;\n")) {
+          return 0;
+        }
       }
-      if (!buffer_add(buffer, "  ") || !buffer_add(buffer, schedule) ||
-          !buffer_add(buffer, "_phase_") ||
-          !buffer_add(buffer, phases[i].phase) ||
-          !buffer_add(buffer, "();\n  quiesce;\n")) {
-        return 0;
+      if (phases[i].barrier) {
+        if (!buffer_add(buffer, "    ") || !buffer_add(buffer, schedule) ||
+            !buffer_add(buffer, "_wait_") ||
+            !buffer_add(buffer, phases[i].phase) ||
+            !buffer_add(buffer, "(frame + 1);\n")) {
+          return 0;
+        }
       }
     }
-    if (!buffer_add(buffer, "  return 0;\n}\n")) {
+    if (!buffer_add(buffer, "    frame = frame + 1;\n  }\n  return 0;\n}\n")) {
       return 0;
     }
     (*generated)++;

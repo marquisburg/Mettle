@@ -585,6 +585,18 @@ static const ErrorCodeDoc DOCS[] = {
      "A schedule is read while compiling, so it has to be a `const`. A `var`\n"
      "can change while the program runs, and the dispatcher was generated\n"
      "before it started.\n"},
+    {"H0007", "A phase joins the threads and there is nothing to build it out of",
+     "`joins: true` on a phase says every thread waits at that phase's\n"
+     "boundary before any of them starts the next frame. The wait is\n"
+     "generated out of `std/thread`'s atomics, so the module has to import\n"
+     "them.\n"
+     "\n"
+     "Fix: `import \"std/thread\";` beside the schedule.\n"
+     "\n"
+     "The counter behind a join only ever rises: a thread arriving for frame\n"
+     "g leaves it at g times the number of threads, so there is nothing to\n"
+     "reset and nothing to race over. It is `volatile`, so the spin reads\n"
+     "memory every time round.\n"},
     {"H0006", "The dispatcher generated from a schedule did not parse",
      "This is a compiler fault rather than a program's. The generated\n"
      "dispatcher is ordinary Mettle and `mettle expand` prints it; if that\n"

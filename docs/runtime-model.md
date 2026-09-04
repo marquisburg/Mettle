@@ -251,19 +251,34 @@ fn FRAME_phase_sim() provides Sim { step_world(); }
 fn FRAME_phase_render() provides Render { draw_world(); }
 
 fn FRAME_thread_0(arg: cstring) -> uint32 {
-  FRAME_phase_input();
-  quiesce;
-  FRAME_phase_render();
-  quiesce;
+  var frames: int32 = (int32)(int64)arg;
+  var frame: int32 = 0;
+  while (frame < frames) {
+    FRAME_phase_input();
+    quiesce;
+    FRAME_phase_render();
+    quiesce;
+    frame = frame + 1;
+  }
   return 0;
 }
 
 fn FRAME_thread_1(arg: cstring) -> uint32 {
-  FRAME_phase_sim();
-  quiesce;
+  var frames: int32 = (int32)(int64)arg;
+  var frame: int32 = 0;
+  while (frame < frames) {
+    FRAME_phase_sim();
+    quiesce;
+    frame = frame + 1;
+  }
   return 0;
 }
 ```
+
+A dispatcher runs for as many frames as its argument says, which is why the
+loop is not control flow at a point nobody wrote: the count came from the
+call. `FRAME_thread_0((cstring)60)` runs sixty frames and
+`FRAME_thread_0((cstring)1)` runs one.
 
 That is what `mettle expand` prints, and it is ordinary Mettle: the type
 checker, the borrow analyser and every contract meet it exactly as they meet
@@ -277,10 +292,42 @@ entry point takes, so the program starts the others itself and keeps the
 handles:
 
 ```mettle
-var worker: int64 = CreateThread(0, 0, &FRAME_thread_1, 0, 0, 0);
-FRAME_thread_0(0);
+var worker: int64 = CreateThread(0, 0, &FRAME_thread_1, (cstring)60, 0, 0);
+FRAME_thread_0((cstring)60);
 thread_join_infinite(worker);
 ```
+
+## Where the threads meet
+
+A phase may end where every thread has to arrive before any of them starts the
+next frame:
+
+```mettle
+const FRAME: Schedule[2] = [
+  { phase: "simulate", effect: "Sim", entry: "step_world", thread: 1, joins: true },
+  { phase: "present", effect: "Render", entry: "draw_world", thread: 0, joins: true },
+];
+```
+
+Every thread calls the wait, whether or not it runs that phase, because a
+barrier the threads that skip the phase walk past is not one. The counter
+behind it only ever rises: a thread arriving for frame `g` leaves the count at
+`g` times the number of threads, so there is nothing to reset and nothing to
+race over, and it is `volatile`, so the spin reads memory every time round.
+
+```mettle
+var FRAME_arrived_simulate: volatile int32 = 0;
+
+fn FRAME_wait_simulate(generation: int32) {
+  atomic_inc_i32(&FRAME_arrived_simulate);
+  while (FRAME_arrived_simulate < generation * 2) { }
+}
+```
+
+That comes out of `std/thread`, so a schedule with a join in it needs the
+module to import one; `H0007` says so when it does not. A schedule with no
+`joins` generates none of this and the threads run independently, which is
+what the shape without a join means.
 
 Because each wrapper provides its own phase's effect and no other, a call that
 crosses a phase boundary arrives somewhere its requirement is not provided,

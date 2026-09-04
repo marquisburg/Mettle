@@ -305,7 +305,7 @@ interpreter. `mettle machine <file>` prints the description and
 ## std/schedule
 
 One type, `Schedule`, and a `const` of it is a frame written down: `phase`,
-`effect`, `entry` and `thread` per row. The compiler reads the const, checks
+`effect`, `entry`, `thread` and `joins` per row. The compiler reads the const, checks
 it, and generates one wrapper per phase and one dispatcher per thread with a
 `quiesce` at every phase boundary. Because a wrapper provides only its own
 phase's effect, a call across a phase boundary is refused by the effect pass.
