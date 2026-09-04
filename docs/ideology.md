@@ -909,8 +909,11 @@ only where proven.
   `float_predicates_bound_reassociation` and `declared_types_refine_structs`.
   A declared range now deletes a signed overflow check under
   `--check-overflow`, and a program whose every signed operation is proven
-  compiles to the same bytes with the flag as without. Gapped, and written
-  into known-limitations.md: two pointers cannot be declared disjoint.
+  compiles to the same bytes with the flag as without. Where a vectorizer
+  needed two regions to be distinct it keeps the loop and emits an overlap
+  test, and a proof deletes that test. Two pointers still cannot be declared
+  disjoint, and are not going to be: a declaration the compiler acts on and
+  cannot check is a proof, annotated, which I.4 refuses.
 - ~~An execution model.~~ *(V.6)* Landed as a position and a worked shape:
   the model is the program's, `quiesce` is its point, and its properties are
   a contract, a declared type, effects and rules that hold on every build.

@@ -2349,7 +2349,9 @@ static int ir_msf_body_is_safe(IRFunction *function, size_t lo, size_t hi,
 static int ir_msf_build_store(IRFunction *function, size_t store_index,
                               const char *iv_symbol, size_t body_lo,
                               size_t body_hi, const IROperand *bound,
-                              IRInstruction *fused, const char **dst_base_out) {
+                              IRInstruction *fused, const char **dst_base_out,
+                              const char **reads_out, int *reads_count_out,
+                              int *elem_bytes_out) {
   const IRInstruction *store = &function->instructions[store_index];
   const char *dst_base = NULL;
   int store_bits = 0;
@@ -2398,6 +2400,215 @@ static int ir_msf_build_store(IRFunction *function, size_t store_index,
     return 0;
   }
   *dst_base_out = dst_base;
+  if (reads_out && reads_count_out) {
+    int n = d.n_arrays < VLOOP_MAX_ARRAYS ? d.n_arrays : VLOOP_MAX_ARRAYS;
+    for (int i = 0; i < n; i++) {
+      reads_out[i] = d.arrays[i];
+    }
+    *reads_count_out = n;
+  }
+  if (elem_bytes_out) {
+    *elem_bytes_out = store_bits / 8;
+  }
+  return 1;
+}
+
+/* -------------------------------------------------------------------------- */
+/* A run-time overlap test, so a proof can be what removes one                  */
+/*                                                                              */
+/* Fission turns K stores in one loop into K full-length kernels, which is only  */
+/* the same program when the regions they touch do not overlap. Where the        */
+/* compiler can prove that, nothing is emitted. Where it cannot, the loop is     */
+/* kept and a test is emitted in front of it: disjoint takes the kernels, and    */
+/* anything else falls into the loop that was already there. That is what makes  */
+/* a disjointness proof worth having -- it deletes a test rather than deciding   */
+/* whether the optimization happens at all.                                      */
+/* -------------------------------------------------------------------------- */
+
+#define MSF_GUARD_MAX_REGIONS (MULTISTORE_MAX + VLOOP_MAX_ARRAYS * MULTISTORE_MAX)
+
+typedef struct {
+  IRInstruction items[256];
+  size_t count;
+  int failed;
+} MsfGuard;
+
+static IROperand msf_temp(IRFunction *function, MsfGuard *g) {
+  IROperand out = ir_operand_none();
+  char name[64];
+  static unsigned long long counter;
+  (void)function;
+  snprintf(name, sizeof(name), ".ovl%llu", counter++);
+  out = ir_operand_temp(name);
+  if (!out.name) {
+    g->failed = 1;
+  }
+  return out;
+}
+
+static void msf_emit(MsfGuard *g, IROpcode op, const IROperand *dest,
+                     const IROperand *lhs, const IROperand *rhs,
+                     const char *text, SourceLocation location) {
+  IRInstruction *insn;
+  if (g->failed || g->count >= sizeof(g->items) / sizeof(g->items[0])) {
+    g->failed = 1;
+    return;
+  }
+  insn = &g->items[g->count++];
+  memset(insn, 0, sizeof(*insn));
+  insn->op = op;
+  insn->location = location;
+  if (dest) {
+    insn->dest = *dest;
+  }
+  if (lhs) {
+    insn->lhs = *lhs;
+  }
+  if (rhs) {
+    insn->rhs = *rhs;
+  }
+  insn->text = (char *)text;
+}
+
+/* `base + count * bytes`, the one-past-the-end address of what a kernel over
+ * `base` touches. */
+static IROperand msf_region_end(IRFunction *function, MsfGuard *g,
+                                const char *base, const IROperand *bound,
+                                int bytes, SourceLocation location) {
+  IROperand span = msf_temp(function, g);
+  IROperand end = msf_temp(function, g);
+  IROperand base_operand = ir_operand_symbol(base);
+  IROperand width = ir_operand_int(bytes);
+  IROperand copy_of_bound;
+  if (!ir_operand_clone(bound, &copy_of_bound)) {
+    g->failed = 1;
+    return end;
+  }
+  msf_emit(g, IR_OP_BINARY, &span, &copy_of_bound, &width, "*", location);
+  msf_emit(g, IR_OP_BINARY, &end, &base_operand, &span, "+", location);
+  return end;
+}
+
+/* `p + span_p <= q || q + span_q <= p`: the two regions do not touch. */
+static IROperand msf_pair_disjoint(IRFunction *function, MsfGuard *g,
+                                   const char *p, int p_bytes, const char *q,
+                                   int q_bytes, const IROperand *bound,
+                                   SourceLocation location) {
+  IROperand p_end = msf_region_end(function, g, p, bound, p_bytes, location);
+  IROperand q_end = msf_region_end(function, g, q, bound, q_bytes, location);
+  IROperand p_symbol = ir_operand_symbol(p);
+  IROperand q_symbol = ir_operand_symbol(q);
+  IROperand before = msf_temp(function, g);
+  IROperand after = msf_temp(function, g);
+  IROperand either = msf_temp(function, g);
+  msf_emit(g, IR_OP_BINARY, &before, &p_end, &q_symbol, "<=", location);
+  msf_emit(g, IR_OP_BINARY, &after, &q_end, &p_symbol, "<=", location);
+  msf_emit(g, IR_OP_BINARY, &either, &before, &after, "|", location);
+  return either;
+}
+
+/* Put the kernels in front of the loop behind a test, and leave the loop where
+ * it was. Disjoint takes the kernels and jumps past the loop; anything else
+ * falls through into the loop that was already there, which is the program
+ * this pass started with. Two regions only have to be tested against each
+ * other when at least one of them is written: two readers cannot disagree. */
+static int ir_msf_guard_and_version(IRFunction *function, size_t header_index,
+                                    size_t jump_index,
+                                    IRInstruction *fused, int ns,
+                                    const char **regions,
+                                    const int *region_bytes,
+                                    const int *region_writes, int n_regions,
+                                    const IROperand *bound) {
+  MsfGuard g;
+  IROperand disjoint = ir_operand_none();
+  const char *header_label = NULL;
+  const char *end_label = NULL;
+  SourceLocation location;
+  size_t at;
+  int pairs = 0;
+
+  if (n_regions < 2 || ns <= 0) {
+    return 0;
+  }
+  if (function->instructions[header_index].op != IR_OP_LABEL ||
+      !function->instructions[header_index].text) {
+    return 0;
+  }
+  header_label = function->instructions[header_index].text;
+  if (jump_index + 1 >= function->instruction_count ||
+      function->instructions[jump_index + 1].op != IR_OP_LABEL ||
+      !function->instructions[jump_index + 1].text) {
+    return 0;
+  }
+  end_label = function->instructions[jump_index + 1].text;
+  location = function->instructions[header_index].location;
+  for (int i = 0; i < n_regions; i++) {
+    if (!regions[i] || region_bytes[i] <= 0) {
+      return 0;
+    }
+    /* A region the guard cannot name is one the guard cannot test. */
+    if (ir_symbol_address_taken(function, regions[i])) {
+      return 0;
+    }
+  }
+
+  memset(&g, 0, sizeof(g));
+  for (int i = 0; i < n_regions && !g.failed; i++) {
+    for (int j = i + 1; j < n_regions && !g.failed; j++) {
+      IROperand pair;
+      if (!region_writes[i] && !region_writes[j]) {
+        continue;
+      }
+      if (strcmp(regions[i], regions[j]) == 0) {
+        /* One name reached from two kernels is one region, and a kernel over
+         * it in two passes is not the loop that interleaved them. */
+        return 0;
+      }
+      pair = msf_pair_disjoint(function, &g, regions[i], region_bytes[i],
+                               regions[j], region_bytes[j], bound, location);
+      if (pairs == 0) {
+        disjoint = pair;
+      } else {
+        IROperand both = msf_temp(function, &g);
+        msf_emit(&g, IR_OP_BINARY, &both, &disjoint, &pair, "&", location);
+        disjoint = both;
+      }
+      pairs++;
+    }
+  }
+  if (g.failed || pairs == 0) {
+    return 0;
+  }
+  msf_emit(&g, IR_OP_BRANCH_ZERO, NULL, &disjoint, NULL, header_label,
+           location);
+  if (g.failed) {
+    return 0;
+  }
+
+  at = header_index;
+  for (size_t i = 0; i < g.count; i++) {
+    if (!ir_function_insert_instruction(function, at, &g.items[i])) {
+      return 0;
+    }
+    at++;
+  }
+  for (int k = 0; k < ns; k++) {
+    if (!ir_function_insert_instruction(function, at, &fused[k])) {
+      return 0;
+    }
+    ir_instruction_destroy_storage(&fused[k]);
+    at++;
+  }
+  {
+    IRInstruction skip;
+    memset(&skip, 0, sizeof(skip));
+    skip.op = IR_OP_JUMP;
+    skip.location = location;
+    skip.text = (char *)end_label;
+    if (!ir_function_insert_instruction(function, at, &skip)) {
+      return 0;
+    }
+  }
   return 1;
 }
 
@@ -2412,6 +2623,10 @@ static int ir_try_vectorize_multistore_map_at(IRFunction *function,
   int ns = 0;
   IRInstruction fused[MULTISTORE_MAX];
   const char *bases[MULTISTORE_MAX];
+  const char *regions[MSF_GUARD_MAX_REGIONS];
+  int region_bytes[MSF_GUARD_MAX_REGIONS];
+  int region_writes[MSF_GUARD_MAX_REGIONS];
+  int n_regions = 0;
   int built = 0;
 
   if (!ir_float_reduction_frame(function, header_index, &iv_symbol,
@@ -2434,26 +2649,80 @@ static int ir_try_vectorize_multistore_map_at(IRFunction *function,
     return 1;
   }
   for (built = 0; built < ns; built++) {
+    const char *reads[VLOOP_MAX_ARRAYS];
+    int n_reads = 0;
+    int bytes = 0;
     if (!ir_msf_build_store(function, stores[built], iv_symbol,
                             branch_index + 1, jump_index, &bound, &fused[built],
-                            &bases[built])) {
+                            &bases[built], reads, &n_reads, &bytes)) {
       for (int k = 0; k < built; k++) ir_instruction_destroy_storage(&fused[k]);
       ir_operand_destroy(&bound);
       return 1;
     }
+    if (n_regions < MSF_GUARD_MAX_REGIONS) {
+      regions[n_regions] = bases[built];
+      region_bytes[n_regions] = bytes;
+      region_writes[n_regions] = 1;
+      n_regions++;
+    }
+    for (int r = 0; r < n_reads && n_regions < MSF_GUARD_MAX_REGIONS; r++) {
+      int seen = 0;
+      for (int q = 0; q < n_regions; q++) {
+        if (regions[q] && reads[r] && strcmp(regions[q], reads[r]) == 0) {
+          seen = 1;
+          break;
+        }
+      }
+      if (seen || !reads[r]) {
+        continue;
+      }
+      regions[n_regions] = reads[r];
+      region_bytes[n_regions] = bytes;
+      region_writes[n_regions] = 0;
+      n_regions++;
+    }
   }
-  if (!ir_msf_bases_disjoint(function, bases, ns)) {
+  if (ir_msf_bases_disjoint(function, bases, ns)) {
+    if (ir_explain_enabled()) {
+      ir_explain_remark(function->name, "loop body",
+                        function->instructions[header_index].location, 0,
+                        "vectorized",
+                        "each destination is a fresh allocation nothing else "
+                        "names, so the regions cannot overlap and no run-time "
+                        "overlap test was emitted",
+                        NULL, NULL);
+      ir_explain_remark_code("multistore-disjoint-proven");
+    }
+    /* Commit: one full-count store-kernel per destination, then NOP the loop. */
+    for (int k = 0; k < ns; k++) {
+      ir_instruction_destroy_storage(&function->instructions[header_index + k]);
+      function->instructions[header_index + k] = fused[k];
+    }
+    for (size_t i = header_index + ns; i <= jump_index; i++) {
+      ir_instruction_make_nop(&function->instructions[i]);
+    }
+    ir_operand_destroy(&bound);
+    *changed = 1;
+    return 1;
+  }
+  if (!ir_msf_guard_and_version(function, header_index, jump_index, fused, ns,
+                                regions, region_bytes, region_writes,
+                                n_regions, &bound)) {
     for (int k = 0; k < ns; k++) ir_instruction_destroy_storage(&fused[k]);
     ir_operand_destroy(&bound);
     return 1;
   }
-  /* Commit: one full-count store-kernel per destination, then NOP the loop. */
-  for (int k = 0; k < ns; k++) {
-    ir_instruction_destroy_storage(&function->instructions[header_index + k]);
-    function->instructions[header_index + k] = fused[k];
-  }
-  for (size_t i = header_index + ns; i <= jump_index; i++) {
-    ir_instruction_make_nop(&function->instructions[i]);
+  if (ir_explain_enabled()) {
+    ir_explain_remark(function->name, "loop body",
+                      function->instructions[header_index].location, 0,
+                      "vectorized under a run-time overlap test",
+                      "nothing here proves the regions are distinct, so the "
+                      "loop was kept and a test put in front of it: disjoint "
+                      "takes the kernels, anything else takes the loop. A "
+                      "proof that the regions cannot overlap would delete the "
+                      "test",
+                      NULL, NULL);
+    ir_explain_remark_code("multistore-overlap-tested");
   }
   ir_operand_destroy(&bound);
   *changed = 1;

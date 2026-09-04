@@ -312,6 +312,11 @@ stays scalar. The same clamp over `int32` vectorizes.
 A reduction over a byte array needs a 64-bit accumulator. An `int32`
 accumulator summing bytes is reported rather than vectorized.
 
+Multi-store fission over regions it cannot prove distinct keeps the loop and
+puts a run-time overlap test in front of the kernels, so the function holds
+both versions and is that much larger. The test itself is a handful of
+compares before the loop, not per iteration.
+
 Depth is bounded by registers. An int32 map has six ymm registers for its
 expression, and a deeper one falls back.
 
@@ -428,10 +433,20 @@ a shift past the width and a divide by a variable zero are what they were.
 Without the flag, signed arithmetic wraps, which is the language's own rule
 and not an omission.
 
-Two pointers cannot be declared disjoint, so a vectorizer that refuses over a
-possible overlap cannot be given a proof to proceed on; it refuses rather than
-emitting a run-time overlap test, so there is no test for a proof to remove
-either.
+Two pointers cannot be declared disjoint, and they are not going to be: a
+declaration the compiler acts on and cannot check is a proof, annotated, which
+I.4 refuses. What the compiler does instead is emit a test. Where multi-store
+fission cannot prove the regions distinct, the loop is kept and a run-time
+overlap test is put in front of the kernels; where it can, no test is emitted
+at all. So a proof deletes a test rather than deciding whether the
+optimization happens.
+
+The test is only in the multi-store fission path, which is the one place a
+vectorizer here needed the regions to be distinct. It compares addresses with
+a signed compare, which is exact for every address a user-space program on
+either supported platform can hold. A pair of regions where one name is
+reached from two kernels is refused rather than tested, because two kernels
+over one region are not the loop that interleaved them.
 
 A float accumulator carries a declared bound only where the compiler bounded
 the loop's trip count: a counter with a constant initialiser, a constant step,

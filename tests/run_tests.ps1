@@ -4677,6 +4677,51 @@ catch {
   Write-CaseResult -Name "engine_example" -Passed $false -Reason $_.Exception.Message
 }
 
+# A vectorizer that refuses over a possible overlap now emits a test instead,
+# and a proof is what deletes the test. Enforce: the loop over pointers it was
+# handed carries a run-time overlap test, the same loop over allocations the
+# function made itself carries none and gets the kernels, both answers are the
+# ones the program wrote, and a call whose regions overlap by one element gets
+# the interleaved answer rather than the fissioned one.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $exe = Join-Path $tmpDir "overlap_versioned.exe"
+  $out = & $CompilerPath --build "tests/test_overlap_versioned.mettle" -o $exe --release 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the versioned build failed: $out" }
+  $run = & $exe 2>&1 | Out-String
+  if ($run -notmatch "apart 6\.0 4\.0") { throw "the disjoint call gave the wrong answer: $run" }
+  if ($run -notmatch "local 10\.0") { throw "the proven call gave the wrong answer: $run" }
+  if ($run -notmatch "shifted 2\.0 4\.0 6\.0 8\.0") { throw "an overlapping call took the fissioned path: $run" }
+
+  $plain = Join-Path $tmpDir "overlap_plain.exe"
+  $out = & $CompilerPath --build "tests/test_overlap_versioned.mettle" -o $plain 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the unoptimized build failed: $out" }
+  $reference = & $plain 2>&1 | Out-String
+  if ($reference -ne $run) { throw "the vectorized program and the plain one disagree:`n$run`n$reference" }
+
+  $obj = Join-Path $tmpDir "overlap_versioned.obj"
+  $out = & $CompilerPath --dump-ir "tests/test_overlap_versioned.mettle" -o $obj --release 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the IR dump failed: $out" }
+  $ir = Get-Content ($obj + ".ir") -Raw
+  $handed = [regex]::Match($ir, "(?ms)^function fill \{.*?^\}").Value
+  $owned = [regex]::Match($ir, "(?ms)^function local_fill \{.*?^\}").Value
+  if (-not $handed) { throw "the IR has no 'fill'" }
+  if (-not $owned) { throw "the IR has no 'local_fill'" }
+  if ($handed -notmatch "\.ovl") { throw "the loop over pointers it was handed carries no overlap test" }
+  if ($owned -match "\.ovl") { throw "a proof did not delete the overlap test" }
+  if (($owned -split "simd_vloop").Count -lt 3) { throw "the proven loop did not become kernels" }
+
+  $out = & $CompilerPath --build "tests/test_overlap_versioned.mettle" -o (Join-Path $tmpDir "overlap_verified.exe") --release --verify 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "--verify did not hold over the versioned loop: $out" }
+  if ($out -notmatch "translation validation: OK") { throw "--verify said nothing: $out" }
+  Write-CaseResult -Name "a_proof_deletes_an_overlap_test" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "a_proof_deletes_an_overlap_test" -Passed $false -Reason $_.Exception.Message
+}
+
 # Signed arithmetic that does not fit, and the ranges that say it will.
 # Enforce: --check-overflow traps on a signed add, subtract and multiply that
 # leave the type, a declared type that bounds the operands deletes the check

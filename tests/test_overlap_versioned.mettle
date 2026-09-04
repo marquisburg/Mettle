@@ -1,0 +1,58 @@
+// The same loop twice: once where the compiler can prove the two destinations
+// are distinct, and once where it cannot.
+//
+// `local_fill` writes two allocations it made itself, so nothing can alias
+// them and the two kernels run with no test in front of them. `fill` takes
+// two pointers it was handed, and nothing here says they are distinct, so the
+// loop is kept and a test is put in front of it: disjoint takes the kernels,
+// anything else takes the loop. A proof is what deletes the test.
+//
+// The last call hands `fill` two regions that overlap by one element, where
+// running the stores in the order the program wrote gives a different answer
+// from running them one destination at a time. Getting the written answer is
+// what says the test is doing its job.
+import "std/io";
+import "std/mem";
+
+@noinline fn fill(a: float64*, b: float64*, n: int64) {
+  var i: int64 = 0;
+  while (i < n) {
+    a[i] = (float64)i * 2.0;
+    b[i] = (float64)i + 1.0;
+    i = i + 1;
+  }
+}
+
+@noinline fn local_fill(n: int64) -> float64 {
+  var a: float64* = (float64*)malloc(8 * 64);
+  var b: float64* = (float64*)malloc(8 * 64);
+  var i: int64 = 0;
+  while (i < n) {
+    a[i] = (float64)i * 2.0;
+    b[i] = (float64)i + 1.0;
+    i = i + 1;
+  }
+  var answer: float64 = a[3] + b[3];
+  free(a);
+  free(b);
+  return answer;
+}
+
+fn main() -> int32 {
+  var p: float64* = (float64*)malloc(8 * 64);
+  var q: float64* = (float64*)malloc(8 * 64);
+  fill(p, q, 8);
+  println("apart {p[3]} {q[3]}");
+  println("local {local_fill(8)}");
+
+  var buf: float64* = (float64*)malloc(8 * 64);
+  var i: int64 = 0;
+  while (i < 64) { buf[i] = 0.0; i = i + 1; }
+  fill(buf, &buf[1], 8);
+  println("shifted {buf[1]} {buf[2]} {buf[3]} {buf[8]}");
+
+  free(p);
+  free(q);
+  free(buf);
+  return 0;
+}
