@@ -197,6 +197,26 @@ static int mir_global_is_volatile(CodeGenerator *g, const char *name) {
   return s && s->is_volatile;
 }
 
+/* True if `op` names a local or parameter of pointer-to-bytes type, the one
+ * destination a bare string literal may be assigned to by address: the value
+ * IS the address of the literal's NUL-terminated .rdata copy. A `string`
+ * destination is a 16-byte record and takes the struct-home path instead, so
+ * this never truncates one to its data pointer. */
+static MtlcType *mir_local_or_param_type(CodeGenerator *g,
+                                         const IRFunction *ir_function,
+                                         const char *name, int *is_param_out);
+
+static int mir_operand_is_cstring_home(CodeGenerator *g,
+                                       const IRFunction *ir_function,
+                                       const IROperand *op) {
+  if (!op || !op->name ||
+      (op->kind != IR_OPERAND_SYMBOL && op->kind != IR_OPERAND_TEMP)) {
+    return 0;
+  }
+  return code_generator_binary_type_is_cstring(
+      mir_local_or_param_type(g, ir_function, op->name, NULL));
+}
+
 /* True if `name` resolves to a read-accessible global scalar, a value we can
  * cache in a register at function entry (used by both the eligibility gate and
  * the entry-load emitter, so they agree exactly on what counts as cacheable). */
@@ -1730,6 +1750,10 @@ static int mir_gate_value(CodeGenerator *generator,
       if (in->lhs.kind == IR_OPERAND_STRING &&
           mir_operand_struct_home_size(generator, ir_function, &in->dest) >
               0) {
+        break;
+      }
+      if (in->lhs.kind == IR_OPERAND_STRING &&
+          mir_operand_is_cstring_home(generator, ir_function, &in->dest)) {
         break;
       }
       return mir_trace_bail(ir_function, mir_bail_kind("assign:operand_kind", in->lhs.kind));
@@ -4175,6 +4199,11 @@ static int mir_lower_assign(MirFunction *fn, CodeGenerator *g,
         return mir_emit1(fn, MIR_CVTF2F, dst, src, mir_op_none(), dfb / 8, 0, 0);
       }
       return mir_emit_fmov(fn, dst, src, dfb / 8);
+    }
+    if (in->lhs.kind == IR_OPERAND_STRING) {
+      const char *lit = in->lhs.name ? in->lhs.name : "";
+      return mir_emit1(fn, MIR_LEA_CSTR, dst, mir_op_symbol(lit),
+                       mir_op_none(), 8, 0, 0);
     }
     MirOperand src = mir_value_operand(fn, g, ctx, map, &in->lhs);
     return mir_emit1(fn, MIR_MOV, dst, src, mir_op_none(), 8, 0, 0);
