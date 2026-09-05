@@ -34,7 +34,8 @@ int binary_function_local_is_safety_described(const IRFunction *function,
   for (size_t i = 0; i < function->instruction_count; i++) {
     const IRInstruction *call = &function->instructions[i];
     if (call->op != IR_OP_CALL || !call->text || call->argument_count == 0 ||
-        strcmp(call->text, "mettle_safety_register") != 0 ||
+        (strcmp(call->text, "mettle_safety_register") != 0 &&
+         strcmp(call->text, "mettle_safety_register_static") != 0) ||
         call->arguments[0].kind != IR_OPERAND_TEMP ||
         !call->arguments[0].name) {
       continue;

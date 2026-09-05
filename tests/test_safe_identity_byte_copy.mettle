@@ -1,0 +1,18 @@
+import "std/mem";
+
+struct Holder { pointer: int64*; count: int64; }
+fn copy_bytes(dst: uint8*, src: uint8*, size: int32) {
+  for i in 0..size { dst[i] = src[i]; }
+}
+fn main() -> int32 {
+  var p: int64* = malloc(64);
+  p[0] = 19;
+  var original: Holder;
+  original.pointer = p;
+  original.count = 1;
+  var copy: Holder;
+  copy_bytes((uint8*)&copy, (uint8*)&original, 16);
+  var current: int64* = realloc(p, 32);
+  if (current == 0) { free(p); return 2; }
+  return (int32)copy.pointer[0];
+}

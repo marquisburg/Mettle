@@ -1,0 +1,13 @@
+import "std/mem";
+
+fn copy(dst: rawptr, src: rawptr, size: int64) {
+  memcpy(dst, src, size);
+}
+fn main() -> int32 {
+  var p: rawptr = malloc(16);
+  var q: rawptr = malloc(32);
+  copy(p, q, 32);
+  free(q);
+  free(p);
+  return 0;
+}

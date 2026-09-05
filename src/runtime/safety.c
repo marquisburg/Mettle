@@ -56,6 +56,8 @@ typedef struct {
   uint64_t granules;
   uint32_t state;
   uint32_t next_free;
+  uint64_t identity;
+  uint32_t heap;
 } SafetyRegion;
 
 #if defined(__GNUC__)
@@ -70,12 +72,31 @@ static uint32_t g_safety_region_next = SAFETY_ID_FIRST;
 static uint32_t g_safety_region_free;
 static volatile long g_safety_lock;
 static volatile uint64_t g_safety_live_regions;
+static uint64_t g_safety_generation;
+static void safety_values_clear_locked(uintptr_t address, uint64_t size);
+static void safety_values_reown(void *pointer, uint64_t size, uint64_t old_identity);
+static void safety_values_reset_locked(void);
+
+/* A missing safety record must never silently disable checks. Call only
+ * without the registry lock, including on a failed registration. */
+static void safety_internal_failure(const char *message) {
+  mettle_crash_trap_ex(METTLE_CRASH_TRAP_UNKNOWN, message,
+                       __builtin_return_address(0),
+                       __builtin_frame_address(0), 0, 0);
+  __builtin_trap();
+}
 
 /* ---- platform memory ------------------------------------------------------ */
 
 /* The shadow map cannot come from the allocator it describes, so it comes
  * straight from the operating system and arrives zeroed. */
 static void *safety_map(size_t bytes) {
+#ifdef METTLE_SAFETY_TESTING
+  extern int mettle_safety_test_fail_map(void);
+  if (mettle_safety_test_fail_map()) {
+    return NULL;
+  }
+#endif
 #if defined(_WIN32) || defined(_WIN64)
   return VirtualAlloc(NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 #else
@@ -125,9 +146,12 @@ static SafetyRegion *safety_region(uint32_t id) {
   return entries ? &entries[id & (SAFETY_BLOCK_SIZE - 1)] : NULL;
 }
 
-/* Caller holds the lock. Returns zero when descriptor space is exhausted,
- * which leaves the allocation undescribed rather than misdescribed. */
+/* Caller holds the lock. Zero makes the registration fail and trap. */
 static uint32_t safety_region_acquire(uintptr_t start, uint64_t size) {
+  if (g_safety_generation == ((UINT64_C(1) << 40) - 1)) {
+    return 0;
+  }
+  uint64_t generation = ++g_safety_generation;
   uint32_t id = g_safety_region_free;
   if (id != 0) {
     SafetyRegion *reused = safety_region(id);
@@ -136,6 +160,8 @@ static uint32_t safety_region_acquire(uintptr_t start, uint64_t size) {
     reused->size = size;
     reused->granules = 0;
     reused->next_free = 0;
+    reused->identity = (generation << 24) | id;
+    reused->heap = 1;
     __atomic_store_n(&reused->state, (uint32_t)SAFETY_STATE_LIVE,
                      __ATOMIC_RELEASE);
     return id;
@@ -161,6 +187,8 @@ static uint32_t safety_region_acquire(uintptr_t start, uint64_t size) {
   fresh->size = size;
   fresh->granules = 0;
   fresh->next_free = 0;
+  fresh->identity = (generation << 24) | id;
+  fresh->heap = 1;
   __atomic_store_n(&fresh->state, (uint32_t)SAFETY_STATE_LIVE,
                    __ATOMIC_RELEASE);
   return id;
@@ -231,7 +259,23 @@ static uint32_t *safety_slot(uintptr_t address, int create) {
 
 static uint32_t safety_lookup(uintptr_t address) {
   uint32_t *slot = safety_slot(address, 0);
-  return slot ? __atomic_load_n(slot, __ATOMIC_RELAXED) : SAFETY_ID_UNOWNED;
+  uint32_t id = slot ? __atomic_load_n(slot, __ATOMIC_RELAXED) : SAFETY_ID_UNOWNED;
+  if (id != SAFETY_ID_CONTESTED) return id;
+  /* Small adjacent objects may share a granule. Resolve their byte ranges
+   * exactly instead of disabling the check for both objects. The caller holds
+   * the registry lock; this slow path is only for shared granules. */
+  uint64_t newest = 0;
+  uint32_t found = SAFETY_ID_UNOWNED;
+  for (uint32_t candidate = SAFETY_ID_FIRST; candidate < g_safety_region_next; candidate++) {
+    SafetyRegion *region = safety_region(candidate);
+    if (region && region->state == SAFETY_STATE_LIVE &&
+        address >= region->start && address - region->start < region->size &&
+        region->identity > newest) {
+      newest = region->identity;
+      found = candidate;
+    }
+  }
+  return found;
 }
 
 /* Caller holds the lock. Stamps `id` across every granule the range touches
@@ -246,7 +290,7 @@ static uint32_t safety_lookup(uintptr_t address) {
  *
  * A granule a DEAD allocation still names is taken freely, and that is how the
  * dead descriptor is eventually reclaimed. */
-static void safety_claim_granules(uintptr_t start, uint64_t size, uint32_t id) {
+static int safety_claim_granules(uintptr_t start, uint64_t size, uint32_t id) {
   SafetyRegion *region = safety_region(id);
   uint64_t claimed = 0;
   uintptr_t first = start / METTLE_SAFETY_GRANULE;
@@ -255,7 +299,7 @@ static void safety_claim_granules(uintptr_t start, uint64_t size, uint32_t id) {
   for (uintptr_t granule = first; granule <= last; granule++) {
     uint32_t *slot = safety_slot(granule * METTLE_SAFETY_GRANULE, 1);
     if (!slot) {
-      continue;
+      return 0;
     }
     uint32_t current = __atomic_load_n(slot, __ATOMIC_RELAXED);
     if (current == id) {
@@ -267,6 +311,7 @@ static void safety_claim_granules(uintptr_t start, uint64_t size, uint32_t id) {
           owner ? __atomic_load_n(&owner->state, __ATOMIC_RELAXED) : 0;
       if (state == (uint32_t)SAFETY_STATE_LIVE) {
         __atomic_store_n(slot, SAFETY_ID_CONTESTED, __ATOMIC_RELAXED);
+        safety_region_drop_granule(current);
         continue;
       }
       __atomic_store_n(slot, id, __ATOMIC_RELAXED);
@@ -284,15 +329,20 @@ static void safety_claim_granules(uintptr_t start, uint64_t size, uint32_t id) {
   if (region) {
     region->granules += claimed;
   }
+  return 1;
 }
 
 /* ---- registration --------------------------------------------------------- */
 
-void mettle_safety_register(void *pointer, uint64_t size) {
+static void safety_register_region(void *pointer, uint64_t size, uint32_t heap) {
   if (!pointer || size == 0) {
     return;
   }
   uintptr_t start = (uintptr_t)pointer;
+  const uintptr_t address_limit = ((uintptr_t)1 << SAFETY_ADDRESS_BITS) - 1;
+  if (start > address_limit || size - 1 > address_limit - start) {
+    safety_internal_failure("Fatal error: memory registration exceeds the supported address range");
+  }
 
   safety_lock();
   /* A live region already starting here means the allocator reused a block
@@ -307,15 +357,26 @@ void mettle_safety_register(void *pointer, uint64_t size) {
       __atomic_store_n(&previous->state, (uint32_t)SAFETY_STATE_DEAD,
                        __ATOMIC_RELEASE);
       __atomic_sub_fetch(&g_safety_live_regions, 1, __ATOMIC_RELAXED);
+      if (previous->granules == 0) safety_region_recycle(existing, previous);
     }
   }
 
   uint32_t id = safety_region_acquire(start, size);
-  if (id != 0) {
-    safety_claim_granules(start, size, id);
-    __atomic_add_fetch(&g_safety_live_regions, 1, __ATOMIC_RELAXED);
+  if (id == 0 || !safety_claim_granules(start, size, id)) {
+    safety_unlock();
+    safety_internal_failure("Fatal error: unable to allocate memory safety metadata");
   }
+  safety_region(id)->heap = heap;
+  __atomic_add_fetch(&g_safety_live_regions, 1, __ATOMIC_RELAXED);
   safety_unlock();
+}
+
+void mettle_safety_register(void *pointer, uint64_t size) {
+  safety_register_region(pointer, size, 1);
+}
+
+void mettle_safety_register_static(void *pointer, uint64_t size) {
+  safety_register_region(pointer, size, 0);
 }
 
 void mettle_safety_unregister(void *pointer) {
@@ -336,37 +397,88 @@ void mettle_safety_unregister(void *pointer) {
        * reports it as use-after-free rather than as untracked memory. */
       __atomic_store_n(&region->state, (uint32_t)SAFETY_STATE_DEAD,
                        __ATOMIC_RELEASE);
+      safety_values_clear_locked(region->start, region->size);
       __atomic_sub_fetch(&g_safety_live_regions, 1, __ATOMIC_RELAXED);
-        }
+      if (region->granules == 0) safety_region_recycle(id, region);
+    }
   }
   safety_unlock();
 }
 
 void mettle_safety_reregister(void *old_pointer, void *new_pointer,
                               uint64_t size) {
+  /* A failed growth leaves the original allocation alive. A zero size frees
+   * it in both owned runtime allocators. */
+  if (!new_pointer && size != 0) {
+    return;
+  }
+  uint64_t old_identity = mettle_safety_identity(old_pointer);
+  int64_t old_size = old_identity ? mettle_safety_span_identity(old_pointer, old_identity) : 0;
+  mettle_safety_register(new_pointer, size);
+  if (old_pointer == new_pointer && new_pointer) {
+    safety_values_reown(new_pointer, size, old_identity);
+  } else if (old_pointer && new_pointer && old_size > 0) {
+    uint64_t copy_size = (uint64_t)old_size < size ? (uint64_t)old_size : size;
+    mettle_safety_value_copy(new_pointer, old_pointer, copy_size);
+  }
   if (old_pointer && old_pointer != new_pointer) {
     mettle_safety_unregister(old_pointer);
   }
-  mettle_safety_register(new_pointer, size);
 }
 
-/* Per thread, so one thread inside the allocator never suppresses another's
- * checks. Nesting is counted rather than flagged: the allocator's entry points
- * call one another. Mingw gcc 16 emits native PE TLS only, which the internal
- * linker cannot carry (no TLS directory); degrade to a shared counter there. */
-#if (defined(_WIN32) && defined(__GNUC__) && !defined(__clang__) && \
-     __GNUC__ >= 16) ||                                            \
-    defined(MT_SHARED_RUNTIME)
-static unsigned g_safety_allocator_depth;
+/* Windows FLS works with the owned linker without a PE TLS directory. Store
+ * the depth itself in the slot so entering an allocator needs no allocation. */
+#if defined(_WIN32)
+static DWORD g_safety_allocator_slot = FLS_OUT_OF_INDEXES;
+
+static DWORD safety_allocator_slot(void) {
+  DWORD slot = __atomic_load_n(&g_safety_allocator_slot, __ATOMIC_ACQUIRE);
+  if (slot != FLS_OUT_OF_INDEXES) {
+    return slot;
+  }
+  safety_lock();
+  slot = g_safety_allocator_slot;
+  if (slot == FLS_OUT_OF_INDEXES) {
+    slot = FlsAlloc(NULL);
+    __atomic_store_n(&g_safety_allocator_slot, slot, __ATOMIC_RELEASE);
+  }
+  safety_unlock();
+  if (slot == FLS_OUT_OF_INDEXES) {
+    safety_internal_failure("Fatal error: unable to create memory safety thread state");
+  }
+  return slot;
+}
+
+static uintptr_t safety_allocator_depth(void) {
+  DWORD slot = __atomic_load_n(&g_safety_allocator_slot, __ATOMIC_ACQUIRE);
+  return slot == FLS_OUT_OF_INDEXES ? 0 : (uintptr_t)FlsGetValue(slot);
+}
+
+static void safety_set_allocator_depth(uintptr_t depth) {
+  if (!FlsSetValue(safety_allocator_slot(), (void *)depth)) {
+    safety_internal_failure("Fatal error: unable to save memory safety thread state");
+  }
+}
 #else
-static __thread unsigned g_safety_allocator_depth;
+static __thread uintptr_t g_safety_allocator_depth;
+static uintptr_t safety_allocator_depth(void) { return g_safety_allocator_depth; }
+static void safety_set_allocator_depth(uintptr_t depth) {
+  g_safety_allocator_depth = depth;
+}
 #endif
 
-void mettle_safety_enter_allocator(void) { g_safety_allocator_depth++; }
+void mettle_safety_enter_allocator(void) {
+  uintptr_t depth = safety_allocator_depth();
+  if (depth == UINTPTR_MAX) {
+    safety_internal_failure("Fatal error: memory safety allocator nesting overflow");
+  }
+  safety_set_allocator_depth(depth + 1);
+}
 
 void mettle_safety_leave_allocator(void) {
-  if (g_safety_allocator_depth > 0) {
-    g_safety_allocator_depth--;
+  uintptr_t depth = safety_allocator_depth();
+  if (depth > 0) {
+    safety_set_allocator_depth(depth - 1);
   }
 }
 
@@ -403,10 +515,6 @@ static void safety_append_signed(char *buffer, size_t capacity, size_t *offset,
   safety_append_unsigned(buffer, capacity, offset, (uint64_t)value);
 }
 
-/* Built once per failing run. The process is about to end, so a static buffer
- * is safe and keeps the reporting path free of allocation. */
-static char g_safety_message[512];
-
 typedef struct {
   const char *headline;
   uint32_t line;
@@ -419,6 +527,7 @@ typedef struct {
 static void safety_report_and_trap(const SafetyFailure *failure,
                                    void *program_counter,
                                    void *frame_pointer) {
+  char g_safety_message[512];
   size_t at = 0;
   const size_t capacity = sizeof(g_safety_message);
   g_safety_message[0] = '\0';
@@ -446,20 +555,37 @@ static void safety_report_and_trap(const SafetyFailure *failure,
 
 /* ---- the check ------------------------------------------------------------ */
 
+/* Copy under the writer lock. Descriptor storage stays mapped, but its fields
+ * change when an id is recycled. Atomic shadow entries alone do not make
+ * reading those fields safe. Never hold the lock across a trap or user code. */
+static SafetyRegion safety_snapshot(uintptr_t address) {
+  SafetyRegion snapshot = {0};
+  safety_lock();
+  uint32_t id = safety_lookup(address);
+  if (id >= SAFETY_ID_FIRST) {
+    const SafetyRegion *region = safety_region(id);
+    if (region) {
+      snapshot = *region;
+    }
+  }
+  safety_unlock();
+  return snapshot;
+}
+
 /* Everything a failing check needs and a passing one must not pay for.
  *
- * Kept out of line and cold so the fast path holds no frame, captures no
- * return address, and builds no report. It re-derives what it needs, which
- * costs nothing on a path that ends the process. */
+ * Kept out of line and cold. Use the same snapshot that failed the check,
+ * even if another thread has since recycled its descriptor. */
 SAFETY_COLD static void safety_check_failed(const void *base, int64_t offset,
                                             int64_t size, uint32_t line,
+                                            const SafetyRegion *region,
                                             void *program_counter,
                                             void *frame_pointer) {
   /* Only here, because only a failing access can be the allocator's. Its
    * headers and poisoned blocks are the accesses that reach this point, and
    * asking a thread-local on every check to spare them would charge the whole
    * program for the exception. */
-  if (g_safety_allocator_depth != 0) {
+  if (safety_allocator_depth() != 0) {
     return;
   }
 
@@ -476,15 +602,10 @@ SAFETY_COLD static void safety_check_failed(const void *base, int64_t offset,
     return;
   }
 
-  uint32_t id = safety_lookup((uintptr_t)base);
-  if (id < SAFETY_ID_FIRST) {
-    return; /* unowned or contested: not ours to judge */
-  }
-  const SafetyRegion *region = safety_region(id);
   if (!region) {
     return;
   }
-  uint32_t state = __atomic_load_n(&region->state, __ATOMIC_RELAXED);
+  uint32_t state = region->state;
   if (state == (uint32_t)SAFETY_STATE_FREELIST) {
     return;
   }
@@ -514,33 +635,28 @@ void mettle_safety_check(const void *base, int64_t offset, int64_t size,
   /* Walk the map: find the allocation, confirm the access is inside it and
    * that it is still live. Everything else a check might need to do belongs to
    * the access that fails, and lives in safety_check_failed. */
-  uint32_t *slot = safety_slot(start, 0);
-  if (slot) {
-    uint32_t id = __atomic_load_n(slot, __ATOMIC_RELAXED);
-    if (id >= SAFETY_ID_FIRST) {
-      const SafetyRegion *region = safety_region(id);
-      if (region &&
-          __atomic_load_n(&region->state, __ATOMIC_RELAXED) ==
-              (uint32_t)SAFETY_STATE_LIVE) {
-        uint64_t extent = region->size;
-        uint64_t width = (uint64_t)size;
-        if (width <= extent && address >= region->start &&
-            (uint64_t)(address - region->start) <= extent - width) {
-          return;
-        }
+  SafetyRegion region = safety_snapshot(start);
+  if (region.state != SAFETY_STATE_FREELIST) {
+    if (region.state == SAFETY_STATE_LIVE) {
+      uint64_t extent = region.size;
+      uint64_t width = (uint64_t)size;
+      int wrapped = offset >= 0 ? address < start : address > start;
+      if (!wrapped && width <= extent && address >= region.start &&
+          (uint64_t)(address - region.start) <= extent - width) {
+        return;
       }
-      safety_check_failed(base, offset, size, line,
-                          __builtin_return_address(0),
-                          __builtin_frame_address(0));
-      return;
     }
+    safety_check_failed(base, offset, size, line, &region,
+                        __builtin_return_address(0),
+                        __builtin_frame_address(0));
+    return;
   }
 
   /* No live allocation owns this address. Allowed, except for the one case
    * worth naming: a null pointer is nobody's memory by mistake, not by
    * provenance. */
   if (!base) {
-    safety_check_failed(base, offset, size, line, __builtin_return_address(0),
+    safety_check_failed(base, offset, size, line, NULL, __builtin_return_address(0),
                         __builtin_frame_address(0));
   }
 }
@@ -554,25 +670,21 @@ int64_t mettle_safety_span(const void *base) {
     return 0;
   }
   uintptr_t start = (uintptr_t)base;
-  uint32_t *slot = safety_slot(start, 0);
-  if (!slot) {
+  SafetyRegion region = safety_snapshot(start);
+  if (region.state == SAFETY_STATE_FREELIST) {
     return unbounded;
   }
-  uint32_t id = __atomic_load_n(slot, __ATOMIC_RELAXED);
-  if (id < SAFETY_ID_FIRST) {
-    return unbounded;
-  }
-  const SafetyRegion *region = safety_region(id);
-  if (!region || __atomic_load_n(&region->state, __ATOMIC_RELAXED) !=
-                     (uint32_t)SAFETY_STATE_LIVE) {
+  if (region.state != SAFETY_STATE_LIVE) {
     return 0;
   }
-  uintptr_t end = region->start + region->size;
-  if (start < region->start || start >= end) {
+  uintptr_t end = region.start + region.size;
+  if (start < region.start || start >= end) {
     return 0;
   }
   return (int64_t)(end - start);
 }
+
+#include "safety_provenance.inc"
 
 uint64_t mettle_safety_live_region_count(void) {
   return __atomic_load_n(&g_safety_live_regions, __ATOMIC_RELAXED);
@@ -605,6 +717,7 @@ void mettle_safety_reset(void) {
   }
   g_safety_region_next = SAFETY_ID_FIRST;
   g_safety_region_free = 0;
+  safety_values_reset_locked();
   __atomic_store_n(&g_safety_live_regions, 0, __ATOMIC_RELAXED);
   safety_unlock();
 }

@@ -1,0 +1,9 @@
+import "std/mem";
+
+fn release(p: rawptr) { free(p); }
+fn main() -> int32 {
+  var p: rawptr = malloc(64);
+  release(p);
+  release(p);
+  return 0;
+}

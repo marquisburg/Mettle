@@ -1,0 +1,8 @@
+import "std/mem";
+
+fn release(p: rawptr) { free(p); }
+fn main() -> int32 {
+  var values: int64[4];
+  release(&values[0]);
+  return 0;
+}

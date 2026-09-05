@@ -5,13 +5,13 @@
  *
  * The compiler emits a check at every access it cannot prove safe, and the
  * optimizer deletes the ones it can prove. What survives lands here. The
- * runtime answers one question exactly: does the byte range this access wants
- * lie inside the live allocation the pointer came from?
+ * runtime checks whether the byte range lies inside the current live record
+ * for the base address. It does not track a pointer's allocation generation.
  *
  * Answering it needs a map from an address to the allocation that owns it.
  * That map is a three-level table over the address space, one 32-bit region id
- * per 16-byte granule. Region id zero means no live allocation owns the
- * granule, so a freed pointer and a wild pointer both fail the same way. Ids
+ * per 16-byte granule. Region id zero means untracked memory, which passes.
+ * Freed records keep their ids until new records replace them. Ids
  * index a descriptor array holding the allocation's start and length, which is
  * what makes the bounds answer exact rather than approximate: an access that
  * runs off one live allocation into the next is still a violation, because the
@@ -59,8 +59,10 @@ typedef enum {
 
 /* Record `size` bytes at `pointer` as one live allocation. A null pointer or a
  * zero size is ignored. Re-registering an address that is already live
- * replaces the old record, which is what an allocator reusing a block wants. */
+ * replaces the old record. An unsupported address range or a failure to
+ * allocate metadata traps rather than silently losing coverage. */
 void mettle_safety_register(void *pointer, uint64_t size);
+void mettle_safety_register_static(void *pointer, uint64_t size);
 
 /* Retire the allocation starting exactly at `pointer`. The granules keep
  * naming it, so a pointer kept across the free is reported as use-after-free
@@ -84,13 +86,15 @@ void mettle_safety_unregister(void *pointer);
 void mettle_safety_enter_allocator(void);
 void mettle_safety_leave_allocator(void);
 
-/* Retire `old_pointer` and register `size` bytes at `new_pointer` as one step,
- * for a reallocation that may or may not have moved the block. */
+/* Update records after realloc. A null result with a nonzero size preserves
+ * the old record. A null result with zero size retires it, matching the owned
+ * allocators. A nonnull result describes the new extent. This cannot detect
+ * stale aliases when realloc returns the same address. */
 void mettle_safety_reregister(void *old_pointer, void *new_pointer,
                               uint64_t size);
 
 /* The check itself. `base` is the pointer the access derives from and carries
- * the provenance; `offset` is the signed byte displacement applied to it and
+ * the lookup address; `offset` is the signed byte displacement applied to it and
  * `size` the number of bytes touched. Returns when the access is inside the
  * allocation that owns `base`, and does not return otherwise. `line` is the
  * source line, which the report falls back on when the build carries no debug
@@ -129,6 +133,30 @@ void mettle_safety_check(const void *base, int64_t offset, int64_t size,
  * those through anyway. Zero where the allocation is gone, so every access
  * goes the long way round and is reported as the use-after-free it is. */
 int64_t mettle_safety_span(const void *base);
+
+/* Hidden value metadata used by instrumented code. Identity zero denotes an
+ * origin outside the registered allocation model. Nonzero identities include
+ * a generation and never become valid again after their allocation ends. */
+uint64_t mettle_safety_identity(const void *pointer);
+void mettle_safety_check_identity(const void *base, int64_t offset, int64_t size,
+                                  uint32_t kind, uint32_t line, uint64_t identity);
+int64_t mettle_safety_span_identity(const void *base, uint64_t identity);
+uint64_t mettle_safety_merge_identity(uint64_t a, uint64_t b);
+uint64_t mettle_safety_subtract_identity(uint64_t a, uint64_t b);
+uint64_t mettle_safety_value_load(const void *slot, uint64_t value, uint64_t size);
+void mettle_safety_value_store(void *slot, uint64_t value, uint64_t identity,
+                               uint64_t size);
+void mettle_safety_value_copy(void *destination, const void *source, uint64_t size);
+void mettle_safety_value_clear(void *destination, uint64_t size);
+void mettle_safety_free_identity(void *pointer, uint64_t identity);
+void mettle_safety_buffer_check(void *pointer, int64_t size, uint32_t kind,
+                                uint32_t line, uint64_t identity);
+void *mettle_safety_call_push(void *callee, uint64_t count);
+void *mettle_safety_call_enter(void *callee);
+void mettle_safety_call_arg(void *call, uint64_t index, uint64_t identity);
+uint64_t mettle_safety_call_param(void *call, uint64_t index);
+void mettle_safety_call_return(void *call, uint64_t identity);
+uint64_t mettle_safety_call_pop(void *call);
 
 /* Live allocations, for tests. Advisory and lock-free.
  *

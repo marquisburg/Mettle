@@ -1,0 +1,15 @@
+var saved: int64* = 0;
+fn save(p: int64*) { saved = p; }
+
+fn frame(read_old: bool) -> int32 {
+  var values: int64[4];
+  values[0] = 23;
+  if (read_old) { return (int32)saved[0]; }
+  save(&values[0]);
+  return 0;
+}
+
+fn main() -> int32 {
+  frame(false);
+  return frame(true);
+}

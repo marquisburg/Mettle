@@ -113,8 +113,10 @@ prove it leaves alone.
 
 ## Run-time checks with --safe
 
-`--safe` inserts a check on every memory access the compiler could not prove
-in bounds, and it keeps them under `--release`.
+`--safe` keeps bounds checks under `--release` and checks instrumented pointer
+accesses against registered heap, stack, and global storage. It also detects
+null access and use of a freed region while that region still has a record.
+It does not provide a complete memory safety guarantee.
 
 ```bash
 mettle --safe --build program.mettle
@@ -128,29 +130,43 @@ Fatal error: `a[]` is outside its bounds
 
 The process exits with status 1.
 
-Most checks cost nothing, because the compiler removes the ones it can settle
+Some checks cost nothing, because the compiler removes the ones it can settle
 statically. It recognizes an index written as a multiple of a loop counter plus
 an invariant plus a constant, and proves that shape in bounds against the
 array's length. A loop over `0..n` indexing an array of `n` elements gets no
 checks at all.
 
 What is left is the accesses that genuinely depend on run-time values.
-Measured over the benchmark suite the cost ranges from nothing to a small
-multiple, depending on how much of the indexing the compiler could settle.
+Remaining pointer checks copy the allocation record under the registry lock.
+That prevents checks from reading fields while another thread reuses a record.
+It adds work and may cause contention; earlier timing results for the runtime
+without that lock do not measure this version.
+
+The runtime stops if it cannot allocate safety metadata or describe the
+requested address range. It does not silently omit the record. A failed
+`realloc` with a nonzero size leaves the old record live. A zero size retires
+it, matching the owned allocators. Allocator check suppression belongs to the
+current thread, including on Windows builds that lack a native TLS directory.
 
 ## What is not covered
 
-The compiler proves what it can see. It stays quiet about the rest:
+The compiler proves what it can see. The runtime has these limits:
 
-- Memory reached through a `cstring` or a `rawptr` handed in by C. There is
-  no length to check against.
-- Aliasing between two pointers it cannot relate.
-- Integer overflow. Arithmetic wraps, by design.
-- Data races between threads.
-- Anything inside an `asm` block.
+| Case | Limit |
+|------|-------|
+| Unregistered memory from C or a custom allocator | Unknown addresses pass through the registry check. Pointer type alone does not supply an extent. |
+| Address reuse | An old pointer can match a new allocation at the same address. This includes stack frame reuse and realloc that keeps its address. |
+| Lost base address | A derived pointer that reaches unregistered storage can lose the original bounds. A machine pointer carries no separate allocation identity. |
+| Objects sharing a registry granule | Conflicting live records leave that granule unchecked. The compiler aligns registered stack and global objects to avoid this case. |
+| Concurrent free and access | The registry lock protects metadata, not the program's access after the check. Program data races remain unsafe. |
+| C code and assembly | The compiler cannot insert checks into their memory operations. |
+| Integer overflow | Language arithmetic still wraps. Allocation size expressions can overflow before registration. |
 
-`--safe` checks bounds. It is not a sanitizer and it does not track ownership
-across the C boundary.
+Complete protection needs bounds and lifetime identity to follow pointers
+through copies, fields, calls, and conversions, plus a defined policy for
+foreign memory and concurrent access. The current address registry does not
+carry that identity. `--safe` adds useful checks without changing syntax,
+pointer layout, or the C ABI; it does not prove arbitrary pointer use safe.
 
 ## See also
 

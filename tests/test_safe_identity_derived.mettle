@@ -1,0 +1,10 @@
+import "std/mem";
+
+fn read(p: int64*) -> int32 { return (int32)p[0]; }
+
+fn main() -> int32 {
+  var p: int64* = malloc(32);
+  var address: int64 = (int64)p;
+  var outside: int64* = (int64*)(address + (int64)4096);
+  return read(outside);
+}

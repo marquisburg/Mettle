@@ -1,0 +1,14 @@
+import "std/mem";
+
+fn keep(p: int64*) -> int64* { return p; }
+fn read(p: int64*) -> int32 { return (int32)p[0]; }
+
+fn main() -> int32 {
+  var p: int64* = malloc(64);
+  p[0] = 19;
+  var stale: int64* = keep(p);
+  var current: int64* = realloc(p, 32);
+  if (current == 0) { free(p); return 2; }
+  current[0] = 23;
+  return read(stale);
+}

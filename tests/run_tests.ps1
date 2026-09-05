@@ -6695,7 +6695,7 @@ $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
   $safetyExe = Join-Path $tmpDir "safety_runtime_test.exe"
-  $compileSafety = & gcc -Wall -Wextra -std=c99 -g -O1 -D_GNU_SOURCE -Isrc tests/safety_runtime_test.c src/runtime/safety.c -o $safetyExe 2>&1 | Out-String
+  $compileSafety = & gcc -Wall -Wextra -std=c99 -g -O1 -D_GNU_SOURCE -DMETTLE_SAFETY_TESTING -Isrc tests/safety_runtime_test.c src/runtime/safety.c -o $safetyExe 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0) {
     throw "Safety runtime harness compile failed: $compileSafety"
   }
@@ -6839,6 +6839,17 @@ try {
       "test_safe_heap_overflow"  = "outside its allocation"
       "test_safe_use_after_free" = "after it was freed"
       "test_safe_realloc_stale"  = "after it was freed"
+      "test_safe_identity_realloc" = "after it was freed"
+      "test_safe_identity_call" = "after it was freed"
+      "test_safe_identity_indirect" = "after it was freed"
+      "test_safe_identity_field" = "after it was freed"
+      "test_safe_identity_copy" = "after it was freed"
+      "test_safe_identity_memcpy" = "after it was freed"
+      "test_safe_identity_stack_reuse" = "after it was freed"
+      "test_safe_identity_double_free" = "after it was freed"
+      "test_safe_identity_static_free" = "free of stack or global memory"
+      "test_safe_identity_derived" = "outside its allocation"
+      "test_safe_identity_memcpy_overflow" = "outside its allocation"
     }
     foreach ($case in $bad.Keys) {
       $exe = Join-Path $tmpDir "$case.$allocator.exe"
@@ -18234,5 +18245,4 @@ if ($failed -ne 0) {
 }
 
 exit 0
-
 

@@ -1,0 +1,11 @@
+import "std/mem";
+
+fn main() -> int32 {
+  var p: int64* = malloc(64);
+  p[0] = 19;
+  var stale: int64* = p;
+  var current: int64* = realloc(p, 32);
+  if (current == 0) { free(p); return 2; }
+  current[0] = 23;
+  return (int32)stale[0];
+}

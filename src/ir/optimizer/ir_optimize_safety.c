@@ -2735,6 +2735,13 @@ static int safety_declare_runtime(IRProgram *program) {
   const MtlcType *register_params[2] = {pointer, u64};
   const MtlcType *unregister_params[1] = {pointer};
   const MtlcType *reregister_params[3] = {pointer, pointer, u64};
+  const MtlcType *identity_check_params[6] = {pointer, i64, i64, u32, u32, u64};
+  const MtlcType *pointer_u64[2] = {pointer, u64};
+  const MtlcType *two_u64[2] = {u64, u64};
+  const MtlcType *value_store_params[4] = {pointer, u64, u64, u64};
+  const MtlcType *call_arg_params[3] = {pointer, u64, u64};
+  const MtlcType *copy_params[3] = {pointer, pointer, u64};
+  const MtlcType *buffer_params[5] = {pointer, i64, u32, u32, u64};
 
   const struct {
     const char *name;
@@ -2745,10 +2752,28 @@ static int safety_declare_runtime(IRProgram *program) {
       {"mettle_safety_check", nothing, check_params, 5},
       {"mettle_safety_span", i64, span_params, 1},
       {"mettle_safety_register", nothing, register_params, 2},
+      {"mettle_safety_register_static", nothing, register_params, 2},
       {"mettle_safety_unregister", nothing, unregister_params, 1},
       {"mettle_safety_reregister", nothing, reregister_params, 3},
       {"mettle_safety_enter_allocator", nothing, NULL, 0},
       {"mettle_safety_leave_allocator", nothing, NULL, 0},
+      {"mettle_safety_identity", u64, span_params, 1},
+      {"mettle_safety_check_identity", nothing, identity_check_params, 6},
+      {"mettle_safety_span_identity", i64, pointer_u64, 2},
+      {"mettle_safety_merge_identity", u64, two_u64, 2},
+      {"mettle_safety_subtract_identity", u64, two_u64, 2},
+      {"mettle_safety_value_load", u64, call_arg_params, 3},
+      {"mettle_safety_value_store", nothing, value_store_params, 4},
+      {"mettle_safety_call_push", pointer, pointer_u64, 2},
+      {"mettle_safety_call_enter", pointer, span_params, 1},
+      {"mettle_safety_call_arg", nothing, call_arg_params, 3},
+      {"mettle_safety_call_param", u64, pointer_u64, 2},
+      {"mettle_safety_call_return", nothing, pointer_u64, 2},
+      {"mettle_safety_call_pop", u64, span_params, 1},
+      {"mettle_safety_value_copy", nothing, copy_params, 3},
+      {"mettle_safety_value_clear", nothing, pointer_u64, 2},
+      {"mettle_safety_free_identity", nothing, pointer_u64, 2},
+      {"mettle_safety_buffer_check", nothing, buffer_params, 5},
   };
 
   for (size_t e = 0; e < sizeof(entries) / sizeof(entries[0]); e++) {
@@ -3406,7 +3431,7 @@ static int safety_describe_stack(IRProgram *program, IRFunction *function) {
   }
 
   for (size_t l = 0; l < count; l++) {
-    if (!safety_emit_local_note(&out, "mettle_safety_register", locals[l].name,
+    if (!safety_emit_local_note(&out, "mettle_safety_register_static", locals[l].name,
                                 locals[l].size, locals[l].location)) {
       ir_instruction_vector_destroy(&out);
       free(locals);
@@ -3518,9 +3543,10 @@ static int safety_describe_globals(IRProgram *program, IRFunction *entry) {
     }
 
     IROperand address_operand = ir_operand_temp(address);
+    IROperand static_args[2] = {address_operand, size_operand};
     int ok = address_operand.name &&
-             safety_emit_register(&out, entry->location, &address_operand,
-                                  &size_operand);
+             safety_emit_call(&out, entry->location, "mettle_safety_register_static",
+                              static_args, 2);
     ir_operand_destroy(&address_operand);
     if (!ok) {
       ir_instruction_vector_destroy(&out);
@@ -3560,6 +3586,7 @@ static int safety_retire_stack_notes(const IRProgram *program,
       continue;
     }
     if (strcmp(call->text, "mettle_safety_register") != 0 &&
+        strcmp(call->text, "mettle_safety_register_static") != 0 &&
         strcmp(call->text, "mettle_safety_unregister") != 0) {
       continue;
     }
@@ -3625,6 +3652,8 @@ int ir_safety_retire_dangling_notes(IRProgram *program) {
   return 1;
 }
 
+#include "ir_safety_provenance.inc"
+
 int ir_safety_register_allocations(IRProgram *program) {
   if (!program) {
     return 1;
@@ -3652,6 +3681,12 @@ int ir_safety_register_allocations(IRProgram *program) {
   }
   if (entry && !safety_describe_globals(program, entry)) {
     return 0;
+  }
+  for (size_t i = 0; i < program->function_count; i++) {
+    IRFunction *function = program->functions[i];
+    if (function && !function->is_rule &&
+        !safety_function_is_allocator(function, allocator_source) &&
+        !safety_origins_function(program, function)) return 0;
   }
   return 1;
 }
