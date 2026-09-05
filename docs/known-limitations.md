@@ -324,6 +324,21 @@ Adjacent loads widen into one `ld.global.v2`/`ld.global.v4` only inside a
 single block and only through a pointer whose declared alignment covers the
 whole access. Stores are never widened.
 
+## Running a kernel's grid on the CPU
+
+`mettle test` runs a dispatched grid in the compiler's interpreter, one block
+at a time and one barrier phase at a time. A barrier inside a device helper is
+refused rather than counted: the runner stops a work item in the kernel's own
+frame, and a helper's frame is not one it can resume. Move the barrier into the
+kernel.
+
+The grid is capped at 65536 work items. Beyond that the run reports the cap
+rather than trying.
+
+Work items inside one phase run one after another, so a kernel whose work items
+race each other inside a phase gets one interleaving out of the run and not a
+verdict on the others.
+
 ## Vectorization
 
 Reductions over `^`, `&`, and `|` have no kernel and are reported as serial.

@@ -1,0 +1,22 @@
+// The space a pointer claims, re-checked while the grid runs. Laundering the
+// address through an integer hides the shared tile from the type checker; the
+// interpreter looks at the storage itself and is not fooled.
+
+@noinline fn read_global(p: float32 global*, i: int32) -> float32 {
+  return p[i];
+}
+
+kernel lies_about_space(out: float32 global*) {
+  workgroup var tile: float32[4];
+  tile[thread.x] = 1.0;
+  barrier(workgroup, acq_rel);
+  var laundered: int64 = (int64)&tile[0];
+  out[thread.x] = read_global((float32 global*)laundered, 0);
+}
+
+@test fn a_false_space_is_caught() -> int32 {
+  var out: float32[4];
+  dispatch lies_about_space[grid: (1, 1, 1), block: (4, 1, 1)](
+      (float32 global*)&out[0]);
+  return 0;
+}

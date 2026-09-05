@@ -2528,6 +2528,22 @@ $cases = @(
   @{ Name = "err_gpu_launch_record_abi"; Path = "tests/err_gpu_launch_record_abi.mettle"; ShouldSucceed = $false; Pattern = "GPU launch argument 0 has unsupported ABI type 'Message'" },
   @{ Name = "err_gpu_spirv_record_parameter"; Path = "tests/err_gpu_spirv_record_parameter.mettle"; ShouldSucceed = $false; Args = @("--emit-spirv"); Pattern = "no by-value record parameter ABI" },
   @{ Name = "err_gpu_spirv_record_return"; Path = "tests/err_gpu_spirv_record_return.mettle"; ShouldSucceed = $false; Args = @("--emit-spirv"); Pattern = "no by-value record call ABI" },
+  # The CPU twin of a launch: `dispatch` inside a `@test` runs the grid in the
+  # compiler's interpreter, which re-checks what the device analyses claimed
+  # without trusting them.
+  @{ Name = "gpu_grid_on_the_cpu"; Path = "tests/gpu/grid_on_the_cpu.mettle"; ShouldSucceed = $true
+     Args = @("test")
+     SkipBinaryCheck = $true
+     OutputMustMatch = @("2 passed")
+     OutputMustNotMatch = @("failed") },
+  @{ Name = "err_gpu_runtime_space_claim"; Path = "tests/err_gpu_runtime_space_claim.mettle"; ShouldSucceed = $false
+     Args = @("test")
+     SkipBinaryCheck = $true
+     Pattern = "claims global memory and this address is in shared memory" },
+  @{ Name = "err_gpu_runtime_divergent_barrier"; Path = "tests/err_gpu_runtime_divergent_barrier.mettle"; ShouldSucceed = $false
+     Args = @("test")
+     SkipBinaryCheck = $true
+     Pattern = "was reached by 2 of the 4 work items still running in this workgroup" },
   @{ Name = "err_gpu_space_mismatch"; Path = "tests/err_gpu_space_mismatch.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "shared memory is wanted and this address is in global memory" },
   @{ Name = "err_gpu_kernel_shared_param"; Path = "tests/err_gpu_kernel_shared_param.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "kernel parameter 'tile' is declared shared, and a launch has no shared address to pass" },
   @{ Name = "err_gpu_space_cast"; Path = "tests/err_gpu_space_cast.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "this address is in global memory and the cast claims shared memory" },

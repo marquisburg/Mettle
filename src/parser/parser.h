@@ -42,6 +42,11 @@ typedef struct {
    * target-neutral gpu_* intrinsics. Off for normal CPU compiles, so member
    * access on an ordinary struct named e.g. `block` is unaffected. */
   int gpu_mode;
+  /* Inside a `kernel` body. The thread and block index built-ins are
+     contextual: a host program with a struct named `block` is untouched, and a
+     kernel file read by `mettle test` still gets them without being told it is
+     a device compile. */
+  int in_kernel_body;
   /* How many `comptime for` bodies enclose the construct being parsed.
    * `ident(...)` composes a declaration name only in here: outside, a function
    * or struct the programmer happened to call `ident` keeps its name. */

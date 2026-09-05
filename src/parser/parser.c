@@ -100,6 +100,7 @@ Parser *parser_create_with_error_reporter(Lexer *lexer,
   parser->saw_lexical_error = 0;
   parser->source_filename = error_reporter_current_filename(error_reporter);
   parser->gpu_mode = 0;
+  parser->in_kernel_body = 0;
   parser->comptime_depth = 0;
   parser->pending_composed_name = NULL;
   parser->expression_depth = 0;
@@ -5165,7 +5166,8 @@ ASTNode *parser_parse_postfix_expression(Parser *parser) {
       // GPU kernel index built-ins: `thread.x` etc. desugar to a call to the
       // corresponding target-neutral gpu_* intrinsic in GPU-module compiles.
       const char *gpu_intr = NULL;
-      if (parser->gpu_mode && expr->type == AST_IDENTIFIER && expr->data) {
+      if ((parser->gpu_mode || parser->in_kernel_body) &&
+          expr->type == AST_IDENTIFIER && expr->data) {
         gpu_intr =
             parser_gpu_index_intrinsic(((Identifier *)expr->data)->name, member);
       }
@@ -6199,7 +6201,10 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
   // Parse function body (block) or allow forward declaration terminator
   ASTNode *body = NULL;
   if (parser->current_token.type == TOKEN_LBRACE) {
+    int outer_kernel_body = parser->in_kernel_body;
+    parser->in_kernel_body = is_kernel;
     body = parser_parse_block(parser);
+    parser->in_kernel_body = outer_kernel_body;
     if (!body && parser->has_error) {
       // Clean up
       for (size_t i = 0; i < param_count; i++) {

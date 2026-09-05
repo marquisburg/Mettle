@@ -211,6 +211,39 @@ GPU type report: 5 of 5 device accesses named their space, 0 stayed generic
   the analyses took 0.041 ms
 ```
 
+### Running the grid on the CPU
+
+`dispatch` inside a `@test` function runs the kernel's grid in the compiler's
+own interpreter, with no driver and no device:
+
+```bash
+mettle test kernels.mettle
+```
+
+The index built-ins answer per work item, a block's `workgroup` storage is
+allocated once and shared by its work items, `private` storage is each work
+item's own, and a barrier cuts the block into phases: every live work item runs
+to the same barrier, and only then do they all go on. So a kernel that writes a
+tile, barriers, and reads the tile back gives the same answers it gives on the
+device.
+
+What the run is for is the re-checks. It is a machine that executes and proves
+nothing, so what it finds is what the analyses got wrong:
+
+- a pointer that claims a space its storage does not have, however the address
+  reached it, reports the claim and the storage:
+  `line 14 claims global memory and this address is in shared memory`;
+- a pointer that claims an alignment the address does not have reports the
+  offset it is off by;
+- a barrier some work item walked around reports the site and the count:
+  `the barrier at line 9 was reached by 2 of the 4 work items still running in
+  this workgroup`.
+
+Two limits are worth knowing. A barrier inside a device helper is refused
+rather than counted, because a phase boundary has to be in the frame the runner
+can stop; move it into the kernel. And the grid is capped at 65536 work items,
+which is a CPU twin's size and not a launch's.
+
 ### Static and launch-sized workgroup memory, private memory, and barriers
 
 Kernels can allocate statically sized scalar arrays in semantic address spaces:

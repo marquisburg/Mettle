@@ -47,6 +47,12 @@ typedef struct {
      pattern clear it here too, so a read can tell an undefined byte from a
      byte that genuinely holds 0xA5. */
   unsigned char *init_map;
+  /* Which device memory this buffer stands for while a kernel's grid runs on
+     the CPU: 0 is ordinary host memory, which is what a launch's arguments
+     are, and the workgroup and private spaces are the ones the interpreter
+     allocates itself. A pointer that claims a space it does not have is what
+     the re-check catches. */
+  unsigned char device_space;
 } IIBuffer;
 
 /* A materialized string literal: the characters (NUL-terminated) and the
@@ -97,6 +103,75 @@ typedef struct {
   size_t count;
   size_t capacity; /* power of two; 0 = empty */
 } IIEnv;
+
+/* --- the CPU twin of a kernel launch --------------------------------------
+ *
+ * `dispatch` inside a `@test` function runs here. The grid is walked block by
+ * block and thread by thread; a block's workgroup storage is allocated once
+ * and shared by its threads, a thread's private storage is fresh. What the
+ * run is for is the re-checks: a device claim the compiler proved is checked
+ * again by a machine that does nothing but execute. */
+#define II_GPU_MAX_SHARED 32
+#define II_GPU_MAX_BARRIERS 64
+#define II_GPU_MAX_UNIFORMS 64
+#define II_GPU_MAX_THREADS 65536
+#define II_GPU_SUBGROUP 32
+
+typedef struct {
+  const char *name;              /* the allocation's IR destination name */
+  unsigned long long base;
+  size_t buffer_index;
+} IIGpuShared;
+
+typedef struct {
+  size_t site;                   /* instruction index of the barrier */
+  long long arrivals;            /* threads of this block that reached it */
+  size_t line;
+} IIGpuBarrier;
+
+typedef struct {
+  const char *name;              /* the value's IR name */
+  size_t line;
+  IRInterpValue value;
+  long long lane;                /* the thread that first wrote it */
+  int seen;
+} IIGpuUniform;
+
+/* One work item's saved execution, so a block's threads can run in the phases
+   its barriers cut it into: every live thread runs to the same barrier, then
+   they all go on. Without this a block's threads would run one after another
+   and a kernel that publishes through workgroup memory would read what nobody
+   had written yet. */
+typedef struct IIGpuThread {
+  int started;
+  int suspended;
+  int finished;
+  size_t pc;
+  size_t barrier_site;
+  size_t barrier_line;
+  /* The kernel entry frame this work item stopped in, an IIFrame the launch
+     owns. IIFrame is declared further down, so the launch allocates it. */
+  void *frame;
+} IIGpuThread;
+
+typedef struct {
+  int active;
+  const char *kernel_name;
+  long long grid[3];
+  long long block[3];
+  long long ctaid[3];
+  long long tid[3];
+  long long lane;                /* linear thread index inside the block */
+  long long threads_per_block;
+  IIGpuShared shared[II_GPU_MAX_SHARED];
+  size_t shared_count;
+  IIGpuBarrier barriers[II_GPU_MAX_BARRIERS];
+  size_t barrier_count;
+  IIGpuUniform uniforms[II_GPU_MAX_UNIFORMS];
+  size_t uniform_count;
+  /* What the run found, reported once the grid is done. */
+  long long threads_run;
+} IIGpuGrid;
 
 struct IRInterpMachine {
   IRProgram *program;
@@ -175,6 +250,17 @@ struct IRInterpMachine {
   const char *pure_fn;
   int pure_declared;
   int recheck_inferred_purity;
+
+  /* One kernel grid, running on the CPU under `mettle test`. The whole point
+     is to re-check what the device analyses claimed without trusting them: the
+     space a pointer says it is in, the alignment it says it has, the values a
+     type says are uniform across a warp, and the barriers a kernel says every
+     thread reaches. Threads run one after another, which is enough for every
+     one of those questions and is said to be enough in docs/gpu.md. */
+  IIGpuGrid gpu;
+  /* The work item ii_exec_function is about to resume or start. Consumed on
+     entry, so a helper the kernel calls is an ordinary frame. */
+  IIGpuThread *gpu_resume;
 
   /* Execution counting (zero-run PGO). */
   int count_enabled;
@@ -448,6 +534,7 @@ static unsigned long long ii_add_buffer_ex(IRInterpMachine *machine,
   buf->alloc_line = 0;
   buf->base = II_ADDR_BASE + (unsigned long long)index * II_ADDR_STRIDE;
   buf->init_map = NULL;
+  buf->device_space = MTLC_ADDRESS_SPACE_DEFAULT;
   buf->data = (unsigned char *)malloc(size > 0 ? (size_t)size : 1);
   if (buf->data) {
     buf->init_map = (unsigned char *)malloc(size > 0 ? (size_t)size : 1);
@@ -4896,6 +4983,386 @@ static int ii_op_select(IRInterpMachine *machine, IIFrame *frame,
 
 /* A direct call: an interpreted function, or one of the runtime and libc
  * entries the machine models. */
+/* The device index built-ins, answered from the thread the grid runner is
+   standing on. Returns 1 when the intrinsic was one of these. */
+static int ii_gpu_index_intrinsic(IRInterpMachine *machine,
+                                  MtlcIntrinsic intrinsic,
+                                  IRInterpValue *out) {
+  IIGpuGrid *gpu = &machine->gpu;
+  switch (intrinsic) {
+  case MTLC_INTRINSIC_GPU_LOCAL_ID_X: *out = ii_int_value(gpu->tid[0]); return 1;
+  case MTLC_INTRINSIC_GPU_LOCAL_ID_Y: *out = ii_int_value(gpu->tid[1]); return 1;
+  case MTLC_INTRINSIC_GPU_LOCAL_ID_Z: *out = ii_int_value(gpu->tid[2]); return 1;
+  case MTLC_INTRINSIC_GPU_LOCAL_SIZE_X: *out = ii_int_value(gpu->block[0]); return 1;
+  case MTLC_INTRINSIC_GPU_LOCAL_SIZE_Y: *out = ii_int_value(gpu->block[1]); return 1;
+  case MTLC_INTRINSIC_GPU_LOCAL_SIZE_Z: *out = ii_int_value(gpu->block[2]); return 1;
+  case MTLC_INTRINSIC_GPU_GROUP_ID_X: *out = ii_int_value(gpu->ctaid[0]); return 1;
+  case MTLC_INTRINSIC_GPU_GROUP_ID_Y: *out = ii_int_value(gpu->ctaid[1]); return 1;
+  case MTLC_INTRINSIC_GPU_GROUP_ID_Z: *out = ii_int_value(gpu->ctaid[2]); return 1;
+  case MTLC_INTRINSIC_GPU_NUM_GROUPS_X: *out = ii_int_value(gpu->grid[0]); return 1;
+  case MTLC_INTRINSIC_GPU_NUM_GROUPS_Y: *out = ii_int_value(gpu->grid[1]); return 1;
+  case MTLC_INTRINSIC_GPU_NUM_GROUPS_Z: *out = ii_int_value(gpu->grid[2]); return 1;
+  case MTLC_INTRINSIC_GPU_SUBGROUP_LOCAL_ID:
+    *out = ii_int_value(gpu->lane % II_GPU_SUBGROUP);
+    return 1;
+  case MTLC_INTRINSIC_GPU_SUBGROUP_SIZE:
+    *out = ii_int_value(II_GPU_SUBGROUP);
+    return 1;
+  default:
+    return 0;
+  }
+}
+
+/* The workgroup and private allocations a kernel declares. A workgroup one is
+   the block's, so every thread of the block gets the same address; a private
+   one belongs to the thread and is fresh each time. */
+static int ii_gpu_address_space_alloc(IRInterpMachine *machine, IIFrame *frame,
+                                      const IRInstruction *insn) {
+  IIGpuGrid *gpu = &machine->gpu;
+  long long elements = insn->rhs.kind == IR_OPERAND_INT ? insn->rhs.int_value : 0;
+  long long element_size =
+      insn->value_type && insn->value_type->base_type
+          ? (long long)insn->value_type->base_type->size
+          : 4;
+  long long bytes = elements > 0 ? elements * element_size : 4096;
+  unsigned long long base = 0;
+  IRInterpValue value;
+  if (!gpu->active) {
+    ii_fail(machine, IR_INTERP_UNSUPPORTED,
+            "device storage outside a dispatched grid");
+    return 0;
+  }
+  if (element_size <= 0 || bytes <= 0) {
+    ii_fail(machine, IR_INTERP_TRAP, "device storage with no size");
+    return 0;
+  }
+  if (insn->address_space == MTLC_ADDRESS_SPACE_WORKGROUP) {
+    for (size_t i = 0; i < gpu->shared_count; i++) {
+      if (insn->dest.name && gpu->shared[i].name &&
+          strcmp(gpu->shared[i].name, insn->dest.name) == 0) {
+        base = gpu->shared[i].base;
+        break;
+      }
+    }
+  }
+  if (!base) {
+    base = ii_add_buffer_ex(machine, NULL, bytes, 0);
+    if (!base) {
+      ii_fail(machine, IR_INTERP_TRAP, "out of device storage");
+      return 0;
+    }
+    machine->buffers[(base - II_ADDR_BASE) / II_ADDR_STRIDE].device_space =
+        insn->address_space == MTLC_ADDRESS_SPACE_WORKGROUP
+            ? MTLC_ADDRESS_SPACE_WORKGROUP
+            : MTLC_ADDRESS_SPACE_PRIVATE;
+    if (insn->address_space == MTLC_ADDRESS_SPACE_WORKGROUP &&
+        gpu->shared_count < II_GPU_MAX_SHARED) {
+      gpu->shared[gpu->shared_count].name = insn->dest.name;
+      gpu->shared[gpu->shared_count].base = base;
+      gpu->shared[gpu->shared_count].buffer_index =
+          (size_t)((base - II_ADDR_BASE) / II_ADDR_STRIDE);
+      gpu->shared_count++;
+    }
+  }
+  value = ii_int_value((long long)base);
+  return ii_store_dest(machine, frame, &insn->dest, &value);
+}
+
+/* Every live thread of a workgroup has to reach every barrier the workgroup
+   reaches. The count is per site and per block; what it catches is a barrier
+   some thread walked around. */
+static void ii_gpu_barrier_arrive(IRInterpMachine *machine, size_t site,
+                                  size_t line) {
+  IIGpuGrid *gpu = &machine->gpu;
+  for (size_t i = 0; i < gpu->barrier_count; i++) {
+    if (gpu->barriers[i].site == site) {
+      gpu->barriers[i].arrivals++;
+      return;
+    }
+  }
+  if (gpu->barrier_count < II_GPU_MAX_BARRIERS) {
+    gpu->barriers[gpu->barrier_count].site = site;
+    gpu->barriers[gpu->barrier_count].arrivals = 1;
+    gpu->barriers[gpu->barrier_count].line = line;
+    gpu->barrier_count++;
+  }
+}
+
+/* The kernel a launch names. A typed dispatch resolves its handle through
+   `mtlc_gpu_kernel_handle("name")`, so the name is the string that call was
+   given, and it is in this same module because the grid runs the source it was
+   compiled from. */
+/* The name a space is written with, for a message. */
+static const char *ii_gpu_space_word(unsigned char space) {
+  switch (space) {
+  case MTLC_ADDRESS_SPACE_GLOBAL: return "global";
+  case MTLC_ADDRESS_SPACE_WORKGROUP: return "shared";
+  case MTLC_ADDRESS_SPACE_CONSTANT: return "constant";
+  case MTLC_ADDRESS_SPACE_PRIVATE: return "local";
+  default: return "generic";
+  }
+}
+
+/* Re-check what a pointer type claims against the storage the value actually
+   addresses. The compiler proved both the space and the alignment; this asks
+   the question again with nothing but the running program to go on. */
+static int ii_gpu_check_pointer_claim(IRInterpMachine *machine,
+                                      const MtlcType *type,
+                                      const IRInterpValue *value, size_t line) {
+  unsigned long long address;
+  long long offset = 0;
+  IIBuffer *buffer;
+  unsigned char actual;
+  if (!type || type->kind != MTLC_TYPE_POINTER || value->is_float) {
+    return 1;
+  }
+  address = (unsigned long long)value->i;
+  if (!address) {
+    return 1;
+  }
+  if (type->pointee_align && (address % (unsigned long long)type->pointee_align)) {
+    snprintf(machine->detail, sizeof(machine->detail),
+             "line %llu claims a %zu-byte aligned address and this one is off "
+             "by %llu",
+             (unsigned long long)line, type->pointee_align,
+             address % (unsigned long long)type->pointee_align);
+    machine->status = IR_INTERP_TRAP;
+    return 0;
+  }
+  if (type->address_space == MTLC_ADDRESS_SPACE_DEFAULT ||
+      type->address_space == MTLC_ADDRESS_SPACE_GENERIC) {
+    return 1;
+  }
+  buffer = ii_addr_to_buffer(machine, address, 0, &offset);
+  if (!buffer) {
+    return 1;
+  }
+  actual = buffer->device_space;
+  if (type->address_space == MTLC_ADDRESS_SPACE_GLOBAL ||
+      type->address_space == MTLC_ADDRESS_SPACE_CONSTANT) {
+    if (actual == MTLC_ADDRESS_SPACE_WORKGROUP ||
+        actual == MTLC_ADDRESS_SPACE_PRIVATE) {
+      snprintf(machine->detail, sizeof(machine->detail),
+               "line %llu claims %s memory and this address is in %s memory",
+               (unsigned long long)line,
+               ii_gpu_space_word((unsigned char)type->address_space),
+               ii_gpu_space_word(actual));
+      machine->status = IR_INTERP_TRAP;
+      return 0;
+    }
+    return 1;
+  }
+  if ((unsigned char)type->address_space != actual) {
+    snprintf(machine->detail, sizeof(machine->detail),
+             "line %llu claims %s memory and this address is in %s memory",
+             (unsigned long long)line,
+             ii_gpu_space_word((unsigned char)type->address_space),
+             ii_gpu_space_word(actual));
+    machine->status = IR_INTERP_TRAP;
+    return 0;
+  }
+  return 1;
+}
+
+static const char *ii_gpu_launch_kernel_name(IIFrame *frame,
+                                             const IRInstruction *insn,
+                                             size_t index) {
+  if (insn->text) {
+    return insn->text;
+  }
+  if (insn->lhs.kind == IR_OPERAND_NONE || !insn->lhs.name || !frame->fn) {
+    return NULL;
+  }
+  for (size_t i = index; i > 0; i--) {
+    const IRInstruction *producer = &frame->fn->instructions[i - 1];
+    if (!producer->dest.name || strcmp(producer->dest.name, insn->lhs.name) != 0)
+      continue;
+    if (producer->op == IR_OP_CALL && producer->text &&
+        strcmp(producer->text, "mtlc_gpu_kernel_handle") == 0 &&
+        producer->argument_count == 1 &&
+        producer->arguments[0].kind == IR_OPERAND_STRING)
+      return producer->arguments[0].name;
+    return NULL;
+  }
+  return NULL;
+}
+
+/* Run one block, one barrier phase at a time. Every live work item advances to
+   its next barrier; when they have all stopped, the phase ends and the next
+   one begins. A work item that finished while others stopped at a barrier is
+   the divergent barrier this catches, and the message names the site. */
+static int ii_gpu_run_block(IRInterpMachine *machine, IRFunction *kernel,
+                            const IRInterpValue *args, size_t nargs) {
+  IIGpuGrid *gpu = &machine->gpu;
+  long long count = gpu->threads_per_block;
+  IIGpuThread *threads = NULL;
+  IIFrame *frames = NULL;
+  long long block_x = gpu->block[0];
+  long long block_y = gpu->block[1];
+  int ok = 1;
+
+  if (count <= 0) {
+    return 1;
+  }
+  threads = (IIGpuThread *)calloc((size_t)count, sizeof(IIGpuThread));
+  frames = (IIFrame *)calloc((size_t)count, sizeof(IIFrame));
+  if (!threads || !frames) {
+    free(threads);
+    free(frames);
+    ii_fail(machine, IR_INTERP_TRAP, "out of memory running a workgroup");
+    return 0;
+  }
+  for (long long t = 0; t < count; t++) {
+    threads[t].frame = &frames[t];
+  }
+
+  while (ok) {
+    long long suspended = 0;
+    long long finished = 0;
+    long long live = 0;
+    size_t phase_site = 0;
+    size_t phase_line = 0;
+    for (long long t = 0; t < count && ok; t++) {
+      IRInterpValue thread_result = ii_int_value(0);
+      if (threads[t].finished) {
+        continue;
+      }
+      live++;
+      gpu->tid[0] = t % block_x;
+      gpu->tid[1] = (t / block_x) % block_y;
+      gpu->tid[2] = t / (block_x * block_y);
+      gpu->lane = t;
+      threads[t].suspended = 0;
+      machine->gpu_resume = &threads[t];
+      if (!ii_exec_function(machine, kernel, args, nargs, &thread_result)) {
+        machine->gpu_resume = NULL;
+        ok = 0;
+        break;
+      }
+      machine->gpu_resume = NULL;
+      if (threads[t].suspended) {
+        suspended++;
+        if (!phase_site) {
+          phase_site = threads[t].barrier_site;
+          phase_line = threads[t].barrier_line;
+        } else if (phase_site != threads[t].barrier_site) {
+          snprintf(machine->detail, sizeof(machine->detail),
+                   "two work items of one block stopped at different barriers, "
+                   "one at line %llu and one at line %llu",
+                   (unsigned long long)phase_line,
+                   (unsigned long long)threads[t].barrier_line);
+          machine->status = IR_INTERP_TRAP;
+          ok = 0;
+        }
+      } else {
+        threads[t].finished = 1;
+        finished++;
+      }
+    }
+    if (!ok) {
+      break;
+    }
+    if (suspended == 0) {
+      break;
+    }
+    if (finished > 0) {
+      snprintf(machine->detail, sizeof(machine->detail),
+               "the barrier at line %llu was reached by %lld of the %lld work "
+               "items still running in this workgroup",
+               (unsigned long long)phase_line, suspended, live);
+      machine->status = IR_INTERP_TRAP;
+      ok = 0;
+      break;
+    }
+    gpu->threads_run += suspended;
+  }
+
+  gpu->threads_run += count;
+  free(threads);
+  free(frames);
+  return ok;
+}
+
+static int ii_op_gpu_launch(IRInterpMachine *machine, IIFrame *frame,
+                            const IRInstruction *insn, size_t index) {
+  const size_t controls = 8;
+  const char *kernel_name = ii_gpu_launch_kernel_name(frame, insn, index);
+  IRFunction *kernel = kernel_name ? ii_find_function(machine, kernel_name) : NULL;
+  IRInterpValue controls_value[8];
+  IRInterpValue args[24];
+  size_t nargs;
+  long long grid[3];
+  long long block[3];
+  long long total_threads;
+  IIGpuGrid saved = machine->gpu;
+  int ok = 1;
+
+  if (!kernel || kernel->instruction_count == 0) {
+    snprintf(machine->detail, sizeof(machine->detail),
+             "dispatch of '%s', which this module does not define; `mettle "
+             "test` runs the grid on the CPU and needs the kernel's body",
+             kernel_name ? kernel_name : "an untyped handle");
+    machine->status = IR_INTERP_UNSUPPORTED;
+    return 0;
+  }
+  if (insn->argument_count < controls) {
+    ii_fail(machine, IR_INTERP_UNSUPPORTED, "dispatch without launch controls");
+    return 0;
+  }
+  nargs = insn->argument_count - controls;
+  if (nargs > 24) {
+    ii_fail(machine, IR_INTERP_UNSUPPORTED, "dispatch arity > 24");
+    return 0;
+  }
+  for (size_t i = 0; i < controls; i++) {
+    if (!ii_fetch(machine, frame, &insn->arguments[i], &controls_value[i])) {
+      return 0;
+    }
+  }
+  for (size_t i = 0; i < nargs; i++) {
+    if (!ii_fetch(machine, frame, &insn->arguments[controls + i], &args[i])) {
+      return 0;
+    }
+  }
+  for (size_t d = 0; d < 3; d++) {
+    grid[d] = controls_value[d].i > 0 ? controls_value[d].i : 1;
+    block[d] = controls_value[3 + d].i > 0 ? controls_value[3 + d].i : 1;
+  }
+  total_threads = grid[0] * grid[1] * grid[2] * block[0] * block[1] * block[2];
+  if (total_threads <= 0 || total_threads > II_GPU_MAX_THREADS) {
+    snprintf(machine->detail, sizeof(machine->detail),
+             "dispatch of '%s' asks for %lld work items; `mettle test` runs at "
+             "most %d on the CPU",
+             kernel_name, total_threads, II_GPU_MAX_THREADS);
+    machine->status = IR_INTERP_UNSUPPORTED;
+    return 0;
+  }
+
+  memset(&machine->gpu, 0, sizeof(machine->gpu));
+  machine->gpu.active = 1;
+  machine->gpu.kernel_name = kernel_name;
+  machine->gpu.threads_per_block = block[0] * block[1] * block[2];
+  for (size_t d = 0; d < 3; d++) {
+    machine->gpu.grid[d] = grid[d];
+    machine->gpu.block[d] = block[d];
+  }
+  for (long long bz = 0; bz < grid[2] && ok; bz++) {
+    for (long long by = 0; by < grid[1] && ok; by++) {
+      for (long long bx = 0; bx < grid[0] && ok; bx++) {
+        machine->gpu.ctaid[0] = bx;
+        machine->gpu.ctaid[1] = by;
+        machine->gpu.ctaid[2] = bz;
+        machine->gpu.shared_count = 0;
+        machine->gpu.barrier_count = 0;
+        machine->gpu.uniform_count = 0;
+        ok = ii_gpu_run_block(machine, kernel, args, nargs);
+      }
+    }
+  }
+  machine->gpu = saved;
+  return ok;
+}
+
 static int ii_op_call(IRInterpMachine *machine, IIFrame *frame,
                        const IRInstruction *insn) {
   if (!insn->text) {
@@ -4937,6 +5404,10 @@ static int ii_op_call(IRInterpMachine *machine, IIFrame *frame,
   }
   IRFunction *callee = ii_find_function(machine, insn->text);
   IRInterpValue call_result = ii_int_value(0);
+  if (!callee && machine->gpu.active &&
+      ii_gpu_index_intrinsic(machine, insn->intrinsic, &call_result)) {
+    return ii_store_dest(machine, frame, &insn->dest, &call_result);
+  }
   if (callee && callee->instruction_count > 0) {
     if (!ii_exec_function(machine, callee, call_args, call_arg_count,
                           &call_result)) {
@@ -5719,26 +6190,38 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
     machine->pure_depth++;
   }
 
+  /* A work item resuming after a barrier brings its frame back with it; a
+     fresh call builds one. Everything below is the same loop either way. */
+  IIGpuThread *resume = machine->gpu_resume;
+  int resumed = resume && resume->started;
+  machine->gpu_resume = NULL;
+
   IIFrame frame;
-  memset(&frame, 0, sizeof(frame));
-  frame.fn = fn;
+  if (resumed) {
+    frame = *(IIFrame *)resume->frame;
+  } else {
+    memset(&frame, 0, sizeof(frame));
+    frame.fn = fn;
+  }
 
   int ok = 0;
 
-  if (!ii_bind_parameters(machine, &frame, fn, args, arg_count)) {
-    goto done;
-  }
+  if (!resumed) {
+    if (!ii_bind_parameters(machine, &frame, fn, args, arg_count)) {
+      goto done;
+    }
 
-  if (!ii_build_label_table(machine, &frame, fn)) {
-    goto done;
-  }
-  if (!ii_home_addressed_parameters(machine, &frame, fn)) {
-    goto done;
+    if (!ii_build_label_table(machine, &frame, fn)) {
+      goto done;
+    }
+    if (!ii_home_addressed_parameters(machine, &frame, fn)) {
+      goto done;
+    }
   }
 
   long long *exec_counts = ii_counts_for(machine, fn);
 
-  size_t pc = 0;
+  size_t pc = resumed ? resume->pc : 0;
   while (pc < fn->instruction_count) {
     if (--machine->fuel < 0) {
       ii_fail(machine, IR_INTERP_FUEL, fn->name ? fn->name : "?");
@@ -5927,6 +6410,12 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
         goto done;
       }
       out.undefined = a.undefined;
+      /* A cast that claims a device space or an alignment is a claim, and this
+         is the machine that does not trust it. */
+      if (!ii_gpu_check_pointer_claim(machine, insn->value_type, &out,
+                                      insn->location.line)) {
+        goto done;
+      }
       if (!ii_store_dest(machine, &frame, &insn->dest, &out)) {
         goto done;
       }
@@ -5961,6 +6450,43 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
       }
       pc++;
       break;
+    }
+    case IR_OP_GPU_LAUNCH: {
+      if (!ii_op_gpu_launch(machine, &frame, insn, pc)) {
+        goto done;
+      }
+      pc++;
+      break;
+    }
+    case IR_OP_ADDRESS_SPACE_ALLOC: {
+      if (!ii_gpu_address_space_alloc(machine, &frame, insn)) {
+        goto done;
+      }
+      pc++;
+      break;
+    }
+    case IR_OP_BARRIER: {
+      if (!machine->gpu.active) {
+        ii_fail(machine, IR_INTERP_UNSUPPORTED,
+                "barrier outside a dispatched grid");
+        goto done;
+      }
+      if (!resume) {
+        ii_fail(machine, IR_INTERP_UNSUPPORTED,
+                "a barrier inside a device helper; `mettle test` runs a "
+                "block's work items in the phases the kernel's own barriers "
+                "cut it into, so move this one into the kernel");
+        goto done;
+      }
+      ii_gpu_barrier_arrive(machine, pc, insn->location.line);
+      *(IIFrame *)resume->frame = frame;
+      resume->pc = pc + 1;
+      resume->started = 1;
+      resume->suspended = 1;
+      resume->barrier_site = pc;
+      resume->barrier_line = insn->location.line;
+      ok = 1;
+      goto done;
     }
     case IR_OP_RETURN: {
       IRInterpValue value = ii_int_value(0);
@@ -6055,6 +6581,12 @@ done:
     machine->pure_depth--;
     machine->pure_fn = saved_pure_fn;
     machine->pure_declared = saved_pure_declared;
+  }
+  /* A work item stopped at a barrier keeps everything: its locals are still
+     live, and the phase after the barrier reads them. */
+  if (resume && resume->suspended) {
+    machine->depth--;
+    return ok;
   }
   /* This frame's local storage dies with it, except a buffer the function
    * returned the address of: an aggregate return travels that way and stays

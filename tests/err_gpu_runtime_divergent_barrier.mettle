@@ -1,0 +1,21 @@
+// A barrier some work item walks around. The interpreter runs the block in the
+// phases its barriers cut it into and reports the site and the count.
+
+kernel half_the_block(a: float32 global*, out: float32 global*) {
+  workgroup var tile: float32[4];
+  var lane: int32 = thread.x;
+  if (lane < 2) {
+    tile[lane] = a[lane];
+    barrier(workgroup, acq_rel);
+  }
+  out[block.x] = tile[0];
+}
+
+@test fn a_divergent_barrier_is_caught() -> int32 {
+  var a: float32[4];
+  var out: float32[1];
+  a[0] = 1.0;
+  dispatch half_the_block[grid: (1, 1, 1), block: (4, 1, 1)](
+      (float32 global*)&a[0], (float32 global*)&out[0]);
+  return 0;
+}
