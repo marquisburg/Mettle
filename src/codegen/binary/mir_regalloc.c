@@ -1366,6 +1366,10 @@ static int mir_clobber_index_ensure(const MirFunction *fn) {
       case MIR_SETCC:
       case MIR_FSETCC:
         ok = mir_clobber_list_push(&ix->rax_implicit, (int)k);
+        if (ok && in->op == MIR_FSETCC &&
+            mir_fsetcc_unordered_cc(in->cc) >= 0) {
+          ok = mir_clobber_list_push(&ix->rcx_implicit, (int)k);
+        }
         break;
       case MIR_SHL:
       case MIR_SHR:
@@ -1476,6 +1480,10 @@ static int mir_reg_clobbered_in_range(const MirFunction *fn,
     case MIR_SETCC:
     case MIR_FSETCC:
       if (reg == BINARY_GP_RAX) {
+        return 1;
+      }
+      if (in->op == MIR_FSETCC && reg == BINARY_GP_RCX &&
+          mir_fsetcc_unordered_cc(in->cc) >= 0) {
         return 1;
       }
       break;
@@ -1729,6 +1737,20 @@ static int mir_spill_rank(const MirFunction *fn, const unsigned char *use_depth,
   return (int)use_depth[v];
 }
 
+const char *g_mir_ra_trace_name = NULL;
+
+static int mir_env_regalloc_trace(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    cached = getenv("METTLE_REGALLOC_TRACE") ? 1 : 0;
+  }
+  return cached;
+}
+
+static const char *mir_ra_trace_name(void) {
+  return g_mir_ra_trace_name ? g_mir_ra_trace_name : "?";
+}
+
 static int mir_color_graph(MirFunction *fn, const BinaryGpRegister *gp_leaf_pool,
                            size_t gp_leaf_n,
                            const BinaryGpRegister *gp_cross_pool,
@@ -1871,9 +1893,12 @@ static int mir_color_graph(MirFunction *fn, const BinaryGpRegister *gp_leaf_pool
    * retain the interval graph as the conservative fallback. */
   {
     MirLiveCfg cfg;
-    /* The coloring core is quadratic in vreg count. Keep the more detailed
-     * graph on application-sized functions, where it changes allocation, and
-     * leave generated stress functions on the existing interval graph. */
+    /* The exact walk adds one dataflow solve and one interference matrix to
+     * what the interval graph already pays, so it is bounded in the same
+     * currency mir_live_cfg_build refuses past. A vreg count in place of that
+     * work bound cut off application-sized functions: a 560-vreg main is
+     * ordinary, and the interval graph spilled 99 of its values where the
+     * exact graph spills 3. */
     size_t branch_count = 0;
     for (size_t i = 0; i < fn->insn_count; i++) {
       if (mir_inst_ends_block(&fn->insns[i])) {
@@ -1884,8 +1909,14 @@ static int mir_color_graph(MirFunction *fn, const BinaryGpRegister *gp_leaf_pool
     if (interval_only < 0) {
       interval_only = getenv("METTLE_INTERVAL_INTERFERENCE") ? 1 : 0;
     }
-    int use_cfg = !interval_only && N <= 512 && fn->insn_count >= 8 &&
-                  fn->insn_count <= 2048 && branch_count >= 1;
+    int use_cfg = !interval_only && fn->insn_count >= 8 && branch_count >= 1 &&
+                  (unsigned long long)fn->insn_count *
+                          (unsigned long long)words <=
+                      MIR_LIVE_CFG_MAX_WORK;
+    if (mir_env_regalloc_trace()) {
+      fprintf(stderr, "RA\t%s\tvregs=%zu\tinsns=%zu\tblocks=%zu\tcfg=%d\n",
+              mir_ra_trace_name(), N, fn->insn_count, branch_count, use_cfg);
+    }
     int have_cfg = use_cfg && mir_live_cfg_build(fn, &cfg, 1);
     unsigned long long *live =
         have_cfg ? (unsigned long long *)malloc(words * sizeof(*live)) : NULL;
@@ -1987,6 +2018,10 @@ static int mir_color_graph(MirFunction *fn, const BinaryGpRegister *gp_leaf_pool
          * pressure. A small edge change can reshuffle otherwise sound colors
          * without removing enough contention to pay for that disruption. One
          * full leaf register set is a stable, target-derived cutoff. */
+        if (mir_env_regalloc_trace()) {
+          fprintf(stderr, "RA-PRESSURE\t%s\tinterval=%d\texact=%d\n",
+                  mir_ra_trace_name(), interval_pressure, exact_pressure);
+        }
         if (interval_pressure - exact_pressure <
             (int)MIR_GP_LEAF_POOL_MAX) {
           free(inter);
@@ -2331,6 +2366,22 @@ static int mir_regalloc_color(MirFunction *fn) {
     return 0;
   }
   mir_drop_unused_preserves(fn);
+  if (mir_env_regalloc_trace()) {
+    size_t spilled = 0, kept = 0;
+    for (size_t v = 0; v < fn->vreg_count; v++) {
+      const MirVreg *vr = &fn->vregs[v];
+      if (vr->live_start == MIR_LIVE_NONE || vr->address_taken) {
+        continue;
+      }
+      if (vr->assigned && vr->in_register) {
+        kept++;
+      } else if (vr->assigned) {
+        spilled++;
+      }
+    }
+    fprintf(stderr, "RA-DONE\t%s\tkept=%zu\tspilled=%zu\n",
+            mir_ra_trace_name(), kept, spilled);
+  }
   fn->spill_bytes = next_spill - (fn->context ? fn->context->raw_frame_size : 0);
   if (!mir_regalloc_report_saved(fn)) {
     fn->has_error = 1;

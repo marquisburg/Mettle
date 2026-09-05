@@ -722,6 +722,16 @@ const char *mir_opcode_name(MirOpcode op);
  * 0 on failure (sets fn->has_error). Defined in mir_regalloc.c. */
 int mir_regalloc(MirFunction *fn);
 
+static inline int mir_fsetcc_unordered_cc(unsigned char cc) {
+  if (cc == 0x94) {
+    return 0x9B;
+  }
+  if (cc == 0x95) {
+    return 0x9A;
+  }
+  return -1;
+}
+
 /* Encode an allocated MIR function into fn->context->code, emitting prologue and
  * epilogue and populating the context's label/relocation tables. Returns 0 on
  * failure. Defined in mir_encode.c. */

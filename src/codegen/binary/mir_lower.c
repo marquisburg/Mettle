@@ -57,7 +57,10 @@ static const char *mir_env_skipfn(void) {
   return cached;
 }
 
+static int g_mir_gate_reported = 0;
+
 static int mir_trace_bail(const IRFunction *fn, const char *reason) {
+  g_mir_gate_reported = 1;
   if (mir_env_trace()) {
     fprintf(stderr, "MIR-BAIL\t%s\t%s\n", reason,
             (fn && fn->name) ? fn->name : "?");
@@ -72,6 +75,8 @@ static int mir_trace_bail(const IRFunction *fn, const char *reason) {
   }
   return 0;
 }
+
+extern const char *g_mir_ra_trace_name;
 
 /* ---- inline kernel operand walk ----------------------------------------- */
 
@@ -431,6 +436,8 @@ static int mir_float_cmp_info(const char *op, int fused, int *swap,
   if (strcmp(op, ">=") == 0) { *swap = 0; *cc = fused ? 0x82 : 0x93; return 1; }
   if (strcmp(op, "<") == 0)  { *swap = 1; *cc = fused ? 0x86 : 0x97; return 1; }
   if (strcmp(op, "<=") == 0) { *swap = 1; *cc = fused ? 0x82 : 0x93; return 1; }
+  if (!fused && strcmp(op, "==") == 0) { *swap = 0; *cc = 0x94; return 1; }
+  if (!fused && strcmp(op, "!=") == 0) { *swap = 0; *cc = 0x95; return 1; }
   return 0;
 }
 
@@ -1562,7 +1569,7 @@ static int mir_gate_arith(CodeGenerator *generator,
   case IR_OP_BINARY: {
     MirOpcode tmp;
     if (!in->text) {
-      return 0;
+      return mir_trace_bail(ir_function, "binary:no_text");
     }
     /* String '+' is the concat kernel; only the fallback emitter has it. */
     if (in->value_type && in->value_type->kind == MTLC_TYPE_STRING) {
@@ -1574,7 +1581,7 @@ static int mir_gate_arith(CodeGenerator *generator,
       unsigned char fcc;
       if (!mir_float_arith_opcode(in->text, &tmp) &&
           !mir_float_cmp_info(in->text, 0, &sw, &fcc)) {
-        return 0;
+        return mir_trace_bail(ir_function, "binary:float_op");
       }
     } else if (!mir_arith_opcode(in->text, &tmp) &&
                !mir_is_comparison(in->text) &&
@@ -1582,13 +1589,13 @@ static int mir_gate_arith(CodeGenerator *generator,
       return mir_trace_bail(ir_function, "binary:other");
     }
     if (in->dest.kind != IR_OPERAND_TEMP && in->dest.kind != IR_OPERAND_SYMBOL) {
-      return 0;
+      return mir_trace_bail(ir_function, "binary:dest");
     }
     for (int k = 0; k < 2; k++) {
       const IROperand *o = k == 0 ? &in->lhs : &in->rhs;
       if (o->kind != IR_OPERAND_TEMP && o->kind != IR_OPERAND_SYMBOL &&
           o->kind != IR_OPERAND_INT && o->kind != IR_OPERAND_FLOAT) {
-        return 0;
+        return mir_trace_bail(ir_function, "binary:operand_kind");
       }
     }
     break;
@@ -2594,8 +2601,22 @@ static int mir_gate_indirect_aggregate(CodeGenerator *generator,
   return 1;
 }
 
+static int mir_function_is_eligible_inner(CodeGenerator *generator,
+                                          IRFunction *ir_function);
+
 int mir_function_is_eligible(CodeGenerator *generator,
                              IRFunction *ir_function) {
+  int eligible;
+  g_mir_gate_reported = 0;
+  eligible = mir_function_is_eligible_inner(generator, ir_function);
+  if (!eligible && !g_mir_gate_reported) {
+    mir_trace_bail(ir_function, "unreported");
+  }
+  return eligible;
+}
+
+static int mir_function_is_eligible_inner(CodeGenerator *generator,
+                                          IRFunction *ir_function) {
   if (!generator || !ir_function) {
     return 0;
   }
@@ -10558,6 +10579,7 @@ int code_generator_binary_emit_function_via_mir(
   mir_place_const_pool(&fn);
   mir_sink_cold_exits(&fn);
 
+  g_mir_ra_trace_name = ir_function->name;
   if (!mir_regalloc(&fn) || fn.has_error) {
     goto oom;
   }

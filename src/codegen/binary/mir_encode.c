@@ -2884,7 +2884,15 @@ int mir_encode(MirFunction *fn) {
       int cmp = (in->width == 4)
                     ? binary_emit_ucomiss_xmm_xmm(&ctx->code, av, bv)
                     : binary_emit_ucomisd_xmm_xmm(&ctx->code, av, bv);
+      int unordered_cc = mir_fsetcc_unordered_cc(in->cc);
+      int merge_opcode = in->cc == 0x94 ? 0x20 : 0x08;
       if (!cmp || !binary_emit_setcc_reg8(&ctx->code, in->cc, BINARY_GP_RAX) ||
+          (unordered_cc >= 0 &&
+           (!binary_emit_setcc_reg8(&ctx->code, (unsigned char)unordered_cc,
+                                    BINARY_GP_RCX) ||
+            !binary_emit_alu_reg8_reg8(&ctx->code,
+                                       (unsigned char)merge_opcode,
+                                       BINARY_GP_RAX, BINARY_GP_RCX))) ||
           !binary_emit_movzx_eax_al(&ctx->code)) {
         ok = enc_err(fn, "out of memory in fsetcc");
         break;
