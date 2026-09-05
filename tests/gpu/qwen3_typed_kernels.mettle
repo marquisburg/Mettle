@@ -1,0 +1,151 @@
+// Three of Qwen3's kernels written twice: once with pointers that say nothing,
+// and once with the types saying where the memory lives, how a tile is laid
+// out, which values every work item shares, and which group each collective
+// speaks to. Both halves are in one file so the same compiler emits both from
+// the same source and the PTX can be compared line for line.
+//
+//   mettle -O --emit-ptx --gpu-arch=gb10 --report-gpu-types //       tests/gpu/qwen3_typed_kernels.mettle
+//
+// The same file sits beside the originals at
+// examples/llm/qwen3/gpu/kernels_typed.mettle, where examples/llm is not
+// tracked; this copy is the one the suite compiles on every build.
+//
+// The plain half is the shape kernels.mettle has: one work item per output,
+// generic pointers, an ordinary branch on a work-item index. The typed half is
+// one warp per output, a proven-uniform branch, a warp reduction that needs the
+// Warp effect a kernel provides, and a swizzled tile with a proven
+// conflict-free access.
+
+import "std/warp";
+
+extern fn sqrtf(x: float32) -> float32 = "sqrtf";
+extern fn expf(x: float32) -> float32 = "expf";
+
+type Lane = int32 where value >= 0 && value < 32;
+
+// ---- the plain half -------------------------------------------------------
+
+kernel(block = 32) gemv_plain(w: float32*, x: float32*, y: float32*, K: int32,
+                              rows: int32) {
+  var o: int32 = block.x * block_dim.x + thread.x;
+  if (o < rows) {
+    var acc: float32 = 0.0;
+    var k: int32 = 0;
+    while (k < K) {
+      acc = acc + w[o * K + k] * x[k];
+      k = k + 1;
+    }
+    y[o] = acc;
+  }
+}
+
+kernel(block = 32) rmsnorm_plain(x: float32*, w: float32*, y: float32*,
+                                 n: int32, eps: float32, rows: int32) {
+  var r: int32 = block.x * block_dim.x + thread.x;
+  if (r < rows) {
+    var base: int32 = r * n;
+    var ss: float32 = 0.0;
+    var i: int32 = 0;
+    while (i < n) {
+      var v: float32 = x[base + i];
+      ss = ss + v * v;
+      i = i + 1;
+    }
+    var inv: float32 = 1.0 / sqrtf(ss / (float32)n + eps);
+    i = 0;
+    while (i < n) {
+      y[base + i] = x[base + i] * inv * w[i];
+      i = i + 1;
+    }
+  }
+}
+
+// One work item per (key, head): the query is re-read from memory for every
+// key, and every key vector is read straight out of the cache.
+kernel(block = 32) attn_tile_plain(Q: float32*, Kc: float32*, scores: float32*,
+                                   heads: int32) {
+  var idx: int32 = block.x * block_dim.x + thread.x;
+  if (idx < heads * 32) {
+    var head: int32 = idx / 32;
+    var key: int32 = idx % 32;
+    var s: float32 = 0.0;
+    var d: int32 = 0;
+    while (d < 32) {
+      s = s + Q[head * 32 + d] * Kc[(head * 32 + key) * 32 + d];
+      d = d + 1;
+    }
+    scores[idx] = s;
+  }
+}
+
+// ---- the typed half -------------------------------------------------------
+
+// One warp per row. `w` and `x` are read and never written, so they are
+// constant memory and load through the read-only path; `y` is global. The row
+// is uniform across the warp, so the guard is a group decision and the warp
+// reduction below is reachable.
+kernel(block = 32) gemv_typed(w: float32 constant align(16)*,
+                              x: float32 constant align(16)*,
+                              y: float32 global*, K: int32, rows: int32) {
+  var lane: Lane = (Lane)thread.x;
+  var row: Uniform<int32> = (Uniform<int32>)block.x;
+  @uniform! if ((int32)row < rows) {
+    var acc: float32 = 0.0;
+    var k: int32 = (int32)lane;
+    while (k < K) {
+      acc = acc + w[(int32)row * K + k] * x[k];
+      k = k + 32;
+    }
+    var total: float32 = warp_sum_f32(acc);
+    if ((int32)lane == 0) {
+      y[(int32)row] = total;
+    }
+  }
+}
+
+kernel(block = 32) rmsnorm_typed(x: float32 constant align(16)*,
+                                 w: float32 constant align(16)*,
+                                 y: float32 global*, n: int32, eps: float32,
+                                 rows: int32) {
+  var lane: Lane = (Lane)thread.x;
+  var row: Uniform<int32> = (Uniform<int32>)block.x;
+  @uniform! if ((int32)row < rows) {
+    var base: int32 = (int32)row * n;
+    var ss: float32 = 0.0;
+    var i: int32 = (int32)lane;
+    while (i < n) {
+      var v: float32 = x[base + i];
+      ss = ss + v * v;
+      i = i + 32;
+    }
+    var inv: float32 = 1.0 / sqrtf(warp_sum_f32(ss) / (float32)n + eps);
+    i = (int32)lane;
+    while (i < n) {
+      y[base + i] = x[base + i] * inv * w[i];
+      i = i + 32;
+    }
+  }
+}
+
+// One warp per head. The head's 32 key vectors are staged into a swizzled tile
+// once and read back by column; the swizzle is what makes both the staging and
+// the reading one access each, and `@conflict_free!` is what says so.
+kernel(block = 32) attn_tile_typed(Q: float32 constant align(16)*,
+                                   Kc: float32 constant align(16)*,
+                                   scores: float32 global*, heads: int32) {
+  workgroup var tile: float32[32, 32] layout swizzle32;
+  var lane: Lane = (Lane)thread.x;
+  var head: Uniform<int32> = (Uniform<int32>)block.x;
+  @uniform! if ((int32)head < heads) {
+    for d in 0..32 {
+      @conflict_free! tile[d][(int32)lane] =
+          Kc[((int32)head * 32 + (int32)lane) * 32 + d];
+    }
+    barrier(workgroup, acq_rel);
+    var s: float32 = 0.0;
+    for d in 0..32 {
+      @conflict_free! s = s + Q[(int32)head * 32 + d] * tile[d][(int32)lane];
+    }
+    scores[(int32)head * 32 + (int32)lane] = s;
+  }
+}

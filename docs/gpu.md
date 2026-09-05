@@ -1114,6 +1114,54 @@ checked result, and a captured launch graph -- is
 [`examples/gpu_inference/`](../examples/gpu_inference/), which runs one
 transformer feed-forward block on the GPU.
 
+### What the four items cost and buy
+
+`tests/gpu/qwen3_typed_kernels.mettle`, and the same file beside the originals
+at `examples/llm/qwen3/gpu/kernels_typed.mettle`, holds three of Qwen3's
+kernels written twice in one file: once with pointers that say nothing, and once with
+the types saying where the memory lives, how the tile is laid out, which values
+every work item shares, and which group each collective speaks to. The same
+compiler emits both, so the two halves compare directly.
+
+`-O --emit-ptx --gpu-arch=gb10`, PTX instructions per entry:
+
+| Kernel | instr | ld.global.nc | ld.global | ld.shared | st.shared | generic | bra.uni | bra | bar.sync | shfl.sync |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `gemv_plain` | 54 | 0 | 2 | 0 | 0 | 0 | 1 | 2 | 0 | 0 |
+| `gemv_typed` | 111 | 2 | 0 | 0 | 0 | 0 | 1 | 3 | 0 | 6 |
+| `rmsnorm_plain` | 82 | 0 | 3 | 0 | 0 | 0 | 2 | 3 | 0 | 0 |
+| `rmsnorm_typed` | 130 | 3 | 0 | 0 | 0 | 0 | 1 | 4 | 0 | 6 |
+| `attn_tile_plain` | 70 | 0 | 2 | 0 | 0 | 0 | 1 | 2 | 0 | 0 |
+| `attn_tile_typed` | 115 | 2 | 0 | 1 | 1 | 0 | 3 | 2 | 1 | 0 |
+
+The same modules assembled for `sm_121a` and disassembled, SASS instructions
+per entry:
+
+| Kernel | LDG.E.CONSTANT | LDG.E | LDS | STS | BAR.SYNC | SHFL | VOTE | total |
+|---|---|---|---|---|---|---|---|---|
+| `gemv_plain` | 0 | 2 | 0 | 0 | 0 | 0 | 0 | 48 |
+| `gemv_typed` | 14 | 0 | 0 | 0 | 0 | 6 | 1 | 176 |
+| `rmsnorm_plain` | 0 | 3 | 0 | 0 | 0 | 0 | 0 | 384 |
+| `rmsnorm_typed` | 9 | 0 | 0 | 0 | 0 | 6 | 1 | 472 |
+| `attn_tile_plain` | 0 | 2 | 0 | 0 | 0 | 0 | 0 | 72 |
+| `attn_tile_typed` | 2 | 0 | 1 | 1 | 1 | 0 | 0 | 96 |
+
+Every read-only load in the typed half reaches SASS as `LDG.E.CONSTANT`, the
+read-only cache path, and none stays a coherent `LDG.E`. The static count rises
+because each typed kernel is one warp per row rather than one work item per
+row: the loop it runs is a thirty-second of the plain one's, and its reduction
+is six `SHFL` instead of thirty-one serial adds. `ptxas -v` reports the typed
+attention tile at 14 registers, one barrier and 4096 bytes of workgroup memory,
+against 11 registers and none for the plain one.
+
+The address-space contrast is clearest where a device helper is involved:
+`tests/gpu/address_spaces.mettle` and its unspaced twin are the same kernel,
+and `--report-gpu-types` says 5 of 5 accesses named their space against 2 of 8,
+with three separate loads removed by one `ld.global.v4.f32`.
+
+These are compile-time and assembler numbers. Nothing here was run on a GB10:
+see [Known limitations](known-limitations.md#device-types-on-real-hardware).
+
 ## Which GPU, and what it gets built for
 
 `mettle --gpu-info` reports what the machine has and which target `--emit-ptx`

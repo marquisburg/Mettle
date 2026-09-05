@@ -1087,10 +1087,13 @@ int ir_lower_static_view_offset(IRLoweringContext *context,
            ir_emit_binary_temp(context, function, "+", &partial, &within,
                                location, out_offset);
   }
+  case VIEW_LAYOUT_SWIZZLE32:
   case VIEW_LAYOUT_SWIZZLE64:
   case VIEW_LAYOUT_SWIZZLE128: {
     long long chunk_bytes =
-        view_type->view_layout == VIEW_LAYOUT_SWIZZLE64 ? 8 : 16;
+        view_type->view_layout == VIEW_LAYOUT_SWIZZLE32   ? 4
+        : view_type->view_layout == VIEW_LAYOUT_SWIZZLE64 ? 8
+                                                          : 16;
     long long chunk = element_size ? chunk_bytes / (long long)element_size : 1;
     long long chunks_per_row = chunk > 0 ? (long long)columns / chunk : 0;
     IROperand chunk_operand;

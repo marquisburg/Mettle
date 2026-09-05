@@ -339,6 +339,14 @@ Work items inside one phase run one after another, so a kernel whose work items
 race each other inside a phase gets one interleaving out of the run and not a
 verdict on the others.
 
+## Device types on real hardware
+
+The four device type items -- address spaces and alignment in the pointer type,
+layouts as types, uniformity as a declared type, and the collective effects --
+are proven by the compiler's own tests, by the grid runner in
+`mettle test`, and by `ptxas` and `nvdisasm` on the emitted module, and have
+not been executed on a GB10.
+
 ## Layouts as types
 
 A view whose extents are in its type is rank 2. `T[E0, E1, E2]` parses and

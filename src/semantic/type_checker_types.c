@@ -567,6 +567,7 @@ static const struct {
 } g_view_layouts[] = {
     {"row", VIEW_LAYOUT_ROW, 0},
     {"col", VIEW_LAYOUT_COL, 0},
+    {"swizzle32", VIEW_LAYOUT_SWIZZLE32, 0},
     {"swizzle64", VIEW_LAYOUT_SWIZZLE64, 0},
     {"swizzle128", VIEW_LAYOUT_SWIZZLE128, 0},
     {"interleave", VIEW_LAYOUT_INTERLEAVE, 1},

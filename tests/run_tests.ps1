@@ -14712,6 +14712,69 @@ catch {
     -Reason $_.Exception.Message
 }
 
+# Three of Qwen3's kernels written twice in one file, plainly and with the four
+# device type items. The same compiler emits both, so the PTX and the SASS
+# compare directly: every read-only load moves to the read-only cache path, the
+# row guard becomes a group decision, and a serial reduction becomes a warp
+# shuffle.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $qwenPtx = Join-Path $tmpDir "qwen3_typed.ptx"
+  $qwenOut = & $CompilerPath -O --emit-ptx --gpu-arch=gb10 --report-gpu-types `
+    "tests/gpu/qwen3_typed_kernels.mettle" -o $qwenPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "typed qwen3 emit failed: $qwenOut" }
+  foreach ($fragment in @("constant memory, 16-byte aligned",
+                          "laid out swizzle32",
+                          "distinct banks")) {
+    if ($qwenOut -notmatch [regex]::Escape($fragment)) {
+      throw "--report-gpu-types did not say '$fragment': $qwenOut"
+    }
+  }
+  $qwenText = Get-Content -Raw $qwenPtx
+  $entries = @{}
+  foreach ($match in [regex]::Matches($qwenText, '(?s)\.visible \.entry (\w+)\(.*?(?=\.visible \.entry|\z)')) {
+    $entries[$match.Groups[1].Value] = $match.Value
+  }
+  foreach ($pair in @(@("gemv_plain", "gemv_typed"),
+                      @("rmsnorm_plain", "rmsnorm_typed"),
+                      @("attn_tile_plain", "attn_tile_typed"))) {
+    $plain = $entries[$pair[0]]
+    $typed = $entries[$pair[1]]
+    if (-not $plain -or -not $typed) { throw "missing $($pair[0]) or $($pair[1])" }
+    if (([regex]::Matches($plain, "ld\.global\.nc")).Count -ne 0) {
+      throw "$($pair[0]) took the read-only path without being told to"
+    }
+    if (([regex]::Matches($typed, "ld\.global\.nc")).Count -eq 0) {
+      throw "$($pair[1]) did not take the read-only path for its constant pointers"
+    }
+    if (([regex]::Matches($typed, "(?m)^\s*ld\.global\.f32")).Count -ne 0) {
+      throw "$($pair[1]) still has a coherent global load of a constant pointer"
+    }
+  }
+  if (([regex]::Matches($entries["gemv_typed"], "shfl\.sync")).Count -lt 5) {
+    throw "the typed gemv did not reduce through the warp"
+  }
+  if (([regex]::Matches($entries["attn_tile_typed"], "bar\.sync")).Count -ne 1) {
+    throw "the typed attention tile did not publish its tile once"
+  }
+  if ($ptxas) {
+    $qwenCubin = Join-Path $tmpDir "qwen3_typed.cubin"
+    $asmOut = & $ptxas.Source -arch=sm_121a -v $qwenPtx -o $qwenCubin 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      $asmOut = & $ptxas.Source -arch=compute_75 $qwenPtx -o $qwenCubin 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) { throw "ptxas rejected the typed qwen3 module: $asmOut" }
+    } elseif ($asmOut -notmatch "attn_tile_typed" -or $asmOut -notmatch "4096 bytes smem") {
+      throw "ptxas did not report the swizzled tile's workgroup memory: $asmOut"
+    }
+  }
+  Write-CaseResult -Name "gpu_qwen3_typed_kernels" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "gpu_qwen3_typed_kernels" -Passed $false -Reason $_.Exception.Message
+}
+
 # `Uniform<T>` is a claim, and the grid runner is the machine that does not
 # take it. Built with the prover told to trust its input, the run finds the
 # work item that holds a different value.

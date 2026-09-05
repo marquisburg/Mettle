@@ -304,6 +304,7 @@ static int uniform_expression(UniformContext *context, ASTNode *expression) {
 int type_checker_expression_is_uniform(TypeChecker *checker,
                                        ASTNode *expression,
                                        const char **why) {
+  /* `why` is optional: a caller that only wants the answer passes NULL. */
   UniformContext context;
   int uniform;
   if (why) {
@@ -364,6 +365,7 @@ static const char *gpu_layout_word(unsigned char layout) {
   switch (layout) {
   case VIEW_LAYOUT_ROW: return "row";
   case VIEW_LAYOUT_COL: return "col";
+  case VIEW_LAYOUT_SWIZZLE32: return "swizzle32";
   case VIEW_LAYOUT_SWIZZLE64: return "swizzle64";
   case VIEW_LAYOUT_SWIZZLE128: return "swizzle128";
   case VIEW_LAYOUT_INTERLEAVE: return "interleave";
@@ -633,9 +635,12 @@ long long type_checker_view_element_offset(const Type *view, long long row,
     }
     return (column / group) * (rows * group) + row * group + (column % group);
   }
+  case VIEW_LAYOUT_SWIZZLE32:
   case VIEW_LAYOUT_SWIZZLE64:
   case VIEW_LAYOUT_SWIZZLE128: {
-    long long chunk_bytes = view->view_layout == VIEW_LAYOUT_SWIZZLE64 ? 8 : 16;
+    long long chunk_bytes = view->view_layout == VIEW_LAYOUT_SWIZZLE32   ? 4
+                            : view->view_layout == VIEW_LAYOUT_SWIZZLE64 ? 8
+                                                                         : 16;
     long long chunk = element_size ? chunk_bytes / element_size : 1;
     long long chunks_per_row = chunk > 0 ? columns / chunk : 0;
     if (chunk <= 0 || chunks_per_row <= 0) {
@@ -672,17 +677,25 @@ static void conflict_check_access(ConflictContext *context, ASTNode *outer,
                        : 4;
   long long element_size = view->base_type ? (long long)view->base_type->size : 4;
   long long seen[128];
-  long long lane;
+  /* One of the two indices may be uniform rather than a function of the work
+     item: a loop counter every work item is at the same value of. The proof
+     then has to hold at each of its values, and the view's own extent says
+     how many there are. */
+  long long fixed_row = 0;
+  long long fixed_column = 0;
+  int row_from_lane = lane_value(context->checker, inner_index->index, 0, 0,
+                                 &fixed_row);
+  int column_from_lane = lane_value(context->checker, outer_index->index, 0, 0,
+                                    &fixed_column);
+  long long sweep_extent = 1;
+  int sweep_row = 0;
+  int sweep_column = 0;
   if (context->failed || width <= 0 || width > 128) {
     return;
   }
-  for (lane = 0; lane < width; lane++) {
-    long long row = 0;
-    long long column = 0;
-    long long offset;
-    long long bank;
-    if (!lane_value(context->checker, inner_index->index, lane, 0, &row) ||
-        !lane_value(context->checker, outer_index->index, lane, 0, &column)) {
+  if (!row_from_lane) {
+    if (!type_checker_expression_is_uniform(context->checker,
+                                            inner_index->index, NULL)) {
       context->failed = 1;
       snprintf(context->detail, sizeof(context->detail),
                "the index does not follow from the work item alone, so the "
@@ -690,20 +703,73 @@ static void conflict_check_access(ConflictContext *context, ASTNode *outer,
       context->where = outer->location;
       return;
     }
-    offset = type_checker_view_element_offset(view, row, column);
-    bank = ((offset * element_size) / bank_bytes) % banks;
-    for (long long earlier = 0; earlier < lane; earlier++) {
-      if (seen[earlier] == bank) {
+    sweep_row = 1;
+    sweep_extent = (long long)view->view_extents[0];
+  }
+  if (!column_from_lane) {
+    if (sweep_row ||
+        !type_checker_expression_is_uniform(context->checker,
+                                            outer_index->index, NULL)) {
+      context->failed = 1;
+      snprintf(context->detail, sizeof(context->detail),
+               "the index does not follow from the work item alone, so the "
+               "addresses one subgroup touches are not known here");
+      context->where = outer->location;
+      return;
+    }
+    sweep_column = 1;
+    sweep_extent = (long long)view->view_extents[1];
+  }
+  if (sweep_extent <= 0 || sweep_extent > 4096) {
+    context->failed = 1;
+    snprintf(context->detail, sizeof(context->detail),
+             "the view's extent is not a size this proof can walk");
+    context->where = outer->location;
+    return;
+  }
+  for (long long fixed = 0; fixed < sweep_extent; fixed++) {
+    for (long long lane = 0; lane < width; lane++) {
+      long long row = 0;
+      long long column = 0;
+      long long offset;
+      long long bank;
+      if (sweep_row) {
+        row = fixed;
+      } else if (!lane_value(context->checker, inner_index->index, lane, 0,
+                             &row)) {
         context->failed = 1;
         snprintf(context->detail, sizeof(context->detail),
-                 "work items %lld and %lld both land in bank %lld, so this "
-                 "access is two accesses",
-                 earlier, lane, bank);
+                 "the index does not follow from the work item alone, so the "
+                 "addresses one subgroup touches are not known here");
         context->where = outer->location;
         return;
       }
+      if (sweep_column) {
+        column = fixed;
+      } else if (!lane_value(context->checker, outer_index->index, lane, 0,
+                             &column)) {
+        context->failed = 1;
+        snprintf(context->detail, sizeof(context->detail),
+                 "the index does not follow from the work item alone, so the "
+                 "addresses one subgroup touches are not known here");
+        context->where = outer->location;
+        return;
+      }
+      offset = type_checker_view_element_offset(view, row, column);
+      bank = ((offset * element_size) / bank_bytes) % banks;
+      for (long long earlier = 0; earlier < lane; earlier++) {
+        if (seen[earlier] == bank) {
+          context->failed = 1;
+          snprintf(context->detail, sizeof(context->detail),
+                   "work items %lld and %lld both land in bank %lld, so this "
+                   "access is two accesses",
+                   earlier, lane, bank);
+          context->where = outer->location;
+          return;
+        }
+      }
+      seen[lane] = bank;
     }
-    seen[lane] = bank;
   }
   {
     char detail[160];

@@ -967,10 +967,34 @@ only where proven.
   table of every machine claim, what actually ran it, and where the evidence
   stops. Proven by `target_description_round_trips`,
   `arm64_convention_described_in_data` and `machine_described_as_data`.
+  A device is a machine too, and a kernel now states what it needs to know in
+  its types: where memory lives (`float32 global align(16)*`,
+  `float32 shared*`, `float32 constant*`), how a tile is laid out
+  (`float32[32, 32] layout swizzle32`), which values every work item of a
+  group shares (`type Uniform<T> = T where uniform(value);`), and which group
+  each collective speaks to (`Warp` and `Block`, built-in effects a kernel
+  entry provides). None of the four is believed. An alignment is refused with
+  the alignment the expression reached; a `@conflict_free!` claim is
+  discharged by walking one subgroup's addresses through the layout and
+  refused naming the two work items and the bank; a uniformity claim is
+  refused naming the term that varies; and a collective under a branch no work
+  item agrees on is F0002 with the chain and the line that took the group
+  away. What they buy is in the code: a device helper's generic `ld.f32`
+  becomes `ld.global.f32`, a `constant` pointer reaches SASS as
+  `LDG.E.CONSTANT`, four adjacent loads through an aligned pointer become one
+  `ld.global.v4.f32`, and a proven-uniform branch becomes `bra.uni`. `mettle
+  test` runs the kernel's grid on the CPU and asks all four again with nothing
+  but the running program to go on, catching a space laundered through an
+  integer, a uniform value that is not, and a barrier a work item walked
+  around. Proven by `gpu_address_spaces`, `gpu_layouts`,
+  `gpu_uniform_and_collectives`, `gpu_uniform_rechecked_at_run_time`,
+  `gpu_grid_on_the_cpu` and `gpu_qwen3_typed_kernels`.
   Gapped, in one sentence: the register allocator does not schedule around a
   described instruction and a rewrite rule cannot map IR onto one, because
   both mean handing out the allocator and the emitters, and that is III.3's
-  wall rather than an omission.
+  wall rather than an omission; and the four device type items are proven by
+  the compiler, the grid runner and `ptxas`, and have not been executed on a
+  GB10.
 
 ---
 

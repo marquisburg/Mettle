@@ -16,12 +16,13 @@ export type Uniform<T> = T where uniform(value);
 // and nothing in the grammar moves.
 export const layout_row: int32 = 1;
 export const layout_col: int32 = 2;
-export const layout_swizzle64: int32 = 3;
-export const layout_swizzle128: int32 = 4;
-export const layout_interleave: int32 = 5;
-export const layout_fragment_a: int32 = 6;
-export const layout_fragment_b: int32 = 7;
-export const layout_fragment_c: int32 = 8;
+export const layout_swizzle32: int32 = 3;
+export const layout_swizzle64: int32 = 4;
+export const layout_swizzle128: int32 = 5;
+export const layout_interleave: int32 = 6;
+export const layout_fragment_a: int32 = 7;
+export const layout_fragment_b: int32 = 8;
+export const layout_fragment_c: int32 = 9;
 
 // The collectives below speak to a whole group, so each one requires the
 // effect that group exists under. A kernel entry provides `Warp` and `Block`,

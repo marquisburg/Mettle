@@ -169,6 +169,8 @@ static MtlcViewLayout translate_layout(unsigned char layout) {
     return MTLC_VIEW_LAYOUT_ROW;
   case VIEW_LAYOUT_COL:
     return MTLC_VIEW_LAYOUT_COL;
+  case VIEW_LAYOUT_SWIZZLE32:
+    return MTLC_VIEW_LAYOUT_SWIZZLE32;
   case VIEW_LAYOUT_SWIZZLE64:
     return MTLC_VIEW_LAYOUT_SWIZZLE64;
   case VIEW_LAYOUT_SWIZZLE128:
