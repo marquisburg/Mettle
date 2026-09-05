@@ -1806,6 +1806,7 @@ static char *mt_environment_overrides[64];
 static mt_size mt_environment_override_count;
 static char *mt_read_environment_value(const char *name, mt_size name_length);
 static int mt_initialize_initial_tls(mt_i64 argc, char **argv);
+static int mt_thread_pointer_installed(void);
 #if defined(MTLC_HOST_PREFIX_H)
 static void mt_raise_stack_limit(void);
 #endif
@@ -1819,13 +1820,19 @@ static __thread void *mt_stack_high;
 void *mettle_thread_stack_high(void) { return mt_stack_high; }
 
 void mettle_rt_startup(mt_i64 argc, char **argv) {
-  /* argv points into the block the kernel laid out above the initial stack
-   * pointer, so every frame this process ever makes sits below it. */
-  mt_stack_high = (void *)argv;
+  /* The thread pointer has to exist before anything thread-local is touched.
+   * `_start` hands control over with no TLS block installed, so a store to a
+   * `__thread` here reaches through a null segment base and faults. Every
+   * thread-local write waits for the block. */
   if (!mt_initialize_initial_tls(argc, argv)) {
     _exit(127);
   }
   mt_environment = argv + argc + 1;
+  if (mt_thread_pointer_installed()) {
+    /* argv points into the block the kernel laid out above the initial stack
+     * pointer, so every frame this process ever makes sits below it. */
+    mt_stack_high = (void *)argv;
+  }
 #if defined(MTLC_HOST_PREFIX_H)
   mt_raise_stack_limit();
 #endif
