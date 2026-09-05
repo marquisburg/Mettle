@@ -173,6 +173,7 @@ bundle-runtime: $(HOST_STARTUP_OBJECT) $(TARGET) | $(BINDIR)
 	cp $(OBJDIR)/runtime/safety_shared.o $(BINDIR)/runtime/safety_shared.o
 	$(CC) $(RUNTIME_OBJ_CFLAGS) -c $(RUNTIMEDIR)/debug.c         -o $(OBJDIR)/runtime/debug.o
 	$(CC) $(RUNTIME_OBJ_CFLAGS) -c $(RUNTIMEDIR)/profile.c       -o $(OBJDIR)/runtime/profile.o
+	$(CC) $(RUNTIME_OBJ_CFLAGS) -c $(RUNTIMEDIR)/trace.c         -o $(OBJDIR)/runtime/trace.o
 	cp $(OBJDIR)/runtime/atomics.o       $(BINDIR)/runtime/atomics.o
 	cp $(OBJDIR)/runtime/crash_handler.o $(BINDIR)/runtime/crash_handler.o
 	cp $(OBJDIR)/runtime/safety.o        $(BINDIR)/runtime/safety.o
@@ -180,6 +181,8 @@ bundle-runtime: $(HOST_STARTUP_OBJECT) $(TARGET) | $(BINDIR)
 	$(TARGET) --release --emit-obj $(RUNTIMEDIR)/swap.mettle -o $(BINDIR)/runtime/swap.o
 	$(TARGET) --release --emit-obj $(RUNTIMEDIR)/string.mettle -o $(BINDIR)/runtime/string.o
 	cp $(OBJDIR)/runtime/profile.o       $(BINDIR)/runtime/profile.o
+	cp $(OBJDIR)/runtime/trace.o         $(BINDIR)/runtime/trace.o
+	cp $(OBJDIR)/runtime/trace.o         $(BINDIR)/runtime/trace.obj
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 	@mkdir -p $(dir $@)

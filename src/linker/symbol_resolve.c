@@ -1,5 +1,6 @@
 #include "linker/symbol_resolve.h"
 #include "linker/linker_common.h"
+#include "linker/unresolved_hint.h"
 #include "../common.h"
 
 /* Section merge and symbol resolution for COFF produced by the object backend;
@@ -1212,9 +1213,9 @@ static int link_resolution_validate_externals(
       const LinkedSymbol *symbol = &resolution->symbols[symbol_index];
       if (symbol->is_external && !symbol->is_defined &&
           !symbol->is_shared_import) {
-        mettle_set_error(error_message_out,
-                                  "Unresolved external symbol '%s'",
-                                  symbol->name ? symbol->name : "<unnamed>");
+        link_unresolved_format(resolution,
+                               symbol->name ? symbol->name : "<unnamed>",
+                               error_message_out);
         return 0;
       }
     }

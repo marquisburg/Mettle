@@ -524,16 +524,26 @@ static int link_pe_internal(MtlcContext *ctx, const char **object_paths,
 
   if (!link_resolution_build(object_paths, object_count, &resolution_options,
                              &resolution, &error_message)) {
-    mtlc_diag(ctx, MTLC_DIAG_ERROR, "internal linker resolution failed: %s",
-              error_message ? error_message : "unknown error");
+    if (error_message &&
+        strstr(error_message, "Unresolved external symbol") != NULL) {
+      mtlc_diag(ctx, MTLC_DIAG_ERROR, "%s", error_message);
+    } else {
+      mtlc_diag(ctx, MTLC_DIAG_ERROR, "internal linker resolution failed: %s",
+                error_message ? error_message : "unknown error");
+    }
     free(error_message);
     return 0;
   }
   emission.import_dll_names = (const char **)import_dlls;
   emission.import_dll_count = sizeof(import_dlls) / sizeof(import_dlls[0]);
   if (!pe_emit_executable(resolution, output_path, &emission, &error_message)) {
-    mtlc_diag(ctx, MTLC_DIAG_ERROR, "internal linker PE emission failed: %s",
-              error_message ? error_message : "unknown error");
+    if (error_message &&
+        strstr(error_message, "Unresolved external symbol") != NULL) {
+      mtlc_diag(ctx, MTLC_DIAG_ERROR, "%s", error_message);
+    } else {
+      mtlc_diag(ctx, MTLC_DIAG_ERROR, "internal linker PE emission failed: %s",
+                error_message ? error_message : "unknown error");
+    }
     free(error_message);
     link_resolution_destroy(resolution);
     return 0;

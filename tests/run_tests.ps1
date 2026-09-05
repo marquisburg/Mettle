@@ -5134,7 +5134,10 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "the target description did not print: $printed" }
   if ($printed -notmatch "cost_multiply: 3") { throw "the description carries no cost model: $printed" }
   Set-Content -Path $model -Value ($printed -replace "cost_multiply: 3", "cost_multiply: 30" -replace "cost_call: 4", "cost_call: 40") -Encoding ASCII
-  $out = & $CompilerPath --build "tests/test_deadline.mettle" -o (Join-Path $tmpDir "deadline_described.exe") --report-deadlines --target $model 2>&1 | Out-String
+  # The description names a Windows target, so this stops at the object: --build
+  # would need that machine's linker and runtime, which a Linux host has not
+  # got. The deadline verdict is settled before any of that.
+  $out = & $CompilerPath --emit-obj "tests/test_deadline.mettle" -o (Join-Path $tmpDir "deadline_described.obj") --report-deadlines --target $model 2>&1 | Out-String
   $flat = $out -replace ("[" + [char]13 + [char]10 + "]"), ""
   if ($flat -notmatch "multiply 30/4") { throw "the described cost model was not read: $out" }
   if ($flat -notmatch "from the target description") { throw "the report does not say where the model came from: $out" }
@@ -10218,7 +10221,16 @@ try {
   if ($coverOut -notmatch 'MIR-(OK|BAIL)') {
     throw "no MIR gate trace; METTLE_MIR_TRACE stopped reporting"
   }
-  if ($coverOut -notmatch 'MIR-OK\s+hot_with_interpolation') {
+  # The regression this guards: an undeclared callee made the gate read the
+  # whole function as unreachable. That must never come back on either ABI.
+  if ($coverOut -match 'not_known_function\s+mettle_string_from') {
+    throw "the interpolation helper is undeclared again; the gate reads it as an unknown callee"
+  }
+  # SysV hands a 16-byte `string` to an exported callee in two GP registers, and
+  # MIR marshals one register per argument, so the call itself is what declines
+  # there -- not the helper. Win64 passes that aggregate by address, which MIR
+  # does support, so the whole function stays register-allocated.
+  if ($script:OnWindows -and $coverOut -notmatch 'MIR-OK\s+hot_with_interpolation') {
     throw "the gate declined hot_with_interpolation; interpolating a number stopped being register-allocatable"
   }
   & $exePath | Out-Null

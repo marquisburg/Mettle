@@ -19,24 +19,24 @@ export fn WAIT_FAILED() -> uint32 { return 0xFFFFFFFF; }
 // ─── Thread lifecycle ────────────────────────────────────────────────────────
 // Win32 shape signatures bound to owned clone and futex helpers.
 export extern fn CreateThread(lpThreadAttributes: cstring, dwStackSize: uint64, lpStartAddress: fn(cstring) -> uint32, lpParameter: cstring, dwCreationFlags: uint32, lpThreadId: uint32*) -> int64 = "mettle_thread_create";
-export extern fn CloseHandle(hObject: int64) -> int32 = "mettle_thread_close";
-export extern fn WaitForSingleObject(hHandle: int64, dwMilliseconds: uint32) -> uint32 = "mettle_thread_wait";
-export extern fn GetCurrentThreadId() -> uint32 = "mettle_thread_current_id";
-export extern fn Sleep(dwMilliseconds: uint32) = "mettle_thread_sleep_ms";
+export extern fn CloseHandle(hObject: int64) -> int32 with none = "mettle_thread_close";
+export extern fn WaitForSingleObject(hHandle: int64, dwMilliseconds: uint32) -> uint32 with none = "mettle_thread_wait";
+export extern fn GetCurrentThreadId() -> uint32 with none = "mettle_thread_current_id";
+export extern fn Sleep(dwMilliseconds: uint32) with none = "mettle_thread_sleep_ms";
 
 // ─── Mutex (CRITICAL_SECTION-like) ──────────────────────────────────────────
 export extern fn CreateMutexA(lpMutexAttributes: cstring, bInitialOwner: int32, lpName: cstring) -> int64 = "mettle_mutex_create";
-export extern fn ReleaseMutex(hMutex: int64) -> int32 = "mettle_mutex_release";
+export extern fn ReleaseMutex(hMutex: int64) -> int32 with none = "mettle_mutex_release";
 
 // ─── Interlocked atomics ────────────────────────────────────────────────────
 // Shared cross-platform runtime symbols (src/runtime/atomics.c).
-export extern fn InterlockedCompareExchange(target: int32*, exchange: int32, comparand: int32) -> int32 = "mettle_atomic_compare_exchange_i32";
-export extern fn InterlockedExchange(target: int32*, value: int32) -> int32 = "mettle_atomic_exchange_i32";
-export extern fn InterlockedIncrement(target: int32*) -> int32 = "mettle_atomic_inc_i32";
-export extern fn InterlockedDecrement(target: int32*) -> int32 = "mettle_atomic_dec_i32";
+export extern fn InterlockedCompareExchange(target: int32*, exchange: int32, comparand: int32) -> int32 with none = "mettle_atomic_compare_exchange_i32";
+export extern fn InterlockedExchange(target: int32*, value: int32) -> int32 with none = "mettle_atomic_exchange_i32";
+export extern fn InterlockedIncrement(target: int32*) -> int32 with none = "mettle_atomic_inc_i32";
+export extern fn InterlockedDecrement(target: int32*) -> int32 with none = "mettle_atomic_dec_i32";
 
 // posix_yield drives the spin-lock contention path (sched_yield underneath).
-extern fn posix_yield() = "posix_yield";
+extern fn posix_yield() with none = "posix_yield";
 
 // ─── Thread convenience wrappers (mirror std/thread) ────────────────────────
 export fn thread_close(handle: int64) -> int32 {
@@ -69,7 +69,7 @@ export fn mutex_create_owned() -> int64 {
 }
 
 // Win32-style wait-with-timeout for a mutex handle.
-extern fn mettle_mutex_wait(handle: int64, ms: uint32) -> uint32 = "mettle_mutex_wait";
+extern fn mettle_mutex_wait(handle: int64, ms: uint32) -> uint32 with none = "mettle_mutex_wait";
 
 export fn mutex_lock(mutex: int64, timeout_ms: uint32) -> int32 {
   var result: uint32 = mettle_mutex_wait(mutex, timeout_ms);
@@ -87,7 +87,7 @@ export fn mutex_unlock(mutex: int64) -> int32 {
   return ReleaseMutex(mutex);
 }
 
-extern fn mettle_mutex_close(handle: int64) -> int32 = "mettle_mutex_close";
+extern fn mettle_mutex_close(handle: int64) -> int32 with none = "mettle_mutex_close";
 
 export fn mutex_close(mutex: int64) -> int32 {
   return mettle_mutex_close(mutex);

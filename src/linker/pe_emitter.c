@@ -5,6 +5,7 @@
 #include "linker/coff_reader.h"
 #include "linker/import_lib.h"
 #include "linker/relocation.h"
+#include "linker/unresolved_hint.h"
 #include "runtime/verify_owned.h"
 
 #include <ctype.h>
@@ -1697,9 +1698,9 @@ static int pe_validate_unresolved_externals(const LinkResolution *resolution,
   for (i = 0u; i < resolution->symbol_count; i++) {
     const LinkedSymbol *symbol = &resolution->symbols[i];
     if (symbol->is_external && !symbol->is_defined) {
-      mettle_set_error(error_message_out,
-                   "Unresolved external symbol '%s'",
-                   symbol->name ? symbol->name : "<unnamed>");
+      link_unresolved_format(resolution,
+                             symbol->name ? symbol->name : "<unnamed>",
+                             error_message_out);
       return 0;
     }
   }

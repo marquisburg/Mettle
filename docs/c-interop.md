@@ -35,8 +35,11 @@ time that the symbol exists, so a name nothing provides compiles cleanly and
 fails at the link:
 
 ```text
-Warning: Internal linker PE emission failed: Unresolved external symbol 'sqrt'
-Error: Internal linker failed to produce an executable
+Error: Unresolved external symbol 'sqrt' (referenced by 'app.obj')
+help: `extern` declares a name; it does not provide one. Nothing on the link provided 'sqrt'.
+help: provide it with `--link-arg your.obj`, `--link-arg -lname` or an import library path; check the `= "symbol"` link name and spelling.
+help: on Windows the internal linker searches the owned runtime plus kernel32, user32, gdi32, advapi32, ws2_32, winmm (UCRT/MSVCRT are excluded); on Linux add `-l` for the library that defines it. See docs/c-interop.md.
+help: 'sqrt' is double-precision math; prefer import "std/math" (on Windows the owned runtime carries only the float32 'sqrtf', and UCRT/MSVCRT are excluded).
 ```
 
 ```text
