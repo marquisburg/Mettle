@@ -563,4 +563,12 @@ IRFunction *ir_lower_function(IRLoweringContext *context,
 void ir_mark_branches_uniform(IRFunction *function, size_t from);
 void ir_mark_calls_divergent(IRFunction *function, size_t from);
 
+/* Where element (row, column) of a view whose extents are in its type sits, in
+   elements from the base. The layout decides it, and this is the one place
+   that reads it. */
+int ir_lower_static_view_offset(IRLoweringContext *context,
+                                IRFunction *function, Type *view_type,
+                                IROperand *row, IROperand *column,
+                                SourceLocation location, IROperand *out_offset);
+
 #endif // IR_LOWERING_INTERNAL_H

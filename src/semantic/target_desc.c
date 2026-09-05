@@ -258,7 +258,10 @@ static int read_fields(const AggregateLiteral *literal,
                strcmp(field, "stack_alignment") == 0 ||
                strcmp(field, "shadow_space") == 0 ||
                strcmp(field, "red_zone") == 0 ||
-               strcmp(field, "vector_width") == 0) {
+               strcmp(field, "vector_width") == 0 ||
+               strcmp(field, "subgroup_width") == 0 ||
+               strcmp(field, "shared_memory_banks") == 0 ||
+               strcmp(field, "shared_bank_bytes") == 0) {
       if (!int_of(value, &number)) {
         snprintf(error, error_size, "`%s` must be an integer literal", field);
         return 0;
@@ -271,6 +274,12 @@ static int read_fields(const AggregateLiteral *literal,
         out->shadow_space = (int)number;
       } else if (strcmp(field, "red_zone") == 0) {
         out->red_zone = (int)number;
+      } else if (strcmp(field, "subgroup_width") == 0) {
+        out->subgroup_width = (int)number;
+      } else if (strcmp(field, "shared_memory_banks") == 0) {
+        out->shared_memory_banks = (int)number;
+      } else if (strcmp(field, "shared_bank_bytes") == 0) {
+        out->shared_bank_bytes = (int)number;
       } else {
         out->vector_width = (int)number;
       }

@@ -201,8 +201,10 @@ laid out: `float32 global align(16)*`, `float32 shared*`, `float32 constant*`,
 and the compiler proves the alignment rather than taking it, which is what lets
 four adjacent loads become one `ld.global.v4.f32`. Subgroup collectives,
 atomics, tensor core operations, `printf` inside a kernel, and an occupancy
-report at build time all work. A kernel also says which values are the same in
-every work item, and the compiler proves that too: a branch on one lowers to
+report at build time all work. A kernel also says how its tiles are laid out
+(`float32[32, 32] layout swizzle128`), and the compiler proves an index against
+the extents and a subgroup's addresses against the banks. It says which values
+are the same in every work item, and proves that too: a branch on one lowers to
 `bra.uni`, and a warp collective reached under a branch the work items do not
 all agree on fails the build with the line that took the group away. See
 [GPU offload](docs/gpu.md).

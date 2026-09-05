@@ -671,6 +671,50 @@ static int range_of(TypeChecker *checker, ASTNode *expr, Range *out,
     CallExpression *call = (CallExpression *)expr->data;
     Symbol *callee = NULL;
     *out = range_of_type(expr->resolved_type);
+    /* A work-item index runs from zero to the block shape the kernel declared,
+       which the module makes the driver enforce. So the launch's own geometry
+       is a fact the prover has, and an index built out of one carries it. */
+    if (checker && call && call->is_gpu_index && call->function_name) {
+      ASTNode *owner_node = checker->current_function_decl;
+      FunctionDeclaration *owner =
+          owner_node && owner_node->type == AST_FUNCTION_DECLARATION
+              ? (FunctionDeclaration *)owner_node->data
+              : NULL;
+      int axis = call->function_name[strlen(call->function_name) - 1] == 'y' ? 1
+                 : call->function_name[strlen(call->function_name) - 1] == 'z'
+                     ? 2
+                     : 0;
+      int declared = owner && owner->is_kernel ? owner->kernel_block[axis] : 0;
+      if (axis > 0 && owner && owner->is_kernel && owner->kernel_block[0] > 0 &&
+          declared <= 0) {
+        declared = 1;
+      }
+      if (declared > 0) {
+        Range shape = range_unknown();
+        if (strncmp(call->function_name, "gpu_tid_", 8) == 0) {
+          shape.has_min = 1;
+          shape.min = 0;
+          shape.has_max = 1;
+          shape.max = declared - 1;
+        } else if (strncmp(call->function_name, "gpu_ntid_", 9) == 0) {
+          shape.has_min = 1;
+          shape.min = declared;
+          shape.has_max = 1;
+          shape.max = declared;
+        }
+        if (shape.has_min || shape.has_max) {
+          range_meet(out, &shape);
+          return 1;
+        }
+      }
+      if (strncmp(call->function_name, "gpu_", 4) == 0) {
+        Range nonnegative = range_unknown();
+        nonnegative.has_min = 1;
+        nonnegative.min = 0;
+        range_meet(out, &nonnegative);
+        return out->has_min || out->has_max;
+      }
+    }
     if (checker && call && call->function_name && !call->object) {
       callee = symbol_table_lookup(checker->symbol_table, call->function_name);
     }

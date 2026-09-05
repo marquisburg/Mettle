@@ -339,6 +339,23 @@ Work items inside one phase run one after another, so a kernel whose work items
 race each other inside a phase gets one interleaving out of the run and not a
 verdict on the others.
 
+## Layouts as types
+
+A view whose extents are in its type is rank 2. `T[E0, E1, E2]` parses and
+resolves, but only the two-dimensional form has element addressing and a bank
+proof.
+
+An index into one is proven or refused; there is no run-time check to fall back
+on. An index the compiler cannot bound has to be given a declared type, tested,
+or written as a constant.
+
+The fragment layouts name what an MMA takes its operands in. They are refused
+as element addresses, and nothing yet consumes them: `tensor_mma` still takes
+its operands as pointers and leading dimensions.
+
+`layout_copy` moves elements one at a time. It is the staged copy, not a
+shuffle: no subgroup exchange is generated for a layout change.
+
 ## Uniformity and the group effects
 
 A value is uniform when the compiler can follow every input to it. It follows

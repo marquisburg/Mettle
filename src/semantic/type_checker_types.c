@@ -411,6 +411,36 @@ Type *type_checker_device_view_of(TypeChecker *checker, Type *element,
  * works while the name is a plain identifier and fails the moment it is not:
  * `&slot` on a `fn(int32) -> int32` global asked for a type named
  * "fn(int32) -> int32*", which nothing registers. */
+/* A view whose extents are in its type: one pointer, and a shape nobody has to
+   carry. The element count is the product of the extents, so an allocation of
+   one is a fixed size and every index into one is bounded by the declaration. */
+Type *type_checker_static_view_of(TypeChecker *checker, Type *element,
+                                  const char *name, const size_t *extents,
+                                  size_t rank) {
+  Type *view;
+  if (!checker || !element || !name || !extents || rank < 2 || rank > 4) {
+    return NULL;
+  }
+  view = type_create(TYPE_SLICE, name);
+  if (!view) {
+    return NULL;
+  }
+  view->base_type = element;
+  view->view_rank = rank;
+  view->size = 8;
+  view->alignment = 8;
+  for (size_t i = 0; i < rank; i++) {
+    view->view_extents[i] = extents[i];
+  }
+  if (!type_alloc_fields(view, 1)) {
+    type_destroy(view);
+    return NULL;
+  }
+  type_set_field(view, 0, "data", type_checker_pointer_to(checker, element), 0);
+  view->field_offsets[0] = 0;
+  return type_checker_canon_type(checker, view);
+}
+
 Type *type_checker_view_of(TypeChecker *checker, Type *element, size_t rank) {
   return type_checker_device_view_of(checker, element, rank, DEVICE_SPACE_NONE,
                                      0, "");
@@ -527,6 +557,75 @@ Type *type_checker_volatile_of(TypeChecker *checker, Type *base) {
    a type spelling. The parser writes them in that order and always directly in
    front of the pointer, slice or view suffix they qualify, so the tail of the
    head is the whole search. Returns the length of what is left. */
+/* `layout row`, `layout swizzle128`, `layout interleave(4)` off the tail of a
+   type spelling. The names are data: std/warp declares one constant per form,
+   and the type refers to it by the same word. */
+static const struct {
+  const char *word;
+  unsigned char layout;
+  int takes_parameter;
+} g_view_layouts[] = {
+    {"row", VIEW_LAYOUT_ROW, 0},
+    {"col", VIEW_LAYOUT_COL, 0},
+    {"swizzle64", VIEW_LAYOUT_SWIZZLE64, 0},
+    {"swizzle128", VIEW_LAYOUT_SWIZZLE128, 0},
+    {"interleave", VIEW_LAYOUT_INTERLEAVE, 1},
+    {"fragment_a", VIEW_LAYOUT_FRAGMENT_A, 0},
+    {"fragment_b", VIEW_LAYOUT_FRAGMENT_B, 0},
+    {"fragment_c", VIEW_LAYOUT_FRAGMENT_C, 0}};
+
+size_t type_checker_split_view_layout(const char *name, size_t length,
+                                      unsigned char *layout,
+                                      unsigned short *parameter) {
+  const char *marker = " layout ";
+  size_t marker_length = 8;
+  size_t at;
+  if (layout) {
+    *layout = VIEW_LAYOUT_NONE;
+  }
+  if (parameter) {
+    *parameter = 0;
+  }
+  if (!name || length < marker_length + 1) {
+    return length;
+  }
+  for (at = length - marker_length; at > 0; at--) {
+    if (strncmp(name + at, marker, marker_length) == 0) {
+      break;
+    }
+  }
+  if (at == 0 && strncmp(name, marker, marker_length) != 0) {
+    return length;
+  }
+  {
+    const char *word = name + at + marker_length;
+    size_t word_length = length - (at + marker_length);
+    unsigned long value = 0;
+    const char *open = memchr(word, '(', word_length);
+    if (open) {
+      value = strtoul(open + 1, NULL, 10);
+      word_length = (size_t)(open - word);
+    }
+    for (size_t i = 0; i < sizeof(g_view_layouts) / sizeof(g_view_layouts[0]);
+         i++) {
+      if (strlen(g_view_layouts[i].word) == word_length &&
+          strncmp(word, g_view_layouts[i].word, word_length) == 0) {
+        if (g_view_layouts[i].takes_parameter && value == 0) {
+          return length;
+        }
+        if (layout) {
+          *layout = g_view_layouts[i].layout;
+        }
+        if (parameter) {
+          *parameter = (unsigned short)value;
+        }
+        return at;
+      }
+    }
+  }
+  return length;
+}
+
 size_t type_checker_split_device_qualifiers(const char *name, size_t length,
                                             unsigned char *space,
                                             size_t *align) {
@@ -1256,6 +1355,117 @@ Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
     Type *builtin = NULL;
     if (type_checker_builtin_by_name(checker, name, &builtin)) {
       return builtin;
+    }
+  }
+
+  /* A layout is part of the type, so it is peeled first and stamped on what is
+     left. `float16[128,64] layout swizzle128` is a swizzled view of the same
+     shape as the row-major one, and neither flows into the other. */
+  {
+    unsigned char layout = VIEW_LAYOUT_NONE;
+    unsigned short parameter = 0;
+    size_t length = strlen(name);
+    size_t head = type_checker_split_view_layout(name, length, &layout,
+                                                 &parameter);
+    if (head != length) {
+      char *plain = malloc(head + 1);
+      Type *base;
+      Type *laid_out;
+      if (!plain) {
+        return NULL;
+      }
+      memcpy(plain, name, head);
+      plain[head] = '\0';
+      base = type_checker_get_type_by_name(checker, plain);
+      free(plain);
+      if (!base || base->kind != TYPE_SLICE) {
+        return NULL;
+      }
+      for (size_t i = 0; i < checker->type_table_count; i++) {
+        Type *existing = checker->type_table[i];
+        if (existing && existing->name &&
+            strcmp(existing->name, name) == 0) {
+          return existing;
+        }
+      }
+      laid_out = type_create(TYPE_SLICE, name);
+      if (!laid_out) {
+        return NULL;
+      }
+      /* The layout is the only difference, and the field arrays are the
+         base's. Interning directly rather than canonicalizing is what keeps
+         them the base's: a canonicalization that found an equal type would
+         destroy this one and take those arrays with it. */
+      *laid_out = *base;
+      laid_out->name = (char *)string_intern(name);
+      laid_out->type_table_index = UINT32_MAX;
+      laid_out->view_layout = layout;
+      laid_out->view_layout_param = parameter;
+      if (type_checker_intern_type(checker, laid_out) == UINT32_MAX) {
+        return base;
+      }
+      return laid_out;
+    }
+  }
+
+  /* `T[128,64]`: a view whose extents are in its type. It is a pointer and a
+     shape, so nothing travels beside the data and every index into one is
+     bounded by the declaration. */
+  {
+    size_t length = strlen(name);
+    if (length > 3 && name[length - 1] == ']' && strchr(name, ',')) {
+      size_t open = length - 1;
+      size_t extents[4];
+      size_t rank = 0;
+      int all_numeric = 1;
+      while (open > 0 && name[open] != '[') {
+        open--;
+      }
+      if (name[open] == '[' && open > 0) {
+        const char *scan = name + open + 1;
+        while (scan < name + length - 1 && rank < 4) {
+          char *end = NULL;
+          unsigned long value = strtoul(scan, &end, 10);
+          if (end == scan || value == 0) {
+            all_numeric = 0;
+            break;
+          }
+          extents[rank++] = (size_t)value;
+          scan = end;
+          if (*scan == ',') {
+            scan++;
+          } else {
+            break;
+          }
+        }
+        if (all_numeric && rank >= 2 && scan == name + length - 1) {
+          unsigned char space = DEVICE_SPACE_NONE;
+          size_t align = 0;
+          size_t plain = type_checker_split_device_qualifiers(name, open,
+                                                              &space, &align);
+          char *element_name = malloc(plain + 1);
+          Type *element;
+          Type *view;
+          if (!element_name || plain == 0) {
+            free(element_name);
+            return NULL;
+          }
+          memcpy(element_name, name, plain);
+          element_name[plain] = '\0';
+          element = type_checker_get_type_by_name(checker, element_name);
+          free(element_name);
+          if (!element) {
+            return NULL;
+          }
+          view = type_checker_static_view_of(checker, element, name, extents,
+                                             rank);
+          if (view) {
+            view->device_space = space;
+            view->declared_align = align;
+            return view;
+          }
+        }
+      }
     }
   }
 
@@ -1992,6 +2202,26 @@ int type_checker_is_assignable_from(TypeChecker *checker, Type *dest_type,
      view in that space. The space comes from where the storage was declared,
      so `workgroup var tile: float32[256]` reaches a `float32 shared*`
      parameter and nothing else does. */
+  /* A view whose extents are in its type, declared as workgroup or private
+     storage, reaches a parameter that names the same shape in that space. The
+     space comes from the binding, so nothing else does. */
+  if (checker && dest_type && src_type && src_expr &&
+      dest_type->kind == TYPE_SLICE && src_type->kind == TYPE_SLICE &&
+      dest_type->view_extents[0] > 0 &&
+      dest_type->device_space != DEVICE_SPACE_NONE &&
+      src_type->device_space == DEVICE_SPACE_NONE &&
+      dest_type->view_layout == src_type->view_layout &&
+      dest_type->view_layout_param == src_type->view_layout_param &&
+      type_view_rank(dest_type) == type_view_rank(src_type) &&
+      dest_type->view_extents[0] == src_type->view_extents[0] &&
+      dest_type->view_extents[1] == src_type->view_extents[1] &&
+      dest_type->view_extents[2] == src_type->view_extents[2] &&
+      dest_type->view_extents[3] == src_type->view_extents[3] &&
+      type_checker_types_equal(dest_type->base_type, src_type->base_type) &&
+      type_checker_lvalue_device_space(checker, src_expr) ==
+          dest_type->device_space) {
+    return 1;
+  }
   if (checker && dest_type && src_type && src_expr &&
       src_type->kind == TYPE_ARRAY && dest_type->declared_align == 0 &&
       (dest_type->kind == TYPE_POINTER ||

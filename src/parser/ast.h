@@ -89,6 +89,10 @@ typedef struct ASTNode {
      second sweep from declaring the same type twice. */
   int type_registered;
   const char *proven_binding;
+  /* `@conflict_free` / `@conflict_free!` on this statement: the addresses one
+     subgroup touches in each workgroup access inside it fall in distinct
+     banks. 1 is the hint, 2 is the contract that fails the build. */
+  int conflict_free_mode;
 } ASTNode;
 
 typedef struct {

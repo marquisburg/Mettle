@@ -1317,6 +1317,25 @@ char *error_reporter_suggest_for_type_mismatch(const char *expected,
     return mettle_strdup(buf);
   }
 
+  /* Two views that differ only in how their elements are laid out. The layout
+     is what an instruction takes its operands in, so naming the one that was
+     wanted is the whole diagnosis. */
+  {
+    const char *expected_layout = strstr(expected, " layout ");
+    const char *actual_layout = strstr(actual, " layout ");
+    if ((expected_layout || actual_layout) &&
+        !(expected_layout && actual_layout &&
+          strcmp(expected_layout, actual_layout) == 0)) {
+      snprintf(buf, sizeof(buf),
+               "this wants elements laid out '%s' and these are laid out "
+               "'%s'; convert between the two where the change of order is "
+               "meant, which is a copy",
+               expected_layout ? expected_layout + 8 : "row",
+               actual_layout ? actual_layout + 8 : "row");
+      return mettle_strdup(buf);
+    }
+  }
+
   /* Two device pointers that differ only in where their data lives. Naming
      both spaces is the whole diagnosis: shared memory and global memory are
      two different memories, and a pointer into one is not a pointer into the

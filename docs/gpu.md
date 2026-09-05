@@ -211,6 +211,89 @@ GPU type report: 5 of 5 device accesses named their space, 0 stayed generic
   the analyses took 0.041 ms
 ```
 
+### Layouts as types
+
+A view can carry its extents:
+
+```mettle
+workgroup var tile: float32[32, 32] layout swizzle128;
+```
+
+`T[E0, E1]` is a view whose shape is in its type. It is one pointer: nothing
+travels beside the data, because the extents are already known. Every index
+into one is proven against the extent rather than tested at run time, by the
+routes a declared type uses -- a constant, a declared type's range, a
+dominating test, or the launch's own block shape where the index is a work-item
+index. An index the compiler cannot bound is refused:
+
+```text
+error[E0003]: this index is not bounded to 0..31, which
+              'float32[32,32] layout row' is; give it a declared type, test it,
+              or write a constant
+```
+
+`layout <name>` says the order the elements sit in. The names live in
+`std/warp` as constants, so a target that grows another form adds a name there
+and nothing in the grammar moves:
+
+| Layout | Element (i, j) at |
+|--------|-------------------|
+| `row` (the default) | `i * E1 + j` |
+| `col` | `j * E0 + i` |
+| `interleave(k)` | `(j / k) * (E0 * k) + i * k + (j % k)` |
+| `swizzle64` | `i * E1 + ((j / C) ^ (i % (E1 / C))) * C + (j % C)`, C = 8 bytes |
+| `swizzle128` | the same with C = 16 bytes |
+| `fragment_a`, `fragment_b`, `fragment_c` | one work item's share of an MMA tile, in registers; these have no element address |
+
+The layout is part of the type, so a view laid out one way does not flow into a
+parameter that names another, and the refusal names the layout that was
+wanted:
+
+```text
+error[E0004]: Type mismatch: expected 'float32 shared[32,32] layout row',
+              found 'float32[32,32] layout swizzle128'
+  help: this wants elements laid out 'row' and these are laid out 'swizzle128';
+        convert between the two where the change of order is meant, which is a
+        copy
+```
+
+`layout_copy(destination, source)` is that conversion, and it is a statement
+because reordering a tile is a copy. It takes two views of the same shape and
+element laid out differently, and moves every element from where one order puts
+it to where the other does.
+
+Bank-conflict freedom is a proof, not a hope. `@conflict_free!` on a statement
+asks the compiler to show that the addresses one subgroup touches in each
+workgroup access inside it fall in distinct banks. The indices are evaluated
+for every work item of a subgroup, the layout turns each pair into an offset,
+and the banks are compared; how wide a subgroup is, how many banks there are
+and how many bytes each holds come from the target description
+(`subgroup_width`, `shared_memory_banks`, `shared_bank_bytes`). A refusal names
+the two work items and the bank:
+
+```text
+error[E0003]: '@conflict_free!' says one subgroup's addresses fall in distinct
+              workgroup banks, and work items 0 and 1 both land in bank 0, so
+              this access is two accesses
+```
+
+A column read of a 32 by 32 float32 tile is the plain case: laid out `row` it
+is 32 work items on one bank, laid out `col` it is 32 work items on 32 banks.
+The swizzles keep a row read on 32 banks while moving a column read off one:
+`swizzle64` spreads it over 16 banks and `swizzle128` over 8, which is better
+and is not conflict-free, so `@conflict_free!` still refuses them for that
+access.
+
+`--report-gpu-types` and `--explain` print what each view ended up with and
+which proofs were discharged:
+
+```text
+proven by type
+  line 12 in column_read: tile is shared memory, laid out col, extents 32 by 32
+  line 16 in column_read: one subgroup's 32 addresses through
+      'float32[32,32] layout col' fall in 32 distinct banks
+```
+
 ### Uniformity as a declared type
 
 A value is uniform when every work item of the group holds the same one.

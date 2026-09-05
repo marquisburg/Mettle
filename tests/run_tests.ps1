@@ -2544,6 +2544,16 @@ $cases = @(
      Args = @("test")
      SkipBinaryCheck = $true
      Pattern = "was reached by 2 of the 4 work items still running in this workgroup" },
+  # Layouts as types: extents in the type, an order in the type, and a bank
+  # proof over both.
+  @{ Name = "gpu_layouts"; Path = "tests/gpu/layouts.mettle"; ShouldSucceed = $true
+     Args = @("test")
+     SkipBinaryCheck = $true
+     OutputMustMatch = @("3 passed")
+     OutputMustNotMatch = @("failed") },
+  @{ Name = "err_gpu_layout_mismatch"; Path = "tests/err_gpu_layout_mismatch.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "this wants elements laid out 'row' and these are laid out 'swizzle128'" },
+  @{ Name = "err_gpu_bank_conflict"; Path = "tests/err_gpu_bank_conflict.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "work items 0 and 1 both land in bank 0, so this access is two accesses" },
+  @{ Name = "err_gpu_view_index_unbounded"; Path = "tests/err_gpu_view_index_unbounded.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "this index is not bounded to 0..31" },
   # Uniformity as a declared type, and the group effects that follow from it.
   @{ Name = "gpu_uniform_and_collectives"; Path = "tests/gpu/uniform_and_collectives.mettle"; ShouldSucceed = $true
      Args = @("test")
@@ -14772,6 +14782,25 @@ try {
     $spacedCubin = Join-Path $tmpDir "gpu_address_spaces.cubin"
     $asmOut = & $ptxas.Source -arch=compute_75 $spacedPtx -o $spacedCubin 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { throw "ptxas rejected the spaced module: $asmOut" }
+  }
+
+  # The layouts module: what the type report said, and that ptxas takes it.
+  $layoutPtx = Join-Path $tmpDir "gpu_layouts.ptx"
+  $layoutOut = & $CompilerPath -O --emit-ptx --gpu-arch=portable --report-gpu-types `
+    tests/gpu/layouts.mettle -o $layoutPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "layout emit failed: $layoutOut" }
+  # PowerShell rewraps a native command's stderr, so the checks are on short
+  # fragments rather than whole sentences.
+  foreach ($line in @("laid out col", "laid out swizzle128", "laid out swizzle64",
+                      "distinct banks", "proven by type")) {
+    if ($layoutOut -notmatch [regex]::Escape($line)) {
+      throw "--report-gpu-types did not say '$line': $layoutOut"
+    }
+  }
+  if ($ptxas) {
+    $layoutCubin = Join-Path $tmpDir "gpu_layouts.cubin"
+    $asmOut = & $ptxas.Source -arch=compute_75 $layoutPtx -o $layoutCubin 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "ptxas rejected the layout module: $asmOut" }
   }
 
   # A proven-uniform condition is a group decision, and the branch says so.

@@ -1,0 +1,168 @@
+// Layouts as types. A view's extents and the order its elements sit in are
+// part of its type, so an access through one is proven against both: the index
+// against the extent, and the banks a subgroup touches against the layout.
+//
+// The byte layout is checked by round trip: the grid runner writes i*100+j
+// into every element through the view, and the test reads the same tile back
+// as a flat array and computes where each element should be.
+
+type Lane = int32 where value >= 0 && value < 32;
+
+kernel(block = 32) column_read_is_free_in_col(out: float32 global*) {
+  workgroup var tile: float32[32, 32] layout col;
+  var lane: Lane = (Lane)thread.x;
+  tile[(int32)lane][0] = (float32)lane;
+  barrier(workgroup, acq_rel);
+  @conflict_free! out[(int32)lane] = tile[(int32)lane][0];
+}
+
+kernel(block = 32) row_read_is_free_in_swizzle(out: float32 global*) {
+  workgroup var tile: float32[32, 32] layout swizzle128;
+  var lane: Lane = (Lane)thread.x;
+  tile[0][(int32)lane] = (float32)lane;
+  barrier(workgroup, acq_rel);
+  @conflict_free! out[(int32)lane] = tile[0][(int32)lane];
+}
+
+// The same tile read back as flat storage, so the test can compare the bytes
+// against the layout written out by hand in Mettle.
+kernel(block = 32) writes_its_layout_flat(out: float32 global*) {
+  workgroup var tile: float32[8, 8] layout swizzle64;
+  var lane: Lane = (Lane)thread.x;
+  for row in 0..8 {
+    for column in 0..8 {
+      tile[row][column] = (float32)(row * 100 + column);
+    }
+  }
+  barrier(workgroup, acq_rel);
+  if ((int32)lane == 0) {
+    var raw: float32 shared* = &tile[0][0];
+    for k in 0..64 {
+      out[k] = raw[k];
+    }
+  }
+}
+
+kernel(block = 32) writes_its_layout(out: float32 global*) {
+  workgroup var tile: float32[8, 8] layout swizzle64;
+  var lane: Lane = (Lane)thread.x;
+  for row in 0..8 {
+    for column in 0..8 {
+      tile[row][column] = (float32)(row * 100 + column);
+    }
+  }
+  barrier(workgroup, acq_rel);
+  if ((int32)lane == 0) {
+    for row in 0..8 {
+      for column in 0..8 {
+        out[row * 8 + column] = tile[row][column];
+      }
+    }
+  }
+}
+
+// A change of layout is a copy, and `layout_copy` is where the program says
+// so. The row-major tile is written, converted into the swizzled one, and read
+// back through that one, so the two orders have to agree element for element.
+kernel(block = 32) converts_between_layouts(out: float32 global*) {
+  workgroup var plain: float32[8, 8] layout row;
+  workgroup var swizzled: float32[8, 8] layout swizzle64;
+  var lane: Lane = (Lane)thread.x;
+  if ((int32)lane == 0) {
+    for row in 0..8 {
+      for column in 0..8 {
+        plain[row][column] = (float32)(row * 100 + column);
+      }
+    }
+    layout_copy(swizzled, plain);
+    for row in 0..8 {
+      for column in 0..8 {
+        out[row * 8 + column] = swizzled[row][column];
+      }
+    }
+  }
+}
+
+// The layout, written out in Mettle. `swizzle64` groups two float32 into an
+// eight-byte chunk and exchanges the chunks of each row by the row's index.
+fn swizzle64_offset(row: int32, column: int32, columns: int32,
+                    chunk: int32) -> int32 {
+  var chunks_per_row: int32 = columns / chunk;
+  return row * columns + ((column / chunk) ^ (row % chunks_per_row)) * chunk +
+         (column % chunk);
+}
+
+@test fn the_bytes_are_where_the_layout_says() -> int32 {
+  var out: float32[64];
+  var expected: float32[64];
+  var i: int32 = 0;
+  while (i < 64) {
+    out[i] = -1.0;
+    expected[i] = -1.0;
+    i = i + 1;
+  }
+  var row: int32 = 0;
+  while (row < 8) {
+    var column: int32 = 0;
+    while (column < 8) {
+      expected[swizzle64_offset(row, column, 8, 2)] =
+          (float32)(row * 100 + column);
+      column = column + 1;
+    }
+    row = row + 1;
+  }
+  dispatch writes_its_layout_flat[grid: (1, 1, 1), block: (32, 1, 1)](
+      (float32 global*)&out[0]);
+  i = 0;
+  while (i < 64) {
+    if (out[i] != expected[i]) { return i + 1; }
+    i = i + 1;
+  }
+  return 0;
+}
+
+@test fn a_conversion_moves_every_element() -> int32 {
+  var out: float32[64];
+  var i: int32 = 0;
+  while (i < 64) {
+    out[i] = -1.0;
+    i = i + 1;
+  }
+  dispatch converts_between_layouts[grid: (1, 1, 1), block: (32, 1, 1)](
+      (float32 global*)&out[0]);
+  var row: int32 = 0;
+  while (row < 8) {
+    var column: int32 = 0;
+    while (column < 8) {
+      if (out[row * 8 + column] != (float32)(row * 100 + column)) {
+        return row * 8 + column + 1;
+      }
+      column = column + 1;
+    }
+    row = row + 1;
+  }
+  return 0;
+}
+
+@test fn a_layout_reads_back_what_it_wrote() -> int32 {
+  var out: float32[64];
+  var i: int32 = 0;
+  while (i < 64) {
+    out[i] = 0.0;
+    i = i + 1;
+  }
+  dispatch writes_its_layout[grid: (1, 1, 1), block: (32, 1, 1)](
+      (float32 global*)&out[0]);
+  var row: int32 = 0;
+  while (row < 8) {
+    var column: int32 = 0;
+    while (column < 8) {
+      if (out[row * 8 + column] != (float32)(row * 100 + column)) {
+        return 1;
+      }
+      column = column + 1;
+    }
+    row = row + 1;
+  }
+  return 0;
+}

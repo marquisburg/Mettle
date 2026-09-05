@@ -66,6 +66,7 @@ ASTNode *ast_create_node(ASTNodeType type, SourceLocation location) {
   node->proven_predicate = NULL;
   node->type_registered = 0;
   node->proven_binding = NULL;
+  node->conflict_free_mode = 0;
 
   return node;
 }

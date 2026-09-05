@@ -776,6 +776,10 @@ typedef struct {
      or the trip count is the same for every work item of the group. 1 is the
      hint, 2 is the contract that fails the build. */
   int uniform_mode;
+  /* `@conflict_free` / `@conflict_free!` on a statement: the addresses one
+     subgroup touches in each workgroup access inside it fall in distinct
+     banks. 1 is the hint, 2 is the contract. */
+  int conflict_free_mode;
 } ParsedDecorators;
 
 // Consume a run of `@ident[!]` decorators into `out`. Assumes the current token
@@ -797,6 +801,7 @@ static int parser_parse_decorator_chain(Parser *parser, ParsedDecorators *out) {
   out->simd_mode = SIMD_ATTR_NONE;
   out->unroll_factor = 0;
   out->uniform_mode = 0;
+  out->conflict_free_mode = 0;
 
   while (parser->current_token.type == TOKEN_AT) {
     parser_advance(parser); // consume '@'
@@ -874,6 +879,17 @@ static int parser_parse_decorator_chain(Parser *parser, ParsedDecorators *out) {
       }
       out->is_rule = 1;
       parser_advance(parser);
+    } else if (strcmp(name, "conflict_free") == 0) {
+      if (out->conflict_free_mode) {
+        parser_set_error(parser, "Duplicate '@conflict_free' decorator");
+        return 0;
+      }
+      parser_advance(parser); // consume 'conflict_free'
+      out->conflict_free_mode = 1;
+      if (parser->current_token.type == TOKEN_NOT) {
+        out->conflict_free_mode = 2;
+        parser_advance(parser); // consume '!'
+      }
     } else if (strcmp(name, "uniform") == 0) {
       if (out->uniform_mode) {
         parser_set_error(parser, "Duplicate '@uniform' decorator");
@@ -2453,16 +2469,23 @@ ASTNode *parser_parse_statement(Parser *parser) {
       return NULL;
     }
     if (decos.simd_mode == SIMD_ATTR_NONE && !decos.unroll_factor &&
-        !decos.uniform_mode) {
+        !decos.uniform_mode && !decos.conflict_free_mode) {
       parser_set_error(parser,
-                       "Expected a '@simd', '@unroll' or '@uniform' decorator "
-                       "before this statement");
+                       "Expected a '@simd', '@unroll', '@uniform' or "
+                       "'@conflict_free' decorator before this statement");
       return NULL;
     }
 
     ASTNode *loop = parser_parse_statement(parser);
     if (!loop)
       return NULL;
+    if (decos.conflict_free_mode) {
+      loop->conflict_free_mode = decos.conflict_free_mode;
+      if (decos.simd_mode == SIMD_ATTR_NONE && !decos.unroll_factor &&
+          !decos.uniform_mode) {
+        return loop;
+      }
+    }
     if (loop->type == AST_IF_STATEMENT) {
       if (decos.simd_mode != SIMD_ATTR_NONE || decos.unroll_factor) {
         parser_set_error(
@@ -3401,6 +3424,40 @@ static char *parser_parse_pointer_suffix(Parser *parser, char *type_name) {
   return type_name;
 }
 
+/* `layout row`, `layout swizzle128`, `layout interleave(4)`: how a view stores
+   its elements. The names live in std/warp as constants, so this is a word in
+   a type rather than a token of its own. */
+static char *parser_parse_layout_suffix(Parser *parser, char *type_name) {
+  char written[64];
+  if (!type_name || !parser_at_contextual_keyword(parser, "layout",
+                                                  TOKEN_IDENTIFIER)) {
+    return type_name;
+  }
+  parser_advance(parser);
+  snprintf(written, sizeof(written), "layout %s", parser->current_token.value);
+  parser_advance(parser);
+  if (parser->current_token.type == TOKEN_LPAREN) {
+    char with_arg[80];
+    parser_advance(parser);
+    if (parser->current_token.type != TOKEN_NUMBER) {
+      parser_set_error(parser, "Expected a count inside a layout's '(...)'");
+      free(type_name);
+      return NULL;
+    }
+    snprintf(with_arg, sizeof(with_arg), "%s(%s)", written,
+             parser->current_token.value);
+    parser_advance(parser);
+    if (parser->current_token.type != TOKEN_RPAREN) {
+      parser_set_error(parser, "Expected ')' to close a layout's argument");
+      free(type_name);
+      return NULL;
+    }
+    parser_advance(parser);
+    snprintf(written, sizeof(written), "%s", with_arg);
+  }
+  return parser_append_qualifier(type_name, written);
+}
+
 static char *parser_parse_array_suffix(Parser *parser, char *type_name) {
   char *size_text;
   char *full_type;
@@ -3470,6 +3527,10 @@ static char *parser_parse_array_suffix(Parser *parser, char *type_name) {
     }
     strcat(view_type, "]");
     free(type_name);
+    view_type = parser_parse_layout_suffix(parser, view_type);
+    if (!view_type) {
+      return NULL;
+    }
     return parser_parse_array_suffix(parser, view_type);
   }
 
@@ -3486,6 +3547,58 @@ static char *parser_parse_array_suffix(Parser *parser, char *type_name) {
   if (!size_text) {
     free(type_name);
     return NULL;
+  }
+
+  /* `T[128, 64]`: a view whose extents are part of its type. Every index into
+     one is bounded by the type rather than by a value travelling beside it,
+     and a layout can be written after it. */
+  if (parser->current_token.type == TOKEN_COMMA) {
+    size_t extents_len = strlen(type_name) + strlen(size_text) + 4;
+    char *extents = malloc(extents_len);
+    if (!extents) {
+      free(type_name);
+      free(size_text);
+      return NULL;
+    }
+    snprintf(extents, extents_len, "%s[%s", type_name, size_text);
+    free(type_name);
+    free(size_text);
+    while (parser->current_token.type == TOKEN_COMMA) {
+      char *grown;
+      size_t grown_len;
+      parser_advance(parser);
+      if (parser->current_token.type != TOKEN_NUMBER &&
+          parser->current_token.type != TOKEN_IDENTIFIER) {
+        parser_set_error(parser, "Expected an extent after ',' in a view type");
+        free(extents);
+        return NULL;
+      }
+      grown_len = strlen(extents) + strlen(parser->current_token.value) + 3;
+      grown = malloc(grown_len);
+      if (!grown) {
+        free(extents);
+        return NULL;
+      }
+      snprintf(grown, grown_len, "%s,%s", extents, parser->current_token.value);
+      free(extents);
+      extents = grown;
+      parser_advance(parser);
+    }
+    if (!parser_expect(parser, TOKEN_RBRACKET)) {
+      free(extents);
+      return NULL;
+    }
+    {
+      size_t closed_len = strlen(extents) + 2;
+      char *closed = malloc(closed_len);
+      if (!closed) {
+        free(extents);
+        return NULL;
+      }
+      snprintf(closed, closed_len, "%s]", extents);
+      free(extents);
+      return parser_parse_layout_suffix(parser, closed);
+    }
   }
 
   if (!parser_expect(parser, TOKEN_RBRACKET)) {

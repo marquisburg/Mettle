@@ -649,7 +649,17 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
       int is_dynamic_workgroup_view =
           decl_type && decl_type->kind == TYPE_POINTER && decl_type->base_type &&
           declaration->address_space == AST_ADDRESS_SPACE_WORKGROUP;
-      if (!is_static_storage && !is_dynamic_workgroup_view) {
+      /* A view whose extents are in its type allocates their product. */
+      long long static_view_elements = 0;
+      if (decl_type && decl_type->kind == TYPE_SLICE && decl_type->base_type &&
+          decl_type->view_extents[0] > 0) {
+        static_view_elements = 1;
+        for (size_t e = 0; e < 4 && decl_type->view_extents[e]; e++) {
+          static_view_elements *= (long long)decl_type->view_extents[e];
+        }
+      }
+      if (!is_static_storage && !static_view_elements &&
+          !is_dynamic_workgroup_view) {
         ir_operand_destroy(&local.dest);
         ir_set_error(context,
                      "Invalid GPU address-space declaration '%s' reached IR "
@@ -675,9 +685,9 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
       local.op = IR_OP_ADDRESS_SPACE_ALLOC;
       /* Zero is the neutral dynamic-workgroup-arena sentinel. It is never
        * accepted for private storage or a fixed source array. */
-      local.rhs =
-          ir_operand_int(is_static_storage ? (long long)decl_type->array_size
-                                           : 0);
+      local.rhs = ir_operand_int(
+          is_static_storage ? (long long)decl_type->array_size
+                            : static_view_elements);
       local.text = decl_type->base_type->name;
       local.value_type = (MtlcType *)pointer_type;
       local.address_space = address_space;

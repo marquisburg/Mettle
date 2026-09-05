@@ -211,6 +211,24 @@ arithmetic of the offset, which a declared type such as
 unproven claim is refused with the alignment the expression reached. What a
 proven one buys is in [GPU offload](gpu.md#address-spaces-and-alignment-in-the-pointer-type).
 
+### Views whose extents are in their type
+
+`T[E0, E1]` with constant extents is a view whose shape is part of its type. It
+holds one pointer, because nothing has to travel beside the data, and every
+index into one is proven against the extent rather than checked at run time.
+
+```mettle
+workgroup var tile: float32[32, 32] layout swizzle128;
+```
+
+`layout <name>` says the order the elements sit in: `row`, `col`,
+`interleave(k)`, `swizzle64`, `swizzle128`, and the fragment forms an MMA
+takes. The names are constants in `std/warp`. The layout is part of the type,
+so one order never flows into a parameter that names another, and
+`layout_copy(destination, source)` is the statement that moves between them.
+[GPU offload](gpu.md#layouts-as-types) has the formulas and what a layout
+buys.
+
 ### Uniform values on a device
 
 `std/warp` declares one more device type:

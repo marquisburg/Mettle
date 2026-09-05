@@ -169,6 +169,56 @@ size_t type_checker_address_alignment(TypeChecker *checker, ASTNode *expression,
   return 0;
 }
 
+/* Is an index into a view whose extents are in its type inside that extent?
+   The routes are the ones the declared-type prover already uses: a constant, a
+   declared type's range, a dominating test, or the launch's own block shape
+   where the index is a work-item index. */
+int type_checker_static_view_index_is_bounded(TypeChecker *checker,
+                                              ASTNode *index, size_t extent) {
+  long long constant = 0;
+  int has_min = 0;
+  int has_max = 0;
+  long long min = 0;
+  long long max = 0;
+  if (!checker || !index || extent == 0) {
+    return 0;
+  }
+  if (type_checker_eval_integer_constant(index, &constant)) {
+    return constant >= 0 && (unsigned long long)constant < extent;
+  }
+  if (index->resolved_type &&
+      type_checker_refined_index_fits(index->resolved_type, extent)) {
+    return 1;
+  }
+  if (index->type == AST_FUNCTION_CALL) {
+    CallExpression *call = (CallExpression *)index->data;
+    ASTNode *owner_node = checker->current_function_decl;
+    FunctionDeclaration *owner =
+        owner_node && owner_node->type == AST_FUNCTION_DECLARATION
+            ? (FunctionDeclaration *)owner_node->data
+            : NULL;
+    if (call && call->is_gpu_index && call->function_name && owner &&
+        owner->is_kernel && strncmp(call->function_name, "gpu_tid_", 8) == 0) {
+      int axis = call->function_name[8] == 'y'   ? 1
+                 : call->function_name[8] == 'z' ? 2
+                                                 : 0;
+      int declared = owner->kernel_block[axis];
+      if (axis > 0 && declared <= 0) {
+        declared = 1;
+      }
+      if (declared > 0 && (size_t)declared <= extent) {
+        return 1;
+      }
+    }
+  }
+  if (type_checker_expression_range(checker, index, &has_min, &min, &has_max,
+                                    &max) &&
+      has_min && has_max && min >= 0 && (unsigned long long)max < extent) {
+    return 1;
+  }
+  return 0;
+}
+
 /* Does the module being checked declare a kernel? A device helper only makes
    sense where one could reach it. */
 int type_checker_module_has_kernel(TypeChecker *checker) {
@@ -504,6 +554,63 @@ static Type *type_checker_gpu_index_builtin(TypeChecker *checker,
     return NULL;
   }
   return checker->builtin_int32;
+}
+
+/* `layout_copy(destination, source)`: the one way elements move between two
+   layouts. It is a statement rather than a coercion, because reordering a tile
+   is a copy and the program should say where that copy happens. */
+static Type *type_checker_layout_copy_builtin(TypeChecker *checker,
+                                              ASTNode *expression,
+                                              CallExpression *call,
+                                              int *handled) {
+  Type *destination;
+  Type *source;
+  *handled = 0;
+  if (!call || !call->function_name || call->object ||
+      strcmp(call->function_name, "layout_copy") != 0) {
+    return NULL;
+  }
+  *handled = 1;
+  if (call->argument_count != 2) {
+    type_checker_set_error_at_location(
+        checker, expression->location,
+        "'layout_copy' takes the view to write and the view to read");
+    return NULL;
+  }
+  destination = type_checker_infer_type(checker, call->arguments[0]);
+  source = type_checker_infer_type(checker, call->arguments[1]);
+  if (!destination || !source) {
+    return NULL;
+  }
+  if (destination->kind != TYPE_SLICE || source->kind != TYPE_SLICE ||
+      destination->view_extents[0] == 0 || source->view_extents[0] == 0 ||
+      type_view_rank(destination) != 2 || type_view_rank(source) != 2) {
+    type_checker_set_error_at_location(
+        checker, expression->location,
+        "'layout_copy' moves elements between two views whose extents are in "
+        "their types");
+    return NULL;
+  }
+  if (destination->view_extents[0] != source->view_extents[0] ||
+      destination->view_extents[1] != source->view_extents[1] ||
+      !type_checker_types_equal(destination->base_type, source->base_type)) {
+    type_checker_set_error_at_location(
+        checker, expression->location,
+        "'layout_copy' needs the same shape on both sides: '%s' and '%s' are "
+        "different tiles",
+        destination->name ? destination->name : "?",
+        source->name ? source->name : "?");
+    return NULL;
+  }
+  if (destination->view_layout == source->view_layout &&
+      destination->view_layout_param == source->view_layout_param) {
+    type_checker_set_error_at_location(
+        checker, expression->location,
+        "both sides of this 'layout_copy' are laid out the same way, so it "
+        "moves nothing");
+    return NULL;
+  }
+  return checker->builtin_void;
 }
 
 /* Reference-frontend syntax for the target-neutral subgroup intrinsic family.
@@ -3360,6 +3467,13 @@ static Type *type_checker_infer_call(TypeChecker *checker,
 
     {
       int handled = 0;
+      int layout_handled = 0;
+      Type *layout_result = type_checker_layout_copy_builtin(
+          checker, expression, call, &layout_handled);
+      if (layout_handled) {
+        return layout_result;
+      }
+
       Type *index_type = type_checker_gpu_index_builtin(
           checker, expression, call, &handled);
       if (handled) return index_type;
@@ -3858,6 +3972,40 @@ static Type *type_checker_infer_index(TypeChecker *checker,
         type_checker_set_error_at_location(checker, expression->location,
                                            "Indexed type has no element type");
         return NULL;
+      }
+      /* A view whose extents are in its type is bounded by the declaration, so
+         every index into one is proven here rather than tested at run time. */
+      if (array_type->view_extents[0] > 0) {
+        size_t rank = type_view_rank(array_type);
+        size_t depth = 0;
+        Type *walk = array_type;
+        (void)walk;
+        for (ASTNode *scan = idx->array;
+             scan && scan->type == AST_INDEX_EXPRESSION; depth++) {
+          scan = ((ArrayIndexExpression *)scan->data)->array;
+        }
+        if (depth >= rank) {
+          type_checker_set_error_at_location(
+              checker, expression->location,
+              "'%s' has %zu dimensions and this is index %zu",
+              array_type->name ? array_type->name : "the view", rank,
+              depth + 1);
+          return NULL;
+        }
+        if (!type_checker_static_view_index_is_bounded(
+                checker, idx->index, array_type->view_extents[depth])) {
+          type_checker_set_error_at_location(
+              checker, idx->index->location,
+              "this index is not bounded to 0..%zu, which '%s' is; give it a "
+              "declared type, test it, or write a constant",
+              array_type->view_extents[depth] - 1,
+              array_type->name ? array_type->name : "the view");
+          return NULL;
+        }
+        if (depth + 1 < rank) {
+          return array_type;
+        }
+        return array_type->base_type;
       }
       if (type_view_rank(array_type) > 1) {
         return type_checker_view_of(checker, array_type->base_type,

@@ -257,6 +257,22 @@ error[E0003]: kernel parameter 'tile' is declared shared, and a launch has no
               it generic
 ```
 
+A view laid out one way where another is wanted:
+
+```text
+error[E0004]: Type mismatch: expected 'float32 shared[32,32] layout row',
+              found 'float32[32,32] layout swizzle128'
+  help: this wants elements laid out 'row' and these are laid out 'swizzle128'
+```
+
+An access `@conflict_free!` could not show is one access:
+
+```text
+error[E0003]: '@conflict_free!' says one subgroup's addresses fall in distinct
+              workgroup banks, and work items 0 and 1 both land in bank 0, so
+              this access is two accesses
+```
+
 A value a declared type says is uniform, that the compiler cannot show is:
 
 ```text

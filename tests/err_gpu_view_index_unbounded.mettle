@@ -1,0 +1,6 @@
+kernel(block = 32) unbounded(out: float32 global*, n: int32) {
+  workgroup var tile: float32[32, 32] layout row;
+  tile[n][0] = 1.0;
+  barrier(workgroup, acq_rel);
+  out[0] = tile[0][0];
+}

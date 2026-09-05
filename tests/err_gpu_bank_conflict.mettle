@@ -1,0 +1,9 @@
+type Lane = int32 where value >= 0 && value < 32;
+
+kernel(block = 32) column_of_a_row_major_tile(out: float32 global*) {
+  workgroup var tile: float32[32, 32] layout row;
+  var lane: Lane = (Lane)thread.x;
+  tile[(int32)lane][0] = (float32)lane;
+  barrier(workgroup, acq_rel);
+  @conflict_free! out[(int32)lane] = tile[(int32)lane][0];
+}

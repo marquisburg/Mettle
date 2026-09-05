@@ -252,6 +252,9 @@ static void describe_entry(const MtlcTargetEntry *entry, const char *triple,
   out->cost_divide_float = 14;
   out->cost_call = 4;
   out->cost_allocate = 120;
+  out->subgroup_width = 32;
+  out->shared_memory_banks = 32;
+  out->shared_bank_bytes = 4;
   if (entry->arch == MTLC_TARGET_ARCH_AARCH64) {
     out->cost_divide_float = 12;
   }
@@ -762,7 +765,12 @@ void mtlc_target_print_description(FILE *out,
   fprintf(out, "  cost_divide: %d,\n", d->cost_divide);
   fprintf(out, "  cost_divide_float: %d,\n", d->cost_divide_float);
   fprintf(out, "  cost_call: %d,\n", d->cost_call);
-  fprintf(out, "  cost_allocate: %d\n};\n", d->cost_allocate);
+  fprintf(out, "  cost_allocate: %d,\n", d->cost_allocate);
+  fprintf(out, "  subgroup_width: %d,\n", d->subgroup_width);
+  fprintf(out, "  shared_memory_banks: %d,\n",
+          d->shared_memory_banks);
+  fprintf(out, "  shared_bank_bytes: %d\n};\n",
+          d->shared_bank_bytes);
 }
 
 int mtlc_target_syscall_max_arguments(const MtlcTarget *target) {

@@ -6246,6 +6246,10 @@ int compile_file(const char *input_filename, const char *output_filename,
   type_checker =
       type_checker_create_with_error_reporter(symbol_table, error_reporter);
   type_checker_set_launch_report(options->report_launches);
+  /* What a kernel's types said about its memory, and what the proofs over them
+     cost. `--explain` prints it beside the optimizer's own report. */
+  type_checker_set_gpu_type_report(options->report_gpu_types ||
+                                   options->explain || options->explain_all);
   if (!parser || !type_checker) {
     compiler_profile_add(&profile, PROFILE_PHASE_INIT, phase_start);
     error_reporter_add_error(error_reporter, ERROR_INTERNAL,
@@ -6429,6 +6433,9 @@ int compile_file(const char *input_filename, const char *output_filename,
   }
   if (options->report_proofs) {
     type_checker_report_proofs(type_checker, stdout);
+  }
+  if (options->report_gpu_types || options->explain || options->explain_all) {
+    type_checker_print_gpu_type_report(stderr);
   }
   if (options->why_mode && options->why_subject &&
       (options->why_subject[0] >= '0' && options->why_subject[0] <= '9')) {

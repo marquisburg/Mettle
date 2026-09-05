@@ -240,6 +240,12 @@ void type_checker_pop_loop_trip(TypeChecker *checker, size_t depth);
 size_t type_checker_loop_trip_depth(const TypeChecker *checker);
 void type_checker_note_return_range(TypeChecker *checker, struct ASTNode *value);
 void type_checker_report_proofs(const TypeChecker *checker, FILE *out);
+
+/* What a kernel's types said about where its memory lives, how it is laid out,
+   and what a group shares, with the proofs that were discharged over them and
+   what they cost. `--report-gpu-types` and `--explain` both print it. */
+void type_checker_set_gpu_type_report(int enabled);
+void type_checker_print_gpu_type_report(FILE *out);
 long long type_checker_proof_steps(const TypeChecker *checker);
 int type_checker_why_proof(const TypeChecker *checker, const char *site,
                            const char *type_name, FILE *out);

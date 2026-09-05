@@ -1163,10 +1163,22 @@ int type_checker_check_switch_statement(TypeChecker *checker,
 static int type_checker_check_defer_statement(TypeChecker *checker,
                                               ASTNode *statement);
 
+static int type_checker_check_statement_body(TypeChecker *checker,
+                                             ASTNode *statement);
+
 int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
   if (!checker || !statement)
     return 0;
+  if (!type_checker_check_statement_body(checker, statement)) {
+    return 0;
+  }
+  /* The bank check runs after the statement is typed, because it reads the
+     types the accesses inside it ended with. */
+  return type_checker_check_conflict_free(checker, statement);
+}
 
+static int type_checker_check_statement_body(TypeChecker *checker,
+                                             ASTNode *statement) {
   switch (statement->type) {
   case AST_DEFER_STATEMENT:
     return type_checker_check_defer_statement(checker, statement);

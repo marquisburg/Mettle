@@ -219,6 +219,12 @@ MtlcType *mtlc_type_from_frontend(const Type *type) {
   memo_insert(type, out);
 
   out->kind = translate_kind(type->kind);
+  /* A view whose extents are in its type is one pointer: the shape travels in
+     the type, so the backend sees an address and nothing else. The extents and
+     the layout ride along on the descriptor for the emitters and the report. */
+  if (type->kind == TYPE_SLICE && type->view_extents[0]) {
+    out->kind = MTLC_TYPE_POINTER;
+  }
   out->name = type->name; /* borrow the frontend's interned name */
   out->size = type->size;
   out->alignment = type->alignment;

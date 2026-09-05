@@ -10,6 +10,19 @@
 // a `Uniform<bool>` is a group decision and lowers to `bra.uni`.
 export type Uniform<T> = T where uniform(value);
 
+// The layouts a view's type can name, as data. A type says `layout row` or
+// `layout swizzle128` and means one of these; they are constants rather than
+// tokens of their own, so a target that grows another form adds a name here
+// and nothing in the grammar moves.
+export const layout_row: int32 = 1;
+export const layout_col: int32 = 2;
+export const layout_swizzle64: int32 = 3;
+export const layout_swizzle128: int32 = 4;
+export const layout_interleave: int32 = 5;
+export const layout_fragment_a: int32 = 6;
+export const layout_fragment_b: int32 = 7;
+export const layout_fragment_c: int32 = 8;
+
 // The collectives below speak to a whole group, so each one requires the
 // effect that group exists under. A kernel entry provides `Warp` and `Block`,
 // because a launch starts every work item of a warp and of a block together; a

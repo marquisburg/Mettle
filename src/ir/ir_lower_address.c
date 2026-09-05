@@ -1028,6 +1028,170 @@ static int ir_lower_member_address(IRLoweringContext *context,
                                    IROperand *out_address,
                                    Type **out_type);
 
+/* Where element (i, j) of a static view sits, in elements from the base.
+   The layout is part of the type, so this is the one place that reads it and
+   every access through the type gets the same answer.
+
+     row            i * E1 + j
+     col            j * E0 + i
+     interleave(k)  (j / k) * (E0 * k) + i * k + (j % k)
+     swizzle64      i * E1 + ((j / C) ^ (i % (E1 / C))) * C + (j % C), C = 8 bytes
+     swizzle128     the same with C = 16 bytes
+
+   The swizzles exist so a workgroup reading a column touches a different
+   16-byte chunk on every row, which is what puts the lanes in distinct banks. */
+int ir_lower_static_view_offset(IRLoweringContext *context,
+                                       IRFunction *function, Type *view_type,
+                                       IROperand *row, IROperand *column,
+                                       SourceLocation location,
+                                       IROperand *out_offset) {
+  size_t rows = view_type->view_extents[0];
+  size_t columns = view_type->view_extents[1];
+  size_t element_size = view_type->base_type ? view_type->base_type->size : 4;
+  IROperand scaled = ir_operand_none();
+  IROperand extent = ir_operand_none();
+
+  switch (view_type->view_layout) {
+  case VIEW_LAYOUT_COL: {
+    extent = ir_operand_int((long long)rows);
+    return ir_emit_binary_temp(context, function, "*", column, &extent,
+                               location, &scaled) &&
+           ir_emit_binary_temp(context, function, "+", &scaled, row, location,
+                               out_offset);
+  }
+  case VIEW_LAYOUT_INTERLEAVE: {
+    long long group = view_type->view_layout_param;
+    IROperand group_operand;
+    IROperand block_operand;
+    IROperand outer = ir_operand_none();
+    IROperand outer_block = ir_operand_none();
+    IROperand inner = ir_operand_none();
+    IROperand within = ir_operand_none();
+    IROperand partial = ir_operand_none();
+    if (group <= 0) {
+      ir_set_error(context, "a view's interleave count must be positive");
+      return 0;
+    }
+    group_operand = ir_operand_int(group);
+    block_operand = ir_operand_int((long long)rows * group);
+    return ir_emit_binary_temp(context, function, "/", column, &group_operand,
+                               location, &outer) &&
+           ir_emit_binary_temp(context, function, "*", &outer, &block_operand,
+                               location, &outer_block) &&
+           ir_emit_binary_temp(context, function, "*", row, &group_operand,
+                               location, &inner) &&
+           ir_emit_binary_temp(context, function, "%", column, &group_operand,
+                               location, &within) &&
+           ir_emit_binary_temp(context, function, "+", &outer_block, &inner,
+                               location, &partial) &&
+           ir_emit_binary_temp(context, function, "+", &partial, &within,
+                               location, out_offset);
+  }
+  case VIEW_LAYOUT_SWIZZLE64:
+  case VIEW_LAYOUT_SWIZZLE128: {
+    long long chunk_bytes =
+        view_type->view_layout == VIEW_LAYOUT_SWIZZLE64 ? 8 : 16;
+    long long chunk = element_size ? chunk_bytes / (long long)element_size : 1;
+    long long chunks_per_row = chunk > 0 ? (long long)columns / chunk : 0;
+    IROperand chunk_operand;
+    IROperand chunks_operand;
+    IROperand row_base = ir_operand_none();
+    IROperand column_chunk = ir_operand_none();
+    IROperand row_chunk = ir_operand_none();
+    IROperand swizzled = ir_operand_none();
+    IROperand swizzled_elements = ir_operand_none();
+    IROperand within = ir_operand_none();
+    IROperand partial = ir_operand_none();
+    if (chunk <= 0 || chunks_per_row <= 0) {
+      ir_set_error(context,
+                   "a swizzled view's rows must hold whole chunks of the "
+                   "layout's width");
+      return 0;
+    }
+    chunk_operand = ir_operand_int(chunk);
+    chunks_operand = ir_operand_int(chunks_per_row);
+    extent = ir_operand_int((long long)columns);
+    return ir_emit_binary_temp(context, function, "*", row, &extent, location,
+                               &row_base) &&
+           ir_emit_binary_temp(context, function, "/", column, &chunk_operand,
+                               location, &column_chunk) &&
+           ir_emit_binary_temp(context, function, "%", row, &chunks_operand,
+                               location, &row_chunk) &&
+           ir_emit_binary_temp(context, function, "^", &column_chunk,
+                               &row_chunk, location, &swizzled) &&
+           ir_emit_binary_temp(context, function, "*", &swizzled,
+                               &chunk_operand, location, &swizzled_elements) &&
+           ir_emit_binary_temp(context, function, "%", column, &chunk_operand,
+                               location, &within) &&
+           ir_emit_binary_temp(context, function, "+", &row_base,
+                               &swizzled_elements, location, &partial) &&
+           ir_emit_binary_temp(context, function, "+", &partial, &within,
+                               location, out_offset);
+  }
+  case VIEW_LAYOUT_FRAGMENT_A:
+  case VIEW_LAYOUT_FRAGMENT_B:
+  case VIEW_LAYOUT_FRAGMENT_C:
+    ir_set_error(context,
+                 "a fragment layout holds one work item's share of a tile in "
+                 "registers, so it has no element address; hand it to a tensor "
+                 "operation instead");
+    return 0;
+  default:
+    break;
+  }
+  extent = ir_operand_int((long long)columns);
+  return ir_emit_binary_temp(context, function, "*", row, &extent, location,
+                             &scaled) &&
+         ir_emit_binary_temp(context, function, "+", &scaled, column, location,
+                             out_offset);
+}
+
+/* An element of a view whose extents are in its type. Both indices are
+   consumed at once, because a swizzled address is not a row address plus a
+   column. */
+static int ir_lower_static_view_element(IRLoweringContext *context,
+                                        IRFunction *function,
+                                        ASTNode *expression,
+                                        ArrayIndexExpression *outer,
+                                        ArrayIndexExpression *inner,
+                                        Type *view_type, IROperand *out_address,
+                                        Type **out_type) {
+  IROperand base = ir_operand_none();
+  IROperand row = ir_operand_none();
+  IROperand column = ir_operand_none();
+  IROperand offset = ir_operand_none();
+  IROperand bytes = ir_operand_none();
+  IROperand element_size = ir_operand_int(
+      (long long)ir_type_array_element_stride(view_type->base_type));
+  int ok = 0;
+
+  if (out_type) {
+    *out_type = view_type->base_type;
+  }
+  if (!ir_lower_expression(context, function, inner->array, &base) ||
+      !ir_lower_expression(context, function, inner->index, &row) ||
+      !ir_lower_expression(context, function, outer->index, &column)) {
+    goto done;
+  }
+  if (!ir_lower_static_view_offset(context, function, view_type, &row, &column,
+                                   expression->location, &offset) ||
+      !ir_emit_binary_temp(context, function, "*", &offset, &element_size,
+                           expression->location, &bytes) ||
+      !ir_emit_binary_temp(context, function, "+", &base, &bytes,
+                           expression->location, out_address)) {
+    goto done;
+  }
+  ok = 1;
+
+done:
+  ir_operand_destroy(&base);
+  ir_operand_destroy(&row);
+  ir_operand_destroy(&column);
+  ir_operand_destroy(&offset);
+  ir_operand_destroy(&bytes);
+  return ok;
+}
+
 static int ir_lower_view_row_address(IRLoweringContext *context,
                                      IRFunction *function,
                                      ASTNode *expression,
@@ -1217,6 +1381,28 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
        indexing one reads the pointer first. The extent is right there beside
        it, which is what the bounds check below uses. */
     int base_is_slice = array_type && array_type->kind == TYPE_SLICE;
+    /* An element of a view whose extents are in its type. The inner index is
+       still on the tree, so both are read here and the layout turns them into
+       one address. */
+    if (index_expression->array &&
+        index_expression->array->type == AST_INDEX_EXPRESSION) {
+      ArrayIndexExpression *inner =
+          (ArrayIndexExpression *)index_expression->array->data;
+      Type *outer_type =
+          inner ? ir_infer_expression_type(context, inner->array) : NULL;
+      if (outer_type && outer_type->kind == TYPE_SLICE &&
+          outer_type->view_extents[0] > 0 && type_view_rank(outer_type) == 2) {
+        return ir_lower_static_view_element(context, function, expression,
+                                            index_expression, inner,
+                                            outer_type, out_address, out_type);
+      }
+    }
+    if (base_is_slice && array_type->view_extents[0] > 0) {
+      ir_set_error(context,
+                   "a view whose extents are in its type is indexed with every "
+                   "index at once");
+      return 0;
+    }
     if (base_is_slice && type_view_rank(array_type) > 1) {
       return ir_lower_view_row_address(context, function, expression,
                                        index_expression, array_type,

@@ -38,6 +38,197 @@ int ir_lower_statement_or_expression(IRLoweringContext *context,
 }
 
 
+/* `layout_copy(destination, source)`: one loop over the tile, reading each
+   element where the source's layout puts it and writing it where the
+   destination's does. A change of layout is a copy, and this is the copy. */
+static int ir_lower_layout_copy(IRLoweringContext *context,
+                                IRFunction *function, ASTNode *expression,
+                                CallExpression *call) {
+  Type *destination_type =
+      ir_infer_expression_type(context, call->arguments[0]);
+  Type *source_type = ir_infer_expression_type(context, call->arguments[1]);
+  IROperand destination = ir_operand_none();
+  IROperand source = ir_operand_none();
+  IROperand counter = ir_operand_none();
+  IROperand limit;
+  IROperand columns;
+  IROperand element_size;
+  char *counter_name = ir_new_label_name(context, "layout_i");
+  char *top_label = ir_new_label_name(context, "layout_top");
+  char *end_label = ir_new_label_name(context, "layout_end");
+  long long total;
+  int ok = 0;
+
+  if (!destination_type || !source_type || !counter_name || !top_label ||
+      !end_label) {
+    goto done;
+  }
+  total = (long long)destination_type->view_extents[0] *
+          (long long)destination_type->view_extents[1];
+  limit = ir_operand_int(total);
+  columns = ir_operand_int((long long)destination_type->view_extents[1]);
+  element_size = ir_operand_int(
+      (long long)ir_type_array_element_stride(destination_type->base_type));
+  if (!ir_lower_expression(context, function, call->arguments[0],
+                           &destination) ||
+      !ir_lower_expression(context, function, call->arguments[1], &source)) {
+    goto done;
+  }
+  if (!ir_emit_local_declaration(context, function, counter_name, "int32",
+                                 expression->location)) {
+    goto done;
+  }
+  counter = ir_operand_symbol(counter_name);
+  if (!counter.name) {
+    goto done;
+  }
+  {
+    IRInstruction start = {0};
+    start.op = IR_OP_ASSIGN;
+    start.location = expression->location;
+    start.dest = ir_clone_operand_local(&counter);
+    start.lhs = ir_operand_int(0);
+    if (!ir_emit(context, function, &start)) {
+      ir_operand_destroy(&start.dest);
+      goto done;
+    }
+    ir_operand_destroy(&start.dest);
+  }
+  if (!ir_emit_label_instruction(context, function, top_label,
+                                 expression->location)) {
+    goto done;
+  }
+  {
+    IROperand still_going = ir_operand_none();
+    IRInstruction branch = {0};
+    if (!ir_emit_binary_temp(context, function, "<", &counter, &limit,
+                             expression->location, &still_going)) {
+      goto done;
+    }
+    branch.op = IR_OP_BRANCH_ZERO;
+    branch.location = expression->location;
+    branch.lhs = still_going;
+    branch.text = end_label;
+    if (!ir_emit(context, function, &branch)) {
+      ir_operand_destroy(&still_going);
+      goto done;
+    }
+    ir_operand_destroy(&still_going);
+  }
+  {
+    IROperand row = ir_operand_none();
+    IROperand column = ir_operand_none();
+    IROperand source_offset = ir_operand_none();
+    IROperand destination_offset = ir_operand_none();
+    IROperand source_bytes = ir_operand_none();
+    IROperand destination_bytes = ir_operand_none();
+    IROperand source_address = ir_operand_none();
+    IROperand destination_address = ir_operand_none();
+    IROperand value = ir_operand_none();
+    IRInstruction load = {0};
+    IRInstruction store = {0};
+    IRInstruction step = {0};
+    int inner = 0;
+    if (!ir_emit_binary_temp(context, function, "/", &counter, &columns,
+                             expression->location, &row) ||
+        !ir_emit_binary_temp(context, function, "%", &counter, &columns,
+                             expression->location, &column) ||
+        !ir_lower_static_view_offset(context, function, source_type, &row,
+                                     &column, expression->location,
+                                     &source_offset) ||
+        !ir_lower_static_view_offset(context, function, destination_type, &row,
+                                     &column, expression->location,
+                                     &destination_offset) ||
+        !ir_emit_binary_temp(context, function, "*", &source_offset,
+                             &element_size, expression->location,
+                             &source_bytes) ||
+        !ir_emit_binary_temp(context, function, "*", &destination_offset,
+                             &element_size, expression->location,
+                             &destination_bytes) ||
+        !ir_emit_binary_temp(context, function, "+", &source, &source_bytes,
+                             expression->location, &source_address) ||
+        !ir_emit_binary_temp(context, function, "+", &destination,
+                             &destination_bytes, expression->location,
+                             &destination_address) ||
+        !ir_make_temp_operand(context, &value)) {
+      goto inner_done;
+    }
+    load.op = IR_OP_LOAD;
+    load.location = expression->location;
+    load.dest = value;
+    load.lhs = ir_clone_operand_local(&source_address);
+    load.rhs = ir_operand_int(
+        (long long)ir_type_array_element_stride(source_type->base_type));
+    load.is_float = source_type->base_type &&
+                    (source_type->base_type->kind == TYPE_FLOAT32 ||
+                     source_type->base_type->kind == TYPE_FLOAT64);
+    load.value_type = mtlc_type_from_frontend(source_type);
+    if (!ir_emit(context, function, &load)) {
+      ir_operand_destroy(&load.lhs);
+      goto inner_done;
+    }
+    ir_operand_destroy(&load.lhs);
+    store.op = IR_OP_STORE;
+    store.location = expression->location;
+    store.dest = ir_clone_operand_local(&destination_address);
+    store.lhs = ir_clone_operand_local(&value);
+    store.rhs = ir_operand_int(
+        (long long)ir_type_array_element_stride(destination_type->base_type));
+    store.is_float = load.is_float;
+    store.value_type = mtlc_type_from_frontend(destination_type);
+    if (!ir_emit(context, function, &store)) {
+      ir_operand_destroy(&store.dest);
+      ir_operand_destroy(&store.lhs);
+      goto inner_done;
+    }
+    ir_operand_destroy(&store.dest);
+    ir_operand_destroy(&store.lhs);
+    step.op = IR_OP_BINARY;
+    step.location = expression->location;
+    step.dest = ir_clone_operand_local(&counter);
+    step.text = (char *)"+";
+    step.lhs = ir_clone_operand_local(&counter);
+    step.rhs = ir_operand_int(1);
+    if (!ir_emit(context, function, &step)) {
+      ir_operand_destroy(&step.dest);
+      ir_operand_destroy(&step.lhs);
+      goto inner_done;
+    }
+    ir_operand_destroy(&step.dest);
+    ir_operand_destroy(&step.lhs);
+    inner = 1;
+  inner_done:
+    ir_operand_destroy(&row);
+    ir_operand_destroy(&column);
+    ir_operand_destroy(&source_offset);
+    ir_operand_destroy(&destination_offset);
+    ir_operand_destroy(&source_bytes);
+    ir_operand_destroy(&destination_bytes);
+    ir_operand_destroy(&source_address);
+    ir_operand_destroy(&destination_address);
+    ir_operand_destroy(&value);
+    if (!inner) {
+      goto done;
+    }
+  }
+  if (!ir_emit_jump_instruction(context, function, top_label,
+                                expression->location) ||
+      !ir_emit_label_instruction(context, function, end_label,
+                                 expression->location)) {
+    goto done;
+  }
+  ok = 1;
+
+done:
+  ir_operand_destroy(&destination);
+  ir_operand_destroy(&source);
+  ir_operand_destroy(&counter);
+  free(counter_name);
+  free(top_label);
+  free(end_label);
+  return ok;
+}
+
 static MtlcType **ir_indirect_slot_types(ASTNode **argument_nodes,
                                         size_t argument_count, size_t lead) {
   MtlcType **slot_types = NULL;
@@ -503,6 +694,12 @@ int ir_lower_call_expression(IRLoweringContext *context,
       call->task_capture_argument != SIZE_MAX &&
       !ir_emit_task_capture_check(context, function, expression, call)) {
     return 0;
+  }
+
+  if (strcmp(call->function_name, "layout_copy") == 0 &&
+      call->argument_count == 2) {
+    *out_value = ir_operand_int(0);
+    return ir_lower_layout_copy(context, function, expression, call);
   }
 
   if (strcmp(call->function_name, "typeof") == 0) {

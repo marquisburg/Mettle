@@ -1325,10 +1325,21 @@ static int type_checker_check_address_space(TypeChecker *checker,
     int is_static_storage =
         var_type && var_type->kind == TYPE_ARRAY && var_type->base_type &&
         var_type->array_size > 0 && var_type->array_size <= UINT32_MAX;
+    /* A view whose extents are in its type is static storage of the same
+       shape: the element count is the product of the extents, and the layout
+       says where each element sits inside it. */
+    int is_static_view = var_type && var_type->kind == TYPE_SLICE &&
+                         var_type->base_type && var_type->view_extents[0] > 0;
+    type_checker_note_device_type_in(
+        checker, var_decl->name, var_type,
+        var_decl->address_space == AST_ADDRESS_SPACE_WORKGROUP
+            ? DEVICE_SPACE_SHARED
+            : DEVICE_SPACE_LOCAL,
+        declaration->location);
     int is_dynamic_workgroup_view =
         var_type && var_type->kind == TYPE_POINTER && var_type->base_type &&
         var_decl->address_space == AST_ADDRESS_SPACE_WORKGROUP;
-    if (!is_static_storage && !is_dynamic_workgroup_view) {
+    if (!is_static_storage && !is_static_view && !is_dynamic_workgroup_view) {
       type_checker_set_error_at_location(
           checker, declaration->location,
           "GPU address-space storage requires a statically sized array type "
@@ -2217,6 +2228,11 @@ static int type_checker_check_function_body(
       param_symbol->decl_line = declaration->location.line;
       param_symbol->decl_column = declaration->location.column;
       param_symbol->decl_file = declaration->location.filename;
+      type_checker_note_device_type(checker, func_decl->parameter_names[i],
+                                    active_param_types
+                                        ? active_param_types[i]
+                                        : NULL,
+                                    declaration->location);
       if (!symbol_table_declare(checker->symbol_table, param_symbol)) {
         type_checker_report_duplicate_declaration(
             checker, declaration->location, func_decl->parameter_names[i]);

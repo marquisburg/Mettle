@@ -1,0 +1,11 @@
+type Lane = int32 where value >= 0 && value < 32;
+
+@noinline fn wants_row(t: float32 shared[32, 32] layout row, i: Lane) -> float32 {
+  return t[(int32)i][0];
+}
+
+kernel(block = 32) mismatched(out: float32 global*) {
+  workgroup var tile: float32[32, 32] layout swizzle128;
+  var lane: Lane = (Lane)thread.x;
+  out[(int32)lane] = wants_row(tile, lane);
+}

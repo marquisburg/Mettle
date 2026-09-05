@@ -94,6 +94,13 @@ typedef struct {
   int cost_divide_float;
   int cost_call;
   int cost_allocate;
+  /* What a device's workgroup memory is cut into. A bank-conflict proof asks
+   * whether the addresses one subgroup touches in a single access land in
+   * distinct banks, and those three numbers are the whole of what it needs.
+   * Nothing in the emitter reads them; the proof is their only consumer. */
+  int subgroup_width;
+  int shared_memory_banks;
+  int shared_bank_bytes;
   int described_convention;
 } MtlcTargetDescription;
 

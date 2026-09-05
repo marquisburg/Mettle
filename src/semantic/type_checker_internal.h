@@ -55,6 +55,12 @@ Type *type_checker_device_slice_of(TypeChecker *checker, Type *element,
 Type *type_checker_device_view_of(TypeChecker *checker, Type *element,
                                   size_t rank, unsigned char space,
                                   size_t align, const char *qualifiers);
+Type *type_checker_static_view_of(TypeChecker *checker, Type *element,
+                                  const char *name, const size_t *extents,
+                                  size_t rank);
+size_t type_checker_split_view_layout(const char *name, size_t length,
+                                      unsigned char *layout,
+                                      unsigned short *parameter);
 size_t type_checker_split_device_qualifiers(const char *name, size_t length,
                                             unsigned char *space,
                                             size_t *align);
@@ -71,7 +77,20 @@ size_t type_checker_expression_multiple_of(TypeChecker *checker,
 int type_checker_expression_is_uniform(TypeChecker *checker,
                                        ASTNode *expression, const char **why);
 int type_checker_predicate_is_uniform(ASTNode *predicate, const char *binding);
+int type_checker_check_conflict_free(TypeChecker *checker, ASTNode *statement);
+void type_checker_set_gpu_type_report(int enabled);
+void type_checker_note_device_type(TypeChecker *checker, const char *binding,
+                                   const Type *type, SourceLocation where);
+void type_checker_note_device_type_in(TypeChecker *checker,
+                                      const char *binding, const Type *type,
+                                      unsigned char space_hint,
+                                      SourceLocation where);
+void type_checker_print_gpu_type_report(FILE *out);
+long long type_checker_view_element_offset(const Type *view, long long row,
+                                           long long column);
 int type_checker_module_has_kernel(TypeChecker *checker);
+int type_checker_static_view_index_is_bounded(TypeChecker *checker,
+                                              ASTNode *index, size_t extent);
 ASTNode *type_checker_declared_type_template(const char *name);
 Type *type_checker_instantiate_declared_type(TypeChecker *checker,
                                              const char *base_name,
