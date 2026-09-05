@@ -1,0 +1,6 @@
+import "std/warp";
+
+kernel claims_too_much(out: int32 global*) {
+  var lane: Uniform<int32> = (Uniform<int32>)thread.x;
+  out[thread.x] = (int32)lane;
+}

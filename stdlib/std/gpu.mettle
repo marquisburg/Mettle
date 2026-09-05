@@ -617,3 +617,11 @@ export fn gpu_launch_sync(f: int64, grid: int32, block: int32,
   if (rc != 0) { return rc; }
   return cuCtxSynchronize();
 }
+
+// ---- the device side ----
+//
+// The group collectives a kernel writes -- `Uniform<T>`, `warp_sum_f32` and
+// the rest -- live in `std/warp`. They are device code, and this module is the
+// host's driver binding: a host program that imported them would carry a
+// function it can never run. A kernel file imports `std/warp`; a host file
+// imports this one.

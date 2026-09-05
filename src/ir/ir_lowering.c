@@ -245,9 +245,26 @@ IRFunction *ir_lower_function(IRLoweringContext *context,
   ir_function_set_effects(function, IR_EFFECT_CLAUSE_REQUIRES,
                           (const char *const *)function_data->effects_requires,
                           function_data->effects_requires_count);
-  ir_function_set_effects(function, IR_EFFECT_CLAUSE_PROVIDES,
-                          (const char *const *)function_data->effects_provides,
-                          function_data->effects_provides_count);
+  if (function_data->is_kernel) {
+    /* A launch starts every work item of a warp and of a block together, so a
+       kernel entry is where those groups exist. Writing it here rather than
+       asserting it in the analysis is what lets a checked build see the same
+       provision the analysis did. */
+    const char *groups[8];
+    size_t group_count = 0;
+    for (size_t g = 0;
+         g < function_data->effects_provides_count && group_count < 6; g++) {
+      groups[group_count++] = function_data->effects_provides[g];
+    }
+    groups[group_count++] = "Warp";
+    groups[group_count++] = "Block";
+    ir_function_set_effects(function, IR_EFFECT_CLAUSE_PROVIDES, groups,
+                            group_count);
+  } else {
+    ir_function_set_effects(function, IR_EFFECT_CLAUSE_PROVIDES,
+                            (const char *const *)function_data->effects_provides,
+                            function_data->effects_provides_count);
+  }
   function->is_test = function_data->is_test;
   function->is_rule = function_data->is_rule;
   function->rewrite_role = function_data->rewrite_role;

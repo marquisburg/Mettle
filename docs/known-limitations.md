@@ -339,6 +339,21 @@ Work items inside one phase run one after another, so a kernel whose work items
 race each other inside a phase gets one interleaving out of the run and not a
 verdict on the others.
 
+## Uniformity and the group effects
+
+A value is uniform when the compiler can follow every input to it. It follows
+arithmetic, casts, direct calls and a local's writes; it does not follow a
+value through memory, so a `constant` table read at a uniform index is refused
+even though it is in fact the same in every work item.
+
+`Warp` and `Block` reach a call site through the branches and loops that
+enclose it syntactically. A helper that is itself called from both a uniform
+and a divergent site is judged once, at the divergent one.
+
+An effect clause has to sit on the same line as the signature it follows. A
+signature wrapped across lines with `requires` on the next one is a syntax
+error.
+
 ## Vectorization
 
 Reductions over `^`, `&`, and `|` have no kernel and are reported as serial.

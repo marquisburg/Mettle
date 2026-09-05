@@ -3471,6 +3471,10 @@ static int ir_lower_cast_expression(IRLoweringContext *context,
                                ? mtlc_type_from_frontend(
                                      expression->resolved_type)
                                : NULL;
+  /* A conversion into a type that says the value is uniform is where the claim
+     is made, so it is where a checked build re-asks the question. */
+  instruction.uniform_value =
+      expression->resolved_type && expression->resolved_type->refine_uniform;
   instruction.is_float = ir_expression_is_floating(context, cast_operand);
   /* is_unsigned on a CAST records that the SOURCE is an unsigned integer,
    * the same way float_bits records the source's float width. x86-64 and

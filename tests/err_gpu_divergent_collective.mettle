@@ -1,0 +1,9 @@
+import "std/warp";
+
+kernel collective_in_a_divergent_arm(a: float32 global*, out: float32 global*,
+                                     n: int32) {
+  var lane: int32 = thread.x;
+  if (lane < n) {
+    out[lane] = warp_sum_f32(a[lane]);
+  }
+}

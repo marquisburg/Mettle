@@ -211,6 +211,89 @@ GPU type report: 5 of 5 device accesses named their space, 0 stayed generic
   the analyses took 0.041 ms
 ```
 
+### Uniformity as a declared type
+
+A value is uniform when every work item of the group holds the same one.
+`std/warp` declares it:
+
+```mettle
+export type Uniform<T> = T where uniform(value);
+```
+
+`uniform(value)` is a predicate the compiler discharges, so nothing is uniform
+by assertion. A value is uniform when it depends on no work-item index, on no
+load from memory, and on nothing that is not itself uniform, computed through
+the calls in the kernel's own call graph. A kernel's parameters are uniform,
+because the launch handed every work item the same ones; `block.x`,
+`block_dim.x` and `grid_dim.x` are uniform; `thread.x` and
+`subgroup_local_id()` are not. What it cannot prove it refuses, naming the term
+that varies:
+
+```text
+error[P0001]: cannot prove `gpu_tid_x()` is the same in every work item, which
+              'Uniform<int32>' requires: thread.x varies by work item
+```
+
+A branch on a `Uniform<bool>` is a group decision and lowers to `bra.uni`,
+which is the uniform datapath sm_75 and newer have; on an older target it is an
+ordinary branch and means the same thing. `@uniform!` is the contract form on
+an `if`, a `while` or a `for`, and it fails the build naming the term that made
+the condition divergent:
+
+```mettle
+@uniform! if (block.x < rows) { /* every work item takes the same arm */ }
+```
+
+The claim is re-asked twice more. Under `mettle test` the grid runner compares
+a `Uniform` value across the work items of a warp and reports the value and the
+two work items when they differ. Under `--gpu-checks` the device asks the same
+question with a warp vote: lane 0's value is broadcast, every lane compares, and
+a vote that is not unanimous traps.
+
+### Collective effects
+
+`Warp` and `Block` are built-in effects. A kernel entry provides both, because
+a launch starts every work item of a warp and of a block together. A collective
+requires one, and they are ordinary functions in `std/warp` carrying the
+clause:
+
+```mettle
+export fn warp_sum_f32(value: float32) -> float32 requires Warp {
+  return subgroup_reduce_add(value);
+}
+```
+
+So the ordinary effect machinery carries the requirement up the call graph: a
+helper that calls one needs `Warp` too, and nobody writes that down.
+
+A branch or a loop the work items of a group do not all decide the same way
+takes the group effects away again. Inside it, `Warp` and `Block` are no longer
+provided, so a collective reached there is `F0002` with the chain and the line
+that removed them:
+
+```text
+error[F0002]: 'row_sums' provides 'Warp' and a branch at line 7 takes it away
+              again: no work item agrees on that condition, so the group a
+              collective there speaks to is not all present: row_sums ->
+              warp_sum_f32
+```
+
+An `if` on a `Uniform<bool>` keeps them, and so does `@uniform! if`. A loop
+whose trip count is uniform keeps them in its body; one whose trip count is not
+does not. That is the whole reason uniformity and the group effects belong
+together: the uniformity proof is what decides whether a collective is
+reachable.
+
+A workgroup barrier is the block collective the compiler already knew about: a
+device helper holding one needs `Block` wherever it is called from, and a
+barrier the work items of a block do not all reach is refused by the device
+verifier, which names the condition. Under `mettle test` the grid runner counts
+arrivals per barrier per block and reports the site and the count.
+
+`std/warp` is a separate module from `std/gpu` for one reason: it is device
+code, and a host program that imported it would carry functions it can never
+run. A kernel file imports `std/warp`; a host file imports `std/gpu`.
+
 ### Running the grid on the CPU
 
 `dispatch` inside a `@test` function runs the kernel's grid in the compiler's

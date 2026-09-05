@@ -2544,6 +2544,15 @@ $cases = @(
      Args = @("test")
      SkipBinaryCheck = $true
      Pattern = "was reached by 2 of the 4 work items still running in this workgroup" },
+  # Uniformity as a declared type, and the group effects that follow from it.
+  @{ Name = "gpu_uniform_and_collectives"; Path = "tests/gpu/uniform_and_collectives.mettle"; ShouldSucceed = $true
+     Args = @("test")
+     SkipBinaryCheck = $true
+     OutputMustMatch = @("1 passed")
+     OutputMustNotMatch = @("failed") },
+  @{ Name = "err_gpu_uniform_contract"; Path = "tests/err_gpu_uniform_contract.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "'@uniform!' says every work item of the group takes the same arm, and thread.x varies by work item" },
+  @{ Name = "err_gpu_uniform_unproven"; Path = "tests/err_gpu_uniform_unproven.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "which 'Uniform<int32>' requires: thread.x varies by work item" },
+  @{ Name = "err_gpu_divergent_collective"; Path = "tests/err_gpu_divergent_collective.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "takes it away again: no work item agrees on that condition" },
   @{ Name = "err_gpu_space_mismatch"; Path = "tests/err_gpu_space_mismatch.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "shared memory is wanted and this address is in global memory" },
   @{ Name = "err_gpu_kernel_shared_param"; Path = "tests/err_gpu_kernel_shared_param.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "kernel parameter 'tile' is declared shared, and a launch has no shared address to pass" },
   @{ Name = "err_gpu_space_cast"; Path = "tests/err_gpu_space_cast.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "this address is in global memory and the cast claims shared memory" },
@@ -2570,7 +2579,7 @@ $cases = @(
   @{ Name = "err_gpu_address_space_rebind"; Path = "tests/err_gpu_address_space_rebind.mettle"; ShouldSucceed = $false; Pattern = "GPU address-space binding 'scratch' cannot be rebound" },
   @{ Name = "err_gpu_barrier_outside_kernel"; Path = "tests/err_gpu_barrier_outside_kernel.mettle"; ShouldSucceed = $false; Pattern = "Barrier statements are only legal inside a GPU kernel" },
   @{ Name = "err_gpu_subgroup_signature"; Path = "tests/err_gpu_subgroup_signature.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "invalid subgroup intrinsic signature" },
-  @{ Name = "err_gpu_subgroup_outside_kernel"; Path = "tests/err_gpu_subgroup_outside_kernel.mettle"; ShouldSucceed = $false; Pattern = "Subgroup built-ins are only legal directly inside a GPU kernel" },
+  @{ Name = "err_gpu_subgroup_outside_kernel"; Path = "tests/err_gpu_subgroup_outside_kernel.mettle"; ShouldSucceed = $false; Pattern = "Subgroup built-ins are only legal inside a GPU kernel or a device function a kernel in the same module reaches" },
   @{ Name = "err_gpu_subgroup_type"; Path = "tests/err_gpu_subgroup_type.mettle"; ShouldSucceed = $false; Pattern = "Subgroup 'reduce_add' value must be uint32 or float32" },
   @{ Name = "err_gpu_subgroup_vote_type"; Path = "tests/err_gpu_subgroup_vote_type.mettle"; ShouldSucceed = $false; Pattern = "Subgroup 'any' predicate must be bool" },
   @{ Name = "err_gpu_subgroup_ballot_word"; Path = "tests/err_gpu_subgroup_ballot_word.mettle"; ShouldSucceed = $false; Pattern = "Subgroup ballot word index must be an integer" },
@@ -14693,6 +14702,30 @@ catch {
     -Reason $_.Exception.Message
 }
 
+# `Uniform<T>` is a claim, and the grid runner is the machine that does not
+# take it. Built with the prover told to trust its input, the run finds the
+# work item that holds a different value.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $env:METTLE_TRUST_REFINEMENTS = "1"
+  $trusted = & $CompilerPath "test" "tests/err_gpu_runtime_uniform.mettle" 2>&1 | Out-String
+  Remove-Item Env:METTLE_TRUST_REFINEMENTS
+  if ($trusted -notmatch "is typed uniform and work item 1 holds a different value from work item 0") {
+    throw "the grid runner did not catch a uniform value that varies: $trusted"
+  }
+  $refused = & $CompilerPath "test" "tests/err_gpu_runtime_uniform.mettle" 2>&1 | Out-String
+  if ($refused -notmatch "varies by work item") {
+    throw "the prover accepted a value it could not prove uniform: $refused"
+  }
+  Write-CaseResult -Name "gpu_uniform_rechecked_at_run_time" -Passed $true
+}
+catch {
+  $failed++
+  if (Test-Path Env:METTLE_TRUST_REFINEMENTS) { Remove-Item Env:METTLE_TRUST_REFINEMENTS }
+  Write-CaseResult -Name "gpu_uniform_rechecked_at_run_time" -Passed $false -Reason $_.Exception.Message
+}
+
 # Address spaces and alignment in the pointer type. The spaced module must
 # name the memory behind every access and widen its aligned run into one vector
 # load; the unspaced twin beside it must come out exactly as the golden it had
@@ -14739,6 +14772,31 @@ try {
     $spacedCubin = Join-Path $tmpDir "gpu_address_spaces.cubin"
     $asmOut = & $ptxas.Source -arch=compute_75 $spacedPtx -o $spacedCubin 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { throw "ptxas rejected the spaced module: $asmOut" }
+  }
+
+  # A proven-uniform condition is a group decision, and the branch says so.
+  $uniformPtx = Join-Path $tmpDir "gpu_uniform.ptx"
+  $uniformOut = & $CompilerPath -O --emit-ptx --gpu-arch=portable `
+    tests/gpu/uniform_and_collectives.mettle -o $uniformPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "uniform emit failed: $uniformOut" }
+  $uniformText = Get-Content -Raw $uniformPtx
+  $uniCount = ([regex]::Matches($uniformText, "bra\.uni")).Count
+  if ($uniCount -lt 2) { throw "a proven-uniform branch did not take the uniform form" }
+  $checkedPtx = Join-Path $tmpDir "gpu_uniform_checked.ptx"
+  $checkedOut = & $CompilerPath -O --emit-ptx --gpu-arch=portable --gpu-checks `
+    tests/gpu/uniform_and_collectives.mettle -o $checkedPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "checked uniform emit failed: $checkedOut" }
+  $checkedText = Get-Content -Raw $checkedPtx
+  if ($checkedText -notmatch "vote\.sync\.all\.pred" -or $checkedText -notmatch "shfl\.sync\.idx\.b32") {
+    throw "--gpu-checks did not ask the warp whether a uniform value is uniform"
+  }
+  if ($uniformText -match "vote\.sync\.all\.pred") {
+    throw "the warp vote appeared without --gpu-checks"
+  }
+  if ($ptxas) {
+    $uniformCubin = Join-Path $tmpDir "gpu_uniform.cubin"
+    $asmOut = & $ptxas.Source -arch=compute_75 $checkedPtx -o $uniformCubin 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "ptxas rejected the checked uniform module: $asmOut" }
   }
   Write-CaseResult -Name "gpu_address_spaces" -Passed $true
 }

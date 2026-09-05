@@ -1435,7 +1435,11 @@ Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
         memcpy(arg_str, arg_start, arg_len);
         arg_str[arg_len] = '\0';
         Type *result =
-            type_checker_instantiate_generic_enum(checker, base_name, arg_str);
+            type_checker_instantiate_declared_type(checker, base_name, arg_str);
+        if (!result) {
+          result =
+              type_checker_instantiate_generic_enum(checker, base_name, arg_str);
+        }
         free(arg_str);
         free(base_name);
         if (result)

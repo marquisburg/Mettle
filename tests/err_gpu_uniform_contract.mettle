@@ -1,0 +1,5 @@
+kernel divergent_arm(a: float32 global*, out: float32 global*, n: int32) {
+  @uniform! if (thread.x < n) {
+    out[thread.x] = a[thread.x];
+  }
+}

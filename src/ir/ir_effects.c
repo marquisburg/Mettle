@@ -63,6 +63,9 @@ typedef struct {
   char **owned;
   size_t owned_count;
   size_t owned_capacity;
+  /* The bits of `Warp` and `Block`. A divergent call site does not receive
+     these from its caller, however they were provided. */
+  Word *group_mask;
 } Ctx;
 
 struct IREffectResults {
@@ -660,6 +663,17 @@ static int scan_function(Ctx *ctx, size_t index) {
   for (size_t i = 0; i < fn->instruction_count; i++) {
     const IRInstruction *insn = &fn->instructions[i];
     switch (insn->op) {
+    case IR_OP_BARRIER: {
+      /* A workgroup barrier is a block collective: a device helper holding one
+         needs Block wherever it is called from. A kernel already provides it,
+         and a barrier the work items of a block do not all reach is the
+         verifier's own refusal, which names the condition. */
+      int block_bit = effect_bit(ctx, "Block");
+      if (block_bit >= 0 && !fn->is_kernel) {
+        bit_set(efn->requires, (size_t)block_bit);
+      }
+      break;
+    }
     case IR_OP_NEW:
       if (alloc_bit >= 0) {
         note_source(efn, (size_t)alloc_bit, i);
@@ -771,9 +785,18 @@ static void propagate(Ctx *ctx) {
       memcpy(gathered, efn->requires, ctx->words * sizeof(Word));
       for (size_t c = 0; c < efn->callee_count; c++) {
         const Word *callee_needs = ctx->fns[efn->callees[c]].needs;
+        size_t site = efn->callee_sites ? efn->callee_sites[c] : NO_SITE;
+        int divergent = site != NO_SITE &&
+                        site < efn->fn->instruction_count &&
+                        efn->fn->instructions[site].divergent_call;
         ctx->steps++;
         for (size_t w = 0; w < ctx->words; w++) {
-          gathered[w] |= callee_needs[w] & ~efn->provides[w];
+          /* Inside a branch the work items of a group do not all take, the
+             group effects the caller provides do not reach the call: the
+             group is not all here, so a collective there still needs one. */
+          Word reaching = divergent ? (efn->provides[w] & ~ctx->group_mask[w])
+                                    : efn->provides[w];
+          gathered[w] |= callee_needs[w] & ~reaching;
         }
       }
       for (size_t k = 0; k < efn->indirect_count; k++) {
@@ -823,8 +846,17 @@ static int trace_chain(Ctx *ctx, size_t start, size_t bit, int follow_needs,
     for (size_t c = 0; c < efn->callee_count && tail < count; c++) {
       size_t next = efn->callees[c];
       EFn *callee = &ctx->fns[next];
+      size_t call_site = efn->callee_sites ? efn->callee_sites[c] : NO_SITE;
+      /* A group effect does not reach a call under a condition no work item
+         agrees on, so the chain follows that edge even though the caller
+         provides it. That is the edge the message wants to name. */
+      int divergent = call_site != NO_SITE &&
+                      call_site < efn->fn->instruction_count &&
+                      efn->fn->instructions[call_site].divergent_call &&
+                      bit_test(ctx->group_mask, bit);
+      int provided = bit_test(efn->provides, bit) && !divergent;
       int carries = follow_needs
-                        ? bit_test(callee->needs, bit) && !bit_test(efn->provides, bit)
+                        ? bit_test(callee->needs, bit) && !provided
                         : bit_test(callee->performs, bit);
       if (seen[next] || !carries) {
         continue;
@@ -1071,6 +1103,32 @@ static int check_roots(Ctx *ctx) {
         return 0;
       }
       describe_chain(chain, sizeof(chain), ctx, hops, length);
+      /* A kernel provides both group effects, so a group effect that reached
+         the entry anyway was taken away by a branch or a loop the work items
+         do not all agree on. Saying which line that was is the diagnosis. */
+      if (bit_test(ctx->group_mask, bit) && bit_test(efn->provides, bit)) {
+        size_t line = 0;
+        for (size_t h = 1; h < length; h++) {
+          size_t candidate = hops[h].via_site;
+          const IRFunction *owner = ctx->fns[hops[h - 1].function].fn;
+          if (candidate != NO_SITE && candidate < owner->instruction_count &&
+              owner->instructions[candidate].divergent_call) {
+            line = owner->instructions[candidate].location.line;
+            break;
+          }
+        }
+        snprintf(message, sizeof(message),
+                 "'%s' provides '%s' and a branch at line %llu takes it away "
+                 "again: no work item agrees on that condition, so the group a "
+                 "collective there speaks to is not all present%s%s",
+                 name, effect_name(ctx, bit), (unsigned long long)line,
+                 length > 1 ? ": " : "", length > 1 ? chain : "");
+        report(ctx, function_name_span(ctx, efn->fn), message,
+               "the group is not all here", "F0002");
+        note_hops(ctx, hops, length);
+        free(hops);
+        continue;
+      }
       if (length <= 1) {
         snprintf(message, sizeof(message),
                  "'%s' requires '%s' and nothing provides it: %s", name,
@@ -1546,6 +1604,7 @@ static void ctx_free(Ctx *ctx) {
   free(ctx->globals);
   free(ctx->fns);
   free(ctx->index);
+  free(ctx->group_mask);
 }
 
 static int why_effect(Ctx *ctx, const char *function, const char *effect,
@@ -1803,9 +1862,20 @@ int ir_effects_run(IRProgram *program, const IREffectInput *input,
   ctx.fn_count = program->function_count;
   ctx.fns = calloc(ctx.fn_count ? ctx.fn_count : 1, sizeof(EFn));
   ctx.index = calloc(ctx.fn_count ? ctx.fn_count : 1, sizeof(NameEntry));
-  if (!ctx.fns || !ctx.index) {
+  ctx.group_mask = words_new(&ctx);
+  if (!ctx.fns || !ctx.index || !ctx.group_mask) {
     ctx_free(&ctx);
     return 0;
+  }
+  {
+    int warp_bit = effect_bit(&ctx, "Warp");
+    int block_bit = effect_bit(&ctx, "Block");
+    if (warp_bit >= 0) {
+      bit_set(ctx.group_mask, (size_t)warp_bit);
+    }
+    if (block_bit >= 0) {
+      bit_set(ctx.group_mask, (size_t)block_bit);
+    }
   }
   for (size_t i = 0; i < ctx.fn_count; i++) {
     EFn *efn = &ctx.fns[i];

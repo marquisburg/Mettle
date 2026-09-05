@@ -420,7 +420,11 @@ Symbol *symbol_table_lookup(SymbolTable *table, const char *name) {
 }
 
 Type *type_create(TypeKind kind, const char *name) {
-  Type *type = malloc(sizeof(Type));
+  /* Zeroed rather than filled in field by field: the refinement half of this
+     struct grew several times and each addition had to be remembered here.
+     A field nobody sets now reads as absent instead of as whatever the
+     allocator left. */
+  Type *type = calloc(1, sizeof(Type));
   if (!type)
     return NULL;
 
@@ -476,6 +480,7 @@ Type *type_create(TypeKind kind, const char *name) {
   type->refine_has_range = 0;
   type->refine_min = 0;
   type->refine_max = 0;
+  type->refine_uniform = 0;
 
   // Set default sizes
   switch (kind) {

@@ -1,7 +1,12 @@
 #include "type_checker_internal.h"
 #include "../string_intern.h"
 
-static const char *const BUILTIN_EFFECTS[] = {"alloc", "asm", "syscall"};
+/* `Warp` and `Block` are the two groups a device collective speaks to. They
+ * are built in because the compiler knows where they come from: a kernel
+ * entry provides both, and a branch no work item decides the same way takes
+ * them away again. */
+static const char *const BUILTIN_EFFECTS[] = {"alloc", "asm", "syscall",
+                                              "Warp", "Block"};
 
 static int effect_name_is_reserved(const char *name) {
   return strcmp(name, "none") == 0 || strcmp(name, "unknown") == 0;

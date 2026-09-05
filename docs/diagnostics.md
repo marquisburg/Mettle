@@ -257,6 +257,22 @@ error[E0003]: kernel parameter 'tile' is declared shared, and a launch has no
               it generic
 ```
 
+A value a declared type says is uniform, that the compiler cannot show is:
+
+```text
+error[P0001]: cannot prove `gpu_tid_x()` is the same in every work item, which
+              'Uniform<int32>' requires: thread.x varies by work item
+```
+
+A collective reached under a condition the work items do not all decide the
+same way:
+
+```text
+error[F0002]: 'row_sums' provides 'Warp' and a branch at line 7 takes it away
+              again: no work item agrees on that condition, so the group a
+              collective there speaks to is not all present
+```
+
 `--report-gpu-types` prints what these analyses concluded and what they cost.
 [GPU offload](gpu.md) covers the surface.
 

@@ -1,0 +1,47 @@
+// Mettle standard library: what a work item shares with its group.
+//
+// This module is device code. A kernel file imports it; a host program does
+// not, because nothing here can run on a host. `std/gpu` is the host side.
+
+// `Uniform<T>` says a value is the same in every work item of the group. It is
+// a declared type, so nothing carries it by assertion: the compiler proves the
+// value depends on no work-item index, no load and nothing that is not itself
+// uniform, and refuses the conversion naming the term that varies. A branch on
+// a `Uniform<bool>` is a group decision and lowers to `bra.uni`.
+export type Uniform<T> = T where uniform(value);
+
+// The collectives below speak to a whole group, so each one requires the
+// effect that group exists under. A kernel entry provides `Warp` and `Block`,
+// because a launch starts every work item of a warp and of a block together; a
+// branch or a loop no work item agrees on takes them away again, and a
+// collective reached there is F0002 with the chain that got to it.
+export fn warp_sum_f32(value: float32) -> float32 requires Warp {
+  return subgroup_reduce_add(value);
+}
+export fn warp_sum_u32(value: uint32) -> uint32 requires Warp {
+  return subgroup_reduce_add(value);
+}
+export fn warp_max_f32(value: float32) -> float32 requires Warp {
+  return subgroup_reduce_max(value);
+}
+export fn warp_min_f32(value: float32) -> float32 requires Warp {
+  return subgroup_reduce_min(value);
+}
+export fn warp_broadcast_f32(value: float32, lane: int32) -> float32 requires Warp {
+  return subgroup_broadcast(value, lane);
+}
+export fn warp_shuffle_f32(value: float32, lane: int32) -> float32 requires Warp {
+  return subgroup_shuffle(value, lane);
+}
+export fn warp_shuffle_u32(value: uint32, lane: int32) -> uint32 requires Warp {
+  return subgroup_shuffle(value, lane);
+}
+export fn warp_ballot(predicate: bool, word: int32) -> uint32 requires Warp {
+  return subgroup_ballot(predicate, word);
+}
+export fn warp_any(predicate: bool) -> bool requires Warp {
+  return subgroup_any(predicate);
+}
+export fn warp_all(predicate: bool) -> bool requires Warp {
+  return subgroup_all(predicate);
+}

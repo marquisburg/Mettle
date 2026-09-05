@@ -843,6 +843,7 @@ static ASTNode *ast_clone_if_statement(ASTNode *clone, const ASTNode *node) {
   dst->else_branch =
       src->else_branch ? ast_clone_node(src->else_branch) : NULL;
   dst->else_if_count = src->else_if_count;
+  dst->uniform_mode = src->uniform_mode;
   if (src->else_if_count > 0 && src->else_ifs) {
     dst->else_ifs = malloc(src->else_if_count * sizeof(ElseIfClause));
     for (size_t i = 0; i < src->else_if_count; i++) {
@@ -880,6 +881,7 @@ static ASTNode *ast_clone_while_statement(ASTNode *clone, const ASTNode *node) {
   dst->label = ast_copy_string(src->label);
   dst->simd_mode = src->simd_mode;
   dst->unroll_factor = src->unroll_factor;
+  dst->uniform_mode = src->uniform_mode;
   if (dst->condition)
     ast_add_child(clone, dst->condition);
   if (dst->body)
@@ -903,6 +905,7 @@ static ASTNode *ast_clone_for_statement(ASTNode *clone, const ASTNode *node) {
   dst->label = ast_copy_string(src->label);
   dst->simd_mode = src->simd_mode;
   dst->unroll_factor = src->unroll_factor;
+  dst->uniform_mode = src->uniform_mode;
   if (dst->initializer)
     ast_add_child(clone, dst->initializer);
   if (dst->condition)
@@ -1984,6 +1987,8 @@ ASTNode *ast_create_type_declaration(const char *name, const char *base_type,
   decl->predicate = predicate;
   decl->is_exported = 0;
   decl->composed_name = NULL;
+  decl->type_params = NULL;
+  decl->type_param_count = 0;
   if (predicate) {
     ast_add_child(node, predicate);
   }
@@ -2866,6 +2871,7 @@ ASTNode *ast_create_for_statement(ASTNode *initializer, ASTNode *condition,
   for_stmt->label = NULL;
   for_stmt->simd_mode = SIMD_ATTR_NONE;
   for_stmt->unroll_factor = 0;
+  for_stmt->uniform_mode = 0;
   node->data = for_stmt;
 
   if (initializer)

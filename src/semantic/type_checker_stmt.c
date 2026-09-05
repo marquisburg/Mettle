@@ -410,6 +410,36 @@ int type_checker_check_if_statement(TypeChecker *checker,
     return 0;
   }
 
+  /* `@uniform! if`: a contract that every work item of the group takes the
+     same arm. The condition's own type may already say it, in which case the
+     decorator restates a fact rather than asking for one. */
+  if (if_stmt->uniform_mode || (condition_type && condition_type->refine_uniform)) {
+    const char *why = NULL;
+    if (!type_checker_expression_is_uniform(checker, if_stmt->condition,
+                                            &why) &&
+        !(condition_type && condition_type->refine_uniform)) {
+      if (if_stmt->uniform_mode == 2) {
+        type_checker_set_error_at_location(
+            checker, if_stmt->condition->location,
+            "'@uniform!' says every work item of the group takes the same arm, "
+            "and %s varies by work item",
+            why ? why : "this condition");
+        return 0;
+      }
+      if (if_stmt->uniform_mode == 1 && checker->error_reporter) {
+        char message[256];
+        snprintf(message, sizeof(message),
+                 "'@uniform' was asked for and %s varies by work item, so this "
+                 "branch stays divergent",
+                 why ? why : "this condition");
+        error_reporter_add_warning(checker->error_reporter, ERROR_SEMANTIC,
+                                   if_stmt->condition->location, message);
+      }
+    } else {
+      if_stmt->uniform_mode = 3; /* proven: the branch is a group decision */
+    }
+  }
+
   /* Initialization flow through the chain. Every arm is checked from the entry
    * state; what reaches the statement after the `if` is the intersection of the
    * paths that can get there. So a variable written on every path is
@@ -573,6 +603,33 @@ int type_checker_body_assigns(const ASTNode *node, const char *name) {
   return 0;
 }
 
+/* A loop's condition decides how many times each work item goes round. Where
+   every work item goes round the same number of times, the group is intact
+   inside the body and a collective there speaks to all of it. */
+static int type_checker_check_loop_uniformity(TypeChecker *checker,
+                                              ASTNode *condition,
+                                              int *uniform_mode) {
+  const char *why = NULL;
+  Type *condition_type = condition ? condition->resolved_type : NULL;
+  if (!checker || !condition || !uniform_mode) {
+    return 1;
+  }
+  if ((condition_type && condition_type->refine_uniform) ||
+      type_checker_expression_is_uniform(checker, condition, &why)) {
+    *uniform_mode = 3;
+    return 1;
+  }
+  if (*uniform_mode == 2) {
+    type_checker_set_error_at_location(
+        checker, condition->location,
+        "'@uniform!' says every work item of the group goes round the same "
+        "number of times, and %s varies by work item",
+        why ? why : "this condition");
+    return 0;
+  }
+  return 1;
+}
+
 int type_checker_check_for_statement(TypeChecker *checker,
                                             ASTNode *statement) {
   ForStatement *for_stmt = (ForStatement *)statement->data;
@@ -643,6 +700,13 @@ int type_checker_check_for_statement(TypeChecker *checker,
       type_checker_report_type_mismatch(checker,
                                         for_stmt->condition->location,
                                         "numeric type", cond_type->name);
+      free(post_init_snapshot);
+      type_checker_init_tracker_exit_scope(checker);
+      symbol_table_exit_scope(checker->symbol_table);
+      return 0;
+    }
+    if (!type_checker_check_loop_uniformity(checker, for_stmt->condition,
+                                            &for_stmt->uniform_mode)) {
       free(post_init_snapshot);
       type_checker_init_tracker_exit_scope(checker);
       symbol_table_exit_scope(checker->symbol_table);
@@ -1338,6 +1402,10 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
       type_checker_report_type_mismatch(checker,
                                         while_stmt->condition->location,
                                         "numeric type", condition_type->name);
+      return 0;
+    }
+    if (!type_checker_check_loop_uniformity(checker, while_stmt->condition,
+                                            &while_stmt->uniform_mode)) {
       return 0;
     }
 

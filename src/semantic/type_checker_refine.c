@@ -2196,6 +2196,35 @@ int type_checker_prove_refinement(TypeChecker *checker, Type *refined,
   ctx.steps = checker->proof_steps;
   snprintf(ctx.route, sizeof(ctx.route), "the value's own type admits it");
   checker->proofs_attempted++;
+  /* `uniform(value)` is discharged by the dependence analysis, which answers a
+     different question from every interval in this file: not what the value
+     can be, but whether every work item holds the same one. */
+  if (refined->refine_uniform) {
+    const char *why = NULL;
+    if (type_checker_expression_is_uniform(checker, expr, &why)) {
+      expr->proven_refinement = refined;
+      checker->proofs_proven++;
+      proof_log(checker, refined, expr,
+                "no work-item index reaches the value", 1,
+                checker->proof_steps - ctx.steps, "");
+      return 1;
+    }
+    {
+      char message[640];
+      char expr_text[160] = "";
+      describe(expr, expr_text, sizeof(expr_text), 0);
+      snprintf(message, sizeof(message),
+               "cannot prove `%s` is the same in every work item, which '%s' "
+               "requires: %s varies by work item",
+               expr_text, refined->name ? refined->name : "?",
+               why ? why : "something in it");
+      set_failure(checker, message);
+      checker->proofs_refused++;
+      proof_log(checker, refined, expr, message, 0,
+                checker->proof_steps - ctx.steps, "");
+      return 0;
+    }
+  }
   ctx.is_float = type_checker_is_float_base(refined);
   if (ctx.is_float) {
     ctx.have_frange = frange_of(checker, expr, &ctx.fvalue, 0);
@@ -2451,7 +2480,11 @@ void type_checker_bind_predicate_check(TypeChecker *checker, Type *refined,
        layer = layer->refined_base) {
     ASTNode *clone;
     Symbol *value_symbol;
-    if (!layer->refinement || layer->refine_has_range) {
+    /* A uniform predicate has no expression to evaluate per value: the
+       question is across work items, and the check for it is the cross-lane
+       comparison a device build and the grid runner make. */
+    if (!layer->refinement || layer->refine_has_range ||
+        layer->refine_uniform) {
       continue;
     }
     clone = ast_clone_node(layer->refinement);
@@ -2575,11 +2608,19 @@ void type_checker_report_refinement_failure(TypeChecker *checker,
     SourceLocation where = expr ? expr->location : location;
     size_t span_length = expr ? type_checker_node_span_length(expr) : 1;
     SourceSpan span = source_span_from_location(where, span_length);
-    snprintf(help, sizeof(help),
-             "guard the value where it is converted, for example `if (x >= 0 "
-             "&& x <= 100) { ... }`; the compiler proves what a dominating "
-             "test, a constant, or a narrower type establishes, and refuses "
-             "to guess past that");
+    if (strstr(checker->refine_failure, "varies by work item")) {
+      snprintf(help, sizeof(help),
+               "build the value out of the launch geometry and the kernel's "
+               "own arguments; a work-item index, a subgroup lane and a load "
+               "from memory each differ between work items, so nothing built "
+               "from one is the same in all of them");
+    } else {
+      snprintf(help, sizeof(help),
+               "guard the value where it is converted, for example `if (x >= 0 "
+               "&& x <= 100) { ... }`; the compiler proves what a dominating "
+               "test, a constant, or a narrower type establishes, and refuses "
+               "to guess past that");
+    }
     error_reporter_add_error_with_span_and_suggestion(
         checker->error_reporter, ERROR_TYPE, span, checker->refine_failure,
         help);

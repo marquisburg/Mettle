@@ -130,11 +130,11 @@ typedef struct {
 } IIGpuBarrier;
 
 typedef struct {
-  const char *name;              /* the value's IR name */
+  const char *name;   /* the value's IR name */
   size_t line;
-  IRInterpValue value;
-  long long lane;                /* the thread that first wrote it */
-  int seen;
+  IRInterpValue value; /* what the warp's first work item held */
+  long long lane;      /* which work item that was */
+  long long last_lane; /* the work item that most recently reached this site */
 } IIGpuUniform;
 
 /* One work item's saved execution, so a block's threads can run in the phases
@@ -5092,6 +5092,74 @@ static void ii_gpu_barrier_arrive(IRInterpMachine *machine, size_t site,
    `mtlc_gpu_kernel_handle("name")`, so the name is the string that call was
    given, and it is in this same module because the grid runs the source it was
    compiled from. */
+/* A value whose type says it is the same in every work item of the warp, asked
+   again. The first work item of a warp records it; the rest are compared
+   against that, and the message names the value and the two lanes. */
+/* The name a work item would recognise. A conversion's own destination is a
+   temporary; the binding it is stored into is what the program wrote. */
+static const char *ii_gpu_value_name(const IRFunction *fn, size_t index,
+                                     const IRInstruction *insn) {
+  const char *temp = insn->dest.name;
+  if (!fn || !temp) {
+    return temp ? temp : "a value";
+  }
+  for (size_t i = index + 1; i < fn->instruction_count && i < index + 8; i++) {
+    const IRInstruction *next = &fn->instructions[i];
+    if ((next->op == IR_OP_ASSIGN || next->op == IR_OP_STORE) &&
+        next->lhs.name && strcmp(next->lhs.name, temp) == 0 &&
+        next->dest.kind == IR_OPERAND_SYMBOL && next->dest.name) {
+      return next->dest.name;
+    }
+  }
+  return temp;
+}
+
+static int ii_gpu_check_uniform_value(IRInterpMachine *machine,
+                                      const IRFunction *fn, size_t index,
+                                      const IRInstruction *insn,
+                                      const IRInterpValue *value) {
+  IIGpuGrid *gpu = &machine->gpu;
+  const char *name = ii_gpu_value_name(fn, index, insn);
+  long long warp = gpu->lane / II_GPU_SUBGROUP;
+  if (!gpu->active) {
+    return 1;
+  }
+  for (size_t i = 0; i < gpu->uniform_count; i++) {
+    IIGpuUniform *slot = &gpu->uniforms[i];
+    if (slot->name != name || slot->line != insn->location.line ||
+        slot->lane / II_GPU_SUBGROUP != warp) {
+      continue;
+    }
+    /* The same work item reaching the same site again is a loop, not another
+       lane. One reading per work item is what is compared. */
+    if (slot->last_lane == gpu->lane) {
+      return 1;
+    }
+    slot->last_lane = gpu->lane;
+    if (slot->value.is_float != value->is_float ||
+        (value->is_float ? slot->value.f != value->f
+                         : slot->value.i != value->i)) {
+      snprintf(machine->detail, sizeof(machine->detail),
+               "'%s' at line %llu is typed uniform and work item %lld holds a "
+               "different value from work item %lld",
+               name, (unsigned long long)insn->location.line, gpu->lane,
+               slot->lane);
+      machine->status = IR_INTERP_TRAP;
+      return 0;
+    }
+    return 1;
+  }
+  if (gpu->uniform_count < II_GPU_MAX_UNIFORMS) {
+    IIGpuUniform *slot = &gpu->uniforms[gpu->uniform_count++];
+    slot->name = name;
+    slot->line = insn->location.line;
+    slot->value = *value;
+    slot->lane = gpu->lane;
+    slot->last_lane = gpu->lane;
+  }
+  return 1;
+}
+
 /* The name a space is written with, for a message. */
 static const char *ii_gpu_space_word(unsigned char space) {
   switch (space) {
@@ -6414,6 +6482,10 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
          is the machine that does not trust it. */
       if (!ii_gpu_check_pointer_claim(machine, insn->value_type, &out,
                                       insn->location.line)) {
+        goto done;
+      }
+      if (insn->uniform_value &&
+          !ii_gpu_check_uniform_value(machine, fn, pc, insn, &out)) {
         goto done;
       }
       if (!ii_store_dest(machine, &frame, &insn->dest, &out)) {

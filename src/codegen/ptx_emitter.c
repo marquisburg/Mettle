@@ -490,6 +490,7 @@ static const char *ptx_memory_space(MtlcAddressSpace address_space) {
   return NULL;
 }
 
+
 /* --- widening adjacent loads into one vector access ---------------------
  *
  * Four `ld.global.f32` from consecutive elements are one `ld.global.v4.f32`
@@ -694,6 +695,13 @@ static PtxVectorPlan *ptx_plan_vector_loads(const IRProgram *program,
 
 /* The space a load is issued in. A `constant` pointer adds `.nc`, which is
  * what makes it a read-only-cache load; every other space loads plainly. */
+/* --gpu-checks on a value whose type says it is uniform: ask the warp. Lane 0's
+ * value is broadcast, every lane compares against it, and a vote that is not
+ * unanimous traps. The check is 32-bit; a wider uniform value is left to the
+ * grid runner, which compares whole values. */
+static void ptx_emit_uniform_check(PtxFn *fn, const IRInstruction *in,
+                                   PtxVal value, int target_arch);
+
 static const char *ptx_load_space(MtlcAddressSpace address_space) {
   if (address_space == MTLC_ADDRESS_SPACE_CONSTANT) {
     return ".global.nc";
@@ -891,6 +899,33 @@ static long long g_ptx_generic_accesses = 0;
 static long long g_ptx_vector_groups = 0;
 static long long g_ptx_vector_loads_saved = 0;
 static double g_ptx_analysis_seconds = 0.0;
+
+static void ptx_emit_uniform_check(PtxFn *fn, const IRInstruction *in,
+                                   PtxVal value, int target_arch) {
+  char self[24], leader[24], same[24], all[24], bits[24];
+  if (!g_ptx_emit_checks || !in->uniform_value || target_arch < 70) {
+    return;
+  }
+  if (value.cls != PC_B32 && value.cls != PC_F32) {
+    return;
+  }
+  reg_name(value.cls, value.idx, self);
+  if (value.cls == PC_F32) {
+    reg_name(PC_B32, new_reg(fn, PC_B32), bits);
+    sb_printf(&fn->body, "\tmov.b32 %s, %s;\n", bits, self);
+  } else {
+    snprintf(bits, sizeof(bits), "%s", self);
+  }
+  reg_name(PC_B32, new_reg(fn, PC_B32), leader);
+  reg_name(PC_PRED, new_reg(fn, PC_PRED), same);
+  reg_name(PC_PRED, new_reg(fn, PC_PRED), all);
+  sb_printf(&fn->body,
+            "\tshfl.sync.idx.b32 %s, %s, 0, 0x1f, 0xffffffff;\n"
+            "\tsetp.eq.b32 %s, %s, %s;\n"
+            "\tvote.sync.all.pred %s, %s, 0xffffffff;\n"
+            "\t@!%s trap;\n",
+            leader, bits, same, bits, leader, all, same, all);
+}
 
 static int ptx_string_index(const char *text) {
   if (!text) return -1;
@@ -7315,7 +7350,9 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
         sb_printf(&fn.body, "\tsetp.eq.%s %s, %s, 0;\n",
                   c == PC_B64 ? "s64" : "s32", pn, r);
       }
-      sb_printf(&fn.body, "\t@%s bra %s;\n", pn, lbl);
+      sb_printf(&fn.body, "\t@%s bra%s %s;\n", pn,
+                (in->uniform_branch && target_arch >= 75) ? ".uni" : "",
+                lbl);
       break;
     }
     case IR_OP_BRANCH_EQ: {
@@ -7340,7 +7377,9 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
       reg_name(PC_PRED, p, pn);
       sb_printf(&fn.body, "\tsetp.eq.%s %s, %s, %s;\n",
                 type_suffix_for_class(c, 0), pn, a, bb);
-      sb_printf(&fn.body, "\t@%s bra %s;\n", pn, lbl);
+      sb_printf(&fn.body, "\t@%s bra%s %s;\n", pn,
+                (in->uniform_branch && target_arch >= 75) ? ".uni" : "",
+                lbl);
       break;
     }
     case IR_OP_ASSIGN: {
@@ -7647,6 +7686,7 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
                                                   : "u32";
         sb_printf(&fn.body, "\tmov.%s %s, %s;\n", mt, dn, s);
       }
+      ptx_emit_uniform_check(&fn, in, target, target_arch);
       if (in->dest.name) {
         bind_value(&fn, in->dest.name, target);
       }

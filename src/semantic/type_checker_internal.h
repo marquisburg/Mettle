@@ -65,6 +65,17 @@ size_t type_checker_address_alignment(TypeChecker *checker, ASTNode *expression,
                                       int depth);
 size_t type_checker_expression_multiple_of(TypeChecker *checker,
                                            ASTNode *expression, int depth);
+
+/* Uniformity: a value is uniform when every work item of the group holds the
+   same one. `why` names the term that made the answer no. */
+int type_checker_expression_is_uniform(TypeChecker *checker,
+                                       ASTNode *expression, const char **why);
+int type_checker_predicate_is_uniform(ASTNode *predicate, const char *binding);
+int type_checker_module_has_kernel(TypeChecker *checker);
+ASTNode *type_checker_declared_type_template(const char *name);
+Type *type_checker_instantiate_declared_type(TypeChecker *checker,
+                                             const char *base_name,
+                                             const char *argument_text);
 Type *type_checker_volatile_of(TypeChecker *checker, Type *base);
 Type *type_checker_parse_pointer_type(TypeChecker *checker,
                                              const char *name);

@@ -211,6 +211,21 @@ arithmetic of the offset, which a declared type such as
 unproven claim is refused with the alignment the expression reached. What a
 proven one buys is in [GPU offload](gpu.md#address-spaces-and-alignment-in-the-pointer-type).
 
+### Uniform values on a device
+
+`std/warp` declares one more device type:
+
+```mettle
+export type Uniform<T> = T where uniform(value);
+```
+
+`uniform(value)` says every work item of the group holds the same value. It is
+a predicate the compiler discharges from what the value depends on, not a
+promise the program makes: a work-item index, a subgroup lane and a load from
+memory each differ between work items, so nothing built from one is uniform.
+A conversion it cannot prove is refused naming the term that varies, and what a
+proven one buys is in [GPU offload](gpu.md#uniformity-as-a-declared-type).
+
 ## Arrays
 
 `T[N]` is N elements laid out end to end. The size is part of the type, and it

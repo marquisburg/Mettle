@@ -1158,18 +1158,33 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
         return 0;
       }
 
+      size_t branches_before = function->instruction_count;
       if (!ir_emit_condition_false_branch(context, function, current_cond,
                                           next_label)) {
         free(next_label);
         free(end_label);
         return 0;
       }
+      /* A branch every work item of the group decides the same way is a group
+         decision, and a device backend takes the uniform form of it. */
+      if (if_data->uniform_mode == 3) {
+        ir_mark_branches_uniform(function, branches_before);
+      }
 
-      if (!ir_lower_statement_with_defers(context, function, current_body,
-                                          defers)) {
-        free(next_label);
-        free(end_label);
-        return 0;
+      {
+        size_t arm_before = function->instruction_count;
+        if (!ir_lower_statement_with_defers(context, function, current_body,
+                                            defers)) {
+          free(next_label);
+          free(end_label);
+          return 0;
+        }
+        /* Inside an arm no work item agrees on, the group effects a kernel
+           provides do not reach: a collective there speaks to a group that is
+           not all here. */
+        if (if_data->uniform_mode != 3) {
+          ir_mark_calls_divergent(function, arm_before);
+        }
       }
 
       if (!ir_emit_jump_instruction(context, function, end_label,
@@ -1258,11 +1273,15 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
       return 0;
     }
 
+    size_t while_branch_before = function->instruction_count;
     if (!ir_emit_condition_false_branch(context, function,
                                         while_data->condition, loop_end)) {
       free(loop_start);
       free(loop_end);
       return 0;
+    }
+    if (while_data->uniform_mode == 3) {
+      ir_mark_branches_uniform(function, while_branch_before);
     }
 
     if (!ir_push_labeled_control_frame(context, loop_end, loop_start,
@@ -1272,8 +1291,12 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
       return 0;
     }
 
+    size_t while_body_before = function->instruction_count;
     int body_ok = ir_lower_statement_with_defers(context, function,
                                                  while_data->body, defers);
+    if (while_data->uniform_mode != 3) {
+      ir_mark_calls_divergent(function, while_body_before);
+    }
     ir_pop_control_frame(context);
     if (!body_ok) {
       free(loop_start);
@@ -1373,6 +1396,7 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
     }
 
     if (for_data->condition) {
+      size_t for_branch_before = function->instruction_count;
       if (!ir_emit_condition_false_branch(context, function,
                                           for_data->condition, end_label)) {
         ir_local_scope_leave(context);
@@ -1381,8 +1405,12 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
         free(end_label);
         return 0;
       }
+      if (for_data->uniform_mode == 3) {
+        ir_mark_branches_uniform(function, for_branch_before);
+      }
     }
 
+    size_t for_body_before = function->instruction_count;
     if (!ir_push_labeled_control_frame(context, end_label, step_label,
                                        for_data->label, defers)) {
       ir_local_scope_leave(context);
@@ -1394,6 +1422,9 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
 
     int body_ok = ir_lower_statement_with_defers(context, function,
                                                  for_data->body, defers);
+    if (for_data->uniform_mode != 3) {
+      ir_mark_calls_divergent(function, for_body_before);
+    }
     ir_pop_control_frame(context);
     if (!body_ok) {
       ir_local_scope_leave(context);

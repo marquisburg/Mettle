@@ -772,6 +772,10 @@ typedef struct {
   int is_rule;
   int simd_mode; // SimdAttr from `@simd` / `@simd!` (SIMD_ATTR_NONE if absent)
   int unroll_factor; // `@unroll(n)` on a loop; 0 if absent
+  /* `@uniform` / `@uniform!` on an `if`, a `for` or a `while`: the condition
+     or the trip count is the same for every work item of the group. 1 is the
+     hint, 2 is the contract that fails the build. */
+  int uniform_mode;
 } ParsedDecorators;
 
 // Consume a run of `@ident[!]` decorators into `out`. Assumes the current token
@@ -792,6 +796,7 @@ static int parser_parse_decorator_chain(Parser *parser, ParsedDecorators *out) {
   out->is_rule = 0;
   out->simd_mode = SIMD_ATTR_NONE;
   out->unroll_factor = 0;
+  out->uniform_mode = 0;
 
   while (parser->current_token.type == TOKEN_AT) {
     parser_advance(parser); // consume '@'
@@ -869,6 +874,17 @@ static int parser_parse_decorator_chain(Parser *parser, ParsedDecorators *out) {
       }
       out->is_rule = 1;
       parser_advance(parser);
+    } else if (strcmp(name, "uniform") == 0) {
+      if (out->uniform_mode) {
+        parser_set_error(parser, "Duplicate '@uniform' decorator");
+        return 0;
+      }
+      parser_advance(parser); // consume 'uniform'
+      out->uniform_mode = 1;
+      if (parser->current_token.type == TOKEN_NOT) {
+        out->uniform_mode = 2;
+        parser_advance(parser); // consume '!'
+      }
     } else if (strcmp(name, "simd") == 0) {
       if (out->simd_mode != SIMD_ATTR_NONE) {
         parser_set_error(parser, "Duplicate '@simd' decorator");
@@ -1216,6 +1232,8 @@ static int parser_apply_effect_clauses(FunctionDeclaration *decl,
   return 1;
 }
 
+static int parser_consume_type_arg_close(Parser *parser);
+
 static ASTNode *parser_parse_type_declaration(Parser *parser) {
   SourceLocation location = parser_current_location(parser);
   parser_advance(parser);
@@ -1224,11 +1242,43 @@ static ASTNode *parser_parse_type_declaration(Parser *parser) {
     return NULL;
   }
   char *name = strdup(parser->current_token.value);
+  char *type_params[4];
+  size_t type_param_count = 0;
   parser_advance(parser);
+  /* `type Uniform<T> = T where uniform(value);` is a template: the parameter
+     names stand for a type the use site supplies. */
+  if (parser->current_token.type == TOKEN_LESS_THAN) {
+    parser_advance(parser);
+    while (parser_is_identifier_like(parser->current_token.type)) {
+      if (type_param_count >= 4) {
+        parser_set_error(parser, "A declared type takes at most 4 parameters");
+        free(name);
+        return NULL;
+      }
+      type_params[type_param_count++] = strdup(parser->current_token.value);
+      parser_advance(parser);
+      if (parser->current_token.type != TOKEN_COMMA) {
+        break;
+      }
+      parser_advance(parser);
+    }
+    if (!parser_consume_type_arg_close(parser) || type_param_count == 0) {
+      parser_set_error(parser,
+                       "Expected one or more parameter names inside '<...>'");
+      for (size_t i = 0; i < type_param_count; i++) {
+        free(type_params[i]);
+      }
+      free(name);
+      return NULL;
+    }
+  }
   if (parser->current_token.type != TOKEN_EQUALS) {
     parser_set_error(parser,
                      "Expected '=' after the type name: a type is declared "
                      "as 'type Name = Base where predicate;'");
+    for (size_t i = 0; i < type_param_count; i++) {
+      free(type_params[i]);
+    }
     free(name);
     return NULL;
   }
@@ -1272,6 +1322,19 @@ static ASTNode *parser_parse_type_declaration(Parser *parser) {
   parser_advance(parser);
   ASTNode *decl =
       ast_create_type_declaration(name, base, binding, predicate, location);
+  if (decl && decl->data && type_param_count > 0) {
+    TypeDeclaration *data = (TypeDeclaration *)decl->data;
+    data->type_params = malloc(type_param_count * sizeof(char *));
+    if (data->type_params) {
+      for (size_t i = 0; i < type_param_count; i++) {
+        data->type_params[i] = (char *)string_intern(type_params[i]);
+      }
+      data->type_param_count = type_param_count;
+    }
+  }
+  for (size_t i = 0; i < type_param_count; i++) {
+    free(type_params[i]);
+  }
   free(binding);
   free(name);
   free(base);
@@ -2389,25 +2452,38 @@ ASTNode *parser_parse_statement(Parser *parser) {
                        "loop");
       return NULL;
     }
-    if (decos.simd_mode == SIMD_ATTR_NONE && !decos.unroll_factor) {
-      parser_set_error(
-          parser, "Expected a '@simd' or '@unroll' decorator before a loop");
+    if (decos.simd_mode == SIMD_ATTR_NONE && !decos.unroll_factor &&
+        !decos.uniform_mode) {
+      parser_set_error(parser,
+                       "Expected a '@simd', '@unroll' or '@uniform' decorator "
+                       "before this statement");
       return NULL;
     }
 
     ASTNode *loop = parser_parse_statement(parser);
     if (!loop)
       return NULL;
-    if (loop->type == AST_FOR_STATEMENT) {
+    if (loop->type == AST_IF_STATEMENT) {
+      if (decos.simd_mode != SIMD_ATTR_NONE || decos.unroll_factor) {
+        parser_set_error(
+            parser, "'@simd' / '@unroll' must be applied to a 'for' or "
+                    "'while' loop");
+        ast_destroy_node(loop);
+        return NULL;
+      }
+      ((IfStatement *)loop->data)->uniform_mode = decos.uniform_mode;
+    } else if (loop->type == AST_FOR_STATEMENT) {
       ((ForStatement *)loop->data)->simd_mode = decos.simd_mode;
       ((ForStatement *)loop->data)->unroll_factor = decos.unroll_factor;
+      ((ForStatement *)loop->data)->uniform_mode = decos.uniform_mode;
     } else if (loop->type == AST_WHILE_STATEMENT) {
       ((WhileStatement *)loop->data)->simd_mode = decos.simd_mode;
       ((WhileStatement *)loop->data)->unroll_factor = decos.unroll_factor;
+      ((WhileStatement *)loop->data)->uniform_mode = decos.uniform_mode;
     } else {
-      parser_set_error(
-          parser,
-          "'@simd' / '@unroll' must be applied to a 'for' or 'while' loop");
+      parser_set_error(parser,
+                       "'@simd' and '@unroll' apply to a 'for' or 'while' "
+                       "loop, and '@uniform' to one of those or an 'if'");
       ast_destroy_node(loop);
       return NULL;
     }
@@ -7259,6 +7335,7 @@ ASTNode *parser_parse_if_statement(Parser *parser) {
   if_data->else_ifs = else_ifs;
   if_data->else_if_count = else_if_count;
   if_data->else_branch = else_branch;
+  if_data->uniform_mode = 0;
   if_node->data = if_data;
 
   ast_add_child(if_node, condition);
@@ -7341,6 +7418,7 @@ ASTNode *parser_parse_while_statement(Parser *parser) {
   while_data->label = NULL;
   while_data->simd_mode = SIMD_ATTR_NONE;
   while_data->unroll_factor = 0;
+  while_data->uniform_mode = 0;
   while_node->data = while_data;
 
   ast_add_child(while_node, condition);

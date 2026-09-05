@@ -806,6 +806,47 @@ Type *type_checker_instantiate_generic_enum(TypeChecker *checker,
   return te;
 }
 
+/* Is the predicate exactly `uniform(<binding>)`? That is the one predicate the
+   interval prover cannot speak about, so it is recognised here and discharged
+   by the dependence analysis instead. */
+int type_checker_predicate_is_uniform(ASTNode *predicate,
+                                      const char *binding) {
+  CallExpression *call;
+  Identifier *argument;
+  if (!predicate || predicate->type != AST_FUNCTION_CALL) {
+    return 0;
+  }
+  call = (CallExpression *)predicate->data;
+  if (!call || !call->function_name ||
+      strcmp(call->function_name, "uniform") != 0 ||
+      call->argument_count != 1 || !call->arguments[0] ||
+      call->arguments[0]->type != AST_IDENTIFIER) {
+    return 0;
+  }
+  argument = (Identifier *)call->arguments[0]->data;
+  return argument && argument->name && binding &&
+         strcmp(argument->name, binding) == 0;
+}
+
+/* A template is registered by name and instantiated where it is used. The
+   table is small: a program declares a handful of these. */
+static ASTNode *g_declared_type_templates[64];
+static size_t g_declared_type_template_count = 0;
+
+ASTNode *type_checker_declared_type_template(const char *name) {
+  if (!name) {
+    return NULL;
+  }
+  for (size_t i = 0; i < g_declared_type_template_count; i++) {
+    const TypeDeclaration *decl =
+        (const TypeDeclaration *)g_declared_type_templates[i]->data;
+    if (decl && decl->name && strcmp(decl->name, name) == 0) {
+      return g_declared_type_templates[i];
+    }
+  }
+  return NULL;
+}
+
 int type_checker_process_type_declaration(TypeChecker *checker,
                                           ASTNode *type_decl_node) {
   TypeDeclaration *decl =
@@ -815,6 +856,20 @@ int type_checker_process_type_declaration(TypeChecker *checker,
   Symbol *symbol;
   if (!checker || !decl || !decl->name || !decl->base_type) {
     return 0;
+  }
+  if (decl->type_param_count > 0) {
+    if (type_checker_declared_type_template(decl->name)) {
+      return 1;
+    }
+    if (g_declared_type_template_count >= 64) {
+      type_checker_set_error_at_location(
+          checker, type_decl_node->location,
+          "too many parameterised declared types in one program");
+      return 0;
+    }
+    g_declared_type_templates[g_declared_type_template_count++] =
+        type_decl_node;
+    return 1;
   }
   if (type_checker_get_type_by_name(checker, decl->name)) {
     type_checker_set_error_at_location(checker, type_decl_node->location,
@@ -886,6 +941,82 @@ int type_checker_process_type_declaration(TypeChecker *checker,
   return 1;
 }
 
+/* `Uniform<int32>`: substitute the argument for the parameter in the base
+   spelling, resolve that, and build the refined type the ordinary form would
+   have built. The predicate is shared with the template, which is what makes
+   every instance carry the same rule. */
+Type *type_checker_instantiate_declared_type(TypeChecker *checker,
+                                             const char *base_name,
+                                             const char *argument_text) {
+  ASTNode *node = type_checker_declared_type_template(base_name);
+  TypeDeclaration *decl = node ? (TypeDeclaration *)node->data : NULL;
+  char instance_name[256];
+  char base_spelling[256];
+  const char *parameter;
+  const char *found;
+  Type *base;
+  Type *refined;
+
+  if (!decl || !checker || !argument_text || decl->type_param_count != 1) {
+    return NULL;
+  }
+  snprintf(instance_name, sizeof(instance_name), "%s<%s>", base_name,
+           argument_text);
+  {
+    Type *existing = NULL;
+    for (size_t i = 0; i < checker->type_table_count; i++) {
+      Type *candidate = checker->type_table[i];
+      if (candidate && candidate->name &&
+          strcmp(candidate->name, instance_name) == 0) {
+        existing = candidate;
+        break;
+      }
+    }
+    if (existing) {
+      return existing;
+    }
+  }
+  parameter = decl->type_params[0];
+  found = strstr(decl->base_type, parameter);
+  if (found) {
+    size_t lead = (size_t)(found - decl->base_type);
+    snprintf(base_spelling, sizeof(base_spelling), "%.*s%s%s", (int)lead,
+             decl->base_type, argument_text, found + strlen(parameter));
+  } else {
+    snprintf(base_spelling, sizeof(base_spelling), "%s", decl->base_type);
+  }
+  base = type_checker_get_type_by_name(checker, base_spelling);
+  if (!base || base->kind == TYPE_VOID || type_is_comptime_only(base)) {
+    return NULL;
+  }
+  refined = type_create(base->kind, instance_name);
+  if (!refined) {
+    return NULL;
+  }
+  refined->size = base->size;
+  refined->alignment = base->alignment;
+  refined->base_type = base->base_type;
+  refined->array_size = base->array_size;
+  refined->view_rank = base->view_rank;
+  refined->is_volatile = base->is_volatile;
+  refined->device_space = base->device_space;
+  refined->declared_align = base->declared_align;
+  refined->refined_base = base;
+  refined->field_names = base->field_names;
+  refined->field_types = base->field_types;
+  refined->field_offsets = base->field_offsets;
+  refined->field_bit_offsets = base->field_bit_offsets;
+  refined->field_bit_widths = base->field_bit_widths;
+  refined->field_count = base->field_count;
+  refined->refinement = decl->predicate;
+  refined->refine_binding =
+      decl->binding ? string_intern(decl->binding) : "value";
+  refined->refine_uniform =
+      type_checker_predicate_is_uniform(decl->predicate, refined->refine_binding);
+  type_checker_intern_type(checker, refined);
+  return refined;
+}
+
 /* An identifier in the predicate that is neither the binding nor anything the
  * declaration's own scope knows. There is nothing wrong with it: it is the
  * relation, and it resolves where the type is used. */
@@ -940,6 +1071,14 @@ int type_checker_check_type_predicate(TypeChecker *checker,
     return 1;
   }
   base = refined->refined_base;
+  /* `uniform(value)` speaks about the work items a value is read in rather
+     than about the value's range, so the interval machinery has nothing to say
+     about it and does not try. */
+  if (type_checker_predicate_is_uniform(decl->predicate,
+                                        refined->refine_binding)) {
+    refined->refine_uniform = 1;
+    return 1;
+  }
   if (decl->predicate &&
       type_checker_predicate_is_relational(checker, decl->predicate,
                                            refined->refine_binding, refined)) {

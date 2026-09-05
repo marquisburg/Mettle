@@ -249,6 +249,11 @@ typedef struct {
   ASTNode *predicate;
   int is_exported;
   ASTNode *composed_name;
+  /* `type Uniform<T> = T where uniform(value);`: the declaration is a template
+     and the names here are what a use site substitutes. Empty for the ordinary
+     form, which is a type on its own. */
+  char **type_params;
+  size_t type_param_count;
 } TypeDeclaration;
 
 typedef struct {
@@ -551,6 +556,10 @@ typedef struct {
   ElseIfClause *else_ifs;
   size_t else_if_count;
   ASTNode *else_branch;
+  /* `@uniform` / `@uniform!`: the condition is the same for every work item of
+     the group, so the branch is a group decision and the collectives inside it
+     stay reachable. 1 is the hint, 2 is the contract. */
+  int uniform_mode;
 } IfStatement;
 
 // SIMD vectorization attribute on a loop (`@simd` / `@simd!`).
@@ -563,6 +572,7 @@ typedef struct {
   char *label; // Optional label for labeled break/continue; NULL if unlabeled
   int simd_mode; // SimdAttr: vectorization attribute requested on this loop
   int unroll_factor; // `@unroll(n)` requested on this loop; 0 if absent
+  int uniform_mode;  // `@uniform` / `@uniform!` on this loop's condition
 } WhileStatement;
 
 typedef struct {
@@ -573,6 +583,7 @@ typedef struct {
   char *label; // Optional label
   int simd_mode; // SimdAttr: vectorization attribute requested on this loop
   int unroll_factor; // `@unroll(n)` requested on this loop; 0 if absent
+  int uniform_mode;  // `@uniform` / `@uniform!` on this loop's trip count
 } ForStatement;
 
 /* `comptime for <binding> in <sequence> { <body> }`.

@@ -1,0 +1,19 @@
+// The claim `Uniform<T>` makes, re-asked while the grid runs. Built with the
+// prover told to trust its input, the run finds what the analysis was not
+// allowed to check.
+import "std/warp";
+
+kernel lies(out: int32 global*, table: int32 global*) {
+  var stolen: int32 = table[0] + (int32)thread.x;
+  var rows: Uniform<int32> = (Uniform<int32>)stolen;
+  out[thread.x] = (int32)rows;
+}
+
+@test fn a_false_uniform_is_caught() -> int32 {
+  var out: int32[8];
+  var table: int32[1];
+  table[0] = 5;
+  dispatch lies[grid: (1, 1, 1), block: (8, 1, 1)](
+      (int32 global*)&out[0], (int32 global*)&table[0]);
+  return 0;
+}

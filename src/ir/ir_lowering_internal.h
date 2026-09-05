@@ -560,4 +560,7 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
 IRFunction *ir_lower_function(IRLoweringContext *context,
                                      ASTNode *declaration);
 
+void ir_mark_branches_uniform(IRFunction *function, size_t from);
+void ir_mark_calls_divergent(IRFunction *function, size_t from);
+
 #endif // IR_LOWERING_INTERNAL_H

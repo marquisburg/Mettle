@@ -169,6 +169,27 @@ size_t type_checker_address_alignment(TypeChecker *checker, ASTNode *expression,
   return 0;
 }
 
+/* Does the module being checked declare a kernel? A device helper only makes
+   sense where one could reach it. */
+int type_checker_module_has_kernel(TypeChecker *checker) {
+  ASTNode *module = checker ? checker->module_program : NULL;
+  Program *program = module && module->data ? (Program *)module->data : NULL;
+  if (!program) {
+    return 0;
+  }
+  for (size_t i = 0; i < program->declaration_count; i++) {
+    ASTNode *declaration = program->declarations[i];
+    FunctionDeclaration *function =
+        declaration && declaration->type == AST_FUNCTION_DECLARATION
+            ? (FunctionDeclaration *)declaration->data
+            : NULL;
+    if (function && function->is_kernel) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 /* The word a device space is written with, with the leading space the type
    spelling needs: ` global`, ` shared`, ` constant`, ` local`. */
 const char *type_checker_device_space_word(unsigned char space) {
@@ -526,10 +547,15 @@ static Type *type_checker_subgroup_builtin(TypeChecker *checker,
               checker->current_function_decl->type == AST_FUNCTION_DECLARATION
           ? (FunctionDeclaration *)checker->current_function_decl->data
           : NULL;
-  if (!owner || !owner->is_kernel) {
+  /* A subgroup collective may sit in an ordinary device function, which is
+     what lets one be written once in std/gpu carrying `requires Warp`. What
+     keeps it device-only is the module: a file with no kernel in it has
+     nothing that could reach one. */
+  if (!owner || !type_checker_module_has_kernel(checker)) {
     type_checker_set_error_at_location(
         checker, expression->location,
-        "Subgroup built-ins are only legal directly inside a GPU kernel");
+        "Subgroup built-ins are only legal inside a GPU kernel or a device "
+        "function a kernel in the same module reaches");
     return NULL;
   }
   size_t expected = (is_local_id || is_size) ? 0

@@ -65,6 +65,19 @@ sources:
 | `asm` | an inline `asm` block |
 | `syscall` | the `syscall` built-in |
 
+Two more exist as capabilities rather than as sources, because the compiler
+knows where they come from and where they stop:
+
+| Effect | Provided by | Taken away by |
+|--------|-------------|---------------|
+| `Warp` | a GPU kernel entry | a branch or a loop the work items do not all decide the same way |
+| `Block` | a GPU kernel entry | the same |
+
+A device collective requires one of them, so the machinery above carries the
+requirement up the call graph without anyone writing it down, and a collective
+reached under a divergent condition is `F0002` naming the line that removed the
+group. [GPU offload](gpu.md#collective-effects) has the whole surface.
+
 `@noalloc` and `forbids alloc` hold a function to the same standard: anything
 that cannot be proven allocation-free counts against it. A call to a function
 outside the program is unprovable unless the declaration says otherwise, so an

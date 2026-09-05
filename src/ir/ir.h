@@ -468,6 +468,17 @@ typedef struct {
   MtlcMemoryOrder failure_memory_order;
   MtlcMemoryScope memory_scope;
   unsigned memory_regions;
+  /* On a branch: the condition is the same for every work item of the group,
+   * so the branch is a group decision. A GPU backend takes the uniform form of
+   * the instruction, and the collectives inside the arm stay reachable. On a
+   * value-defining instruction: the value's type says it is uniform, and a
+   * checked build re-asks the question while the program runs. */
+  unsigned char uniform_branch;
+  unsigned char uniform_value;
+  /* This call, or this collective, sits inside a branch or a loop whose
+   * condition is not the same in every work item of the group. The group
+   * effects a kernel provides do not reach here. */
+  unsigned char divergent_call;
   uint32_t async_copy_element_count;
   uint32_t async_copy_transaction_bytes;
   uint32_t async_copy_pending_groups;

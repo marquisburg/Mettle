@@ -160,6 +160,11 @@ typedef struct Type {
      the site, in that scope, and refused there when the name is not in it. */
   int refine_relational;
   const char *refine_relation_name;
+  /* The predicate is `uniform(value)`: the value is the same in every work
+     item of the group. It is not an interval, so it has its own flag and its
+     own prover; what discharges it is the dependence analysis in
+     type_checker_uniform.c. */
+  int refine_uniform;
   /* A float predicate carries an interval and the rounding it admits. The
      error term is what makes the interval usable by a pass that reassociates:
      a rewrite is allowed only where the bound still holds once the term is

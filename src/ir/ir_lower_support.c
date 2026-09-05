@@ -1269,3 +1269,35 @@ const IRControlFrame *ir_continue_target_frame(IRLoweringContext *context,
   }
   return NULL;
 }
+
+/* Every branch emitted since `from` decides the same way in every work item of
+   the group. A GPU backend takes the uniform form; every other backend reads
+   an ordinary branch. */
+void ir_mark_branches_uniform(IRFunction *function, size_t from) {
+  if (!function) {
+    return;
+  }
+  for (size_t i = from; i < function->instruction_count; i++) {
+    IRInstruction *instruction = &function->instructions[i];
+    if (instruction->op == IR_OP_BRANCH_ZERO ||
+        instruction->op == IR_OP_BRANCH_EQ) {
+      instruction->uniform_branch = 1;
+    }
+  }
+}
+
+/* Every call and collective emitted since `from` sits under a condition the
+   work items of a group do not all decide the same way. */
+void ir_mark_calls_divergent(IRFunction *function, size_t from) {
+  if (!function) {
+    return;
+  }
+  for (size_t i = from; i < function->instruction_count; i++) {
+    IRInstruction *instruction = &function->instructions[i];
+    if (instruction->op == IR_OP_CALL ||
+        instruction->op == IR_OP_CALL_INDIRECT ||
+        instruction->op == IR_OP_BARRIER) {
+      instruction->divergent_call = 1;
+    }
+  }
+}
