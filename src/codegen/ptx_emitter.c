@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef enum { PC_NONE, PC_PRED, PC_B16, PC_B32, PC_B64, PC_F32, PC_F64 } PtxClass;
 
@@ -476,13 +477,228 @@ static const char *ptx_memory_space(MtlcAddressSpace address_space) {
   switch (address_space) {
   case MTLC_ADDRESS_SPACE_GLOBAL: return ".global";
   case MTLC_ADDRESS_SPACE_WORKGROUP: return ".shared";
-  case MTLC_ADDRESS_SPACE_CONSTANT: return ".const";
+  /* A `constant` pointer names device memory the launch allocated and the
+   * kernel only reads. The constant bank is not where that memory is, so the
+   * load takes the non-coherent path through the read-only cache instead:
+   * the same address, read without coherence traffic. */
+  case MTLC_ADDRESS_SPACE_CONSTANT: return ".global";
   case MTLC_ADDRESS_SPACE_PRIVATE: return ".local";
   case MTLC_ADDRESS_SPACE_DEFAULT:
   case MTLC_ADDRESS_SPACE_GENERIC:
     return "";
   }
   return NULL;
+}
+
+/* --- widening adjacent loads into one vector access ---------------------
+ *
+ * Four `ld.global.f32` from consecutive elements are one `ld.global.v4.f32`
+ * when the first address is 16-byte aligned. Nothing in the arithmetic says
+ * that; the pointer's declared `align(N)` does, which is why this reads the
+ * type and refuses to guess. */
+typedef struct {
+  unsigned char width;    /* 2 or 4 on the load that heads a group */
+  unsigned char absorbed; /* this load is emitted by an earlier group */
+  size_t members[4];      /* instruction indices the group covers */
+} PtxVectorPlan;
+
+/* Fold an operand to a constant by walking the producers that define it. Only
+ * the shapes an address computation makes: an integer, a copy, a widening
+ * cast, and a product or sum of constants. */
+static int ptx_fold_constant(const IRFunction *func, size_t before,
+                             const IROperand *operand, long long *out,
+                             unsigned depth) {
+  if (!func || !operand || depth > 8) return 0;
+  if (operand->kind == IR_OPERAND_INT) {
+    *out = operand->int_value;
+    return 1;
+  }
+  if ((operand->kind != IR_OPERAND_TEMP && operand->kind != IR_OPERAND_SYMBOL) ||
+      !operand->name)
+    return 0;
+  for (size_t i = before; i > 0; i--) {
+    const IRInstruction *producer = &func->instructions[i - 1];
+    if (!producer->dest.name || !producer->dest.kind ||
+        strcmp(producer->dest.name, operand->name) != 0)
+      continue;
+    if (producer->op == IR_OP_ASSIGN || producer->op == IR_OP_CAST)
+      return ptx_fold_constant(func, i - 1, &producer->lhs, out, depth + 1);
+    if (producer->op == IR_OP_BINARY && producer->text) {
+      long long lhs = 0, rhs = 0;
+      if (!ptx_fold_constant(func, i - 1, &producer->lhs, &lhs, depth + 1) ||
+          !ptx_fold_constant(func, i - 1, &producer->rhs, &rhs, depth + 1))
+        return 0;
+      if (strcmp(producer->text, "*") == 0) { *out = lhs * rhs; return 1; }
+      if (strcmp(producer->text, "+") == 0) { *out = lhs + rhs; return 1; }
+      if (strcmp(producer->text, "-") == 0) { *out = lhs - rhs; return 1; }
+      if (strcmp(producer->text, "<<") == 0 && rhs >= 0 && rhs < 32) {
+        *out = lhs << rhs;
+        return 1;
+      }
+      return 0;
+    }
+    return 0;
+  }
+  return 0;
+}
+
+/* Split a load address into a base value and a constant byte offset. */
+static void ptx_address_parts(const IRFunction *func, size_t index,
+                              const IROperand *address,
+                              const IROperand **base, long long *offset) {
+  *base = address;
+  *offset = 0;
+  if (!func || !address || !address->name ||
+      (address->kind != IR_OPERAND_TEMP && address->kind != IR_OPERAND_SYMBOL))
+    return;
+  for (size_t i = index; i > 0; i--) {
+    const IRInstruction *producer = &func->instructions[i - 1];
+    long long constant = 0;
+    if (!producer->dest.name ||
+        strcmp(producer->dest.name, address->name) != 0)
+      continue;
+    if (producer->op != IR_OP_BINARY || !producer->text ||
+        strcmp(producer->text, "+") != 0)
+      return;
+    if (ptx_fold_constant(func, i - 1, &producer->rhs, &constant, 0)) {
+      *base = &producer->lhs;
+      *offset = constant;
+    }
+    return;
+  }
+}
+
+/* Whether an instruction between two loads keeps them adjacent. The list is
+ * what is allowed rather than what is not: an unfamiliar opcode ends the group
+ * instead of being assumed harmless. */
+static int ptx_vector_gap_is_safe(const IRInstruction *in) {
+  switch (in->op) {
+  case IR_OP_NOP:
+  case IR_OP_ASSIGN:
+  case IR_OP_BINARY:
+  case IR_OP_UNARY:
+  case IR_OP_CAST:
+  case IR_OP_LOAD:
+  case IR_OP_SELECT:
+  case IR_OP_ADDRESS_OF:
+    return 1;
+  default:
+    return 0;
+  }
+}
+
+static int ptx_vector_element_ok(MtlcTypeKind elem) {
+  return elem == MTLC_TYPE_FLOAT32 || elem == MTLC_TYPE_INT32 ||
+         elem == MTLC_TYPE_UINT32 || elem == MTLC_TYPE_FLOAT64 ||
+         elem == MTLC_TYPE_INT64 || elem == MTLC_TYPE_UINT64;
+}
+
+/* The element type a load reads, from the pointer's own type. */
+static const MtlcType *ptx_load_pointer_type(const IRProgram *program,
+                                             const IRFunction *func,
+                                             const IROperand *base) {
+  const IRModuleSymbol *symbol = NULL;
+  if (!func || !base || !base->name) return NULL;
+  symbol = program ? ir_program_lookup_symbol(program, func->name) : NULL;
+  if (base->kind == IR_OPERAND_SYMBOL && symbol &&
+      symbol->kind == IR_MODSYM_FUNCTION) {
+    for (size_t p = 0; p < func->parameter_count && p < symbol->param_count;
+         p++) {
+      if (func->parameter_names && func->parameter_names[p] &&
+          strcmp(func->parameter_names[p], base->name) == 0)
+        return symbol->param_types ? symbol->param_types[p] : NULL;
+    }
+  }
+  for (size_t i = func->instruction_count; i > 0; i--) {
+    const IRInstruction *producer = &func->instructions[i - 1];
+    if (!producer->dest.name || strcmp(producer->dest.name, base->name) != 0)
+      continue;
+    if (producer->op == IR_OP_LOAD || producer->op == IR_OP_ASSIGN ||
+        producer->op == IR_OP_CAST || producer->op == IR_OP_BINARY ||
+        producer->op == IR_OP_ADDRESS_SPACE_ALLOC)
+      return producer->value_type;
+    break;
+  }
+  if (program && base->kind == IR_OPERAND_SYMBOL) {
+    const IRModuleSymbol *global = ir_program_lookup_symbol(program, base->name);
+    if (global && global->kind == IR_MODSYM_VARIABLE) return global->type;
+  }
+  return NULL;
+}
+
+/* Plan the vector loads for one function. A group is a run of loads from one
+ * base at consecutive element offsets, in one block, through a pointer whose
+ * declared alignment covers the whole access. */
+static PtxVectorPlan *ptx_plan_vector_loads(const IRProgram *program,
+                                            const IRFunction *func) {
+  PtxVectorPlan *plan;
+  if (!func || func->instruction_count == 0) return NULL;
+  plan = calloc(func->instruction_count, sizeof(*plan));
+  if (!plan) return NULL;
+  for (size_t i = 0; i < func->instruction_count; i++) {
+    const IRInstruction *head = &func->instructions[i];
+    const IROperand *base = NULL;
+    const MtlcType *pointer_type = NULL;
+    long long offset = 0;
+    size_t stride = 0;
+    size_t members[4];
+    size_t found = 1;
+    if (head->op != IR_OP_LOAD || plan[i].absorbed) continue;
+    ptx_address_parts(func, i, &head->lhs, &base, &offset);
+    pointer_type = ptx_load_pointer_type(program, func, base);
+    if (!pointer_type || pointer_type->kind != MTLC_TYPE_POINTER ||
+        !pointer_type->base_type || !pointer_type->pointee_align ||
+        !ptx_vector_element_ok(pointer_type->base_type->kind))
+      continue;
+    if (pointer_type->address_space != MTLC_ADDRESS_SPACE_GLOBAL &&
+        pointer_type->address_space != MTLC_ADDRESS_SPACE_WORKGROUP &&
+        pointer_type->address_space != MTLC_ADDRESS_SPACE_CONSTANT)
+      continue;
+    stride = pointer_type->base_type->size;
+    if (!stride || (size_t)offset % (stride * 2) != 0) continue;
+    members[0] = i;
+    for (size_t j = i + 1; j < func->instruction_count && found < 4; j++) {
+      const IRInstruction *next = &func->instructions[j];
+      const IROperand *next_base = NULL;
+      long long next_offset = 0;
+      if (next->op == IR_OP_LOAD && !plan[j].absorbed) {
+        ptx_address_parts(func, j, &next->lhs, &next_base, &next_offset);
+        if (next_base && base && next_base->name && base->name &&
+            next_base->kind == base->kind &&
+            strcmp(next_base->name, base->name) == 0 &&
+            next_offset == offset + (long long)(stride * found)) {
+          members[found++] = j;
+          continue;
+        }
+      }
+      if (!ptx_vector_gap_is_safe(next)) break;
+    }
+    if (found >= 4 && pointer_type->pointee_align >= stride * 4 &&
+        (size_t)offset % (stride * 4) == 0) {
+      plan[i].width = 4;
+    } else if (found >= 2 && pointer_type->pointee_align >= stride * 2) {
+      plan[i].width = 2;
+    } else {
+      continue;
+    }
+    for (size_t k = 1; k < plan[i].width; k++) {
+      plan[members[k]].absorbed = 1;
+      plan[members[k]].width = 0;
+    }
+    for (size_t k = 0; k < plan[i].width; k++) {
+      plan[i].members[k] = members[k];
+    }
+  }
+  return plan;
+}
+
+/* The space a load is issued in. A `constant` pointer adds `.nc`, which is
+ * what makes it a read-only-cache load; every other space loads plainly. */
+static const char *ptx_load_space(MtlcAddressSpace address_space) {
+  if (address_space == MTLC_ADDRESS_SPACE_CONSTANT) {
+    return ".global.nc";
+  }
+  return ptx_memory_space(address_space);
 }
 
 /* element class from a pointer value's elem kind */
@@ -667,6 +883,14 @@ static size_t g_ptx_string_capacity = 0;
 static int g_ptx_uses_vprintf = 0;
 /* --gpu-checks: whether `gpu_assert` emits its trap. */
 static int g_ptx_emit_checks = 0;
+/* --report-gpu-types: what the type-directed device analyses concluded, and
+ * what they cost. Counted while the module is emitted and printed once. */
+static int g_ptx_report_types = 0;
+static long long g_ptx_spaced_accesses = 0;
+static long long g_ptx_generic_accesses = 0;
+static long long g_ptx_vector_groups = 0;
+static long long g_ptx_vector_loads_saved = 0;
+static double g_ptx_analysis_seconds = 0.0;
 
 static int ptx_string_index(const char *text) {
   if (!text) return -1;
@@ -6354,6 +6578,12 @@ int ptx_emit_program(IRProgram *program, CodeGenerator *generator, FILE *out,
   int isa_minor = options ? options->isa_minor : 8;
   int tensor_tuple_budget = options ? options->tensor_tuple_budget : 0;
   g_ptx_emit_checks = options ? options->checks : 0;
+  g_ptx_report_types = options ? options->report_types : 0;
+  g_ptx_spaced_accesses = 0;
+  g_ptx_generic_accesses = 0;
+  g_ptx_vector_groups = 0;
+  g_ptx_vector_loads_saved = 0;
+  g_ptx_analysis_seconds = 0.0;
   if (!ptx_target_valid(target) || isa_major < 1 || isa_major > 99 ||
       isa_minor < 0 || isa_minor > 9 || tensor_tuple_budget < 0 ||
       tensor_tuple_budget > 4096) {
@@ -6466,6 +6696,19 @@ int ptx_emit_program(IRProgram *program, CodeGenerator *generator, FILE *out,
     }
   }
   ir_gpu_call_graph_destroy(&graph);
+  if (g_ptx_report_types) {
+    long long total = g_ptx_spaced_accesses + g_ptx_generic_accesses;
+    fprintf(stderr,
+            "GPU type report: %lld of %lld device accesses named their space, "
+            "%lld stayed generic\n",
+            g_ptx_spaced_accesses, total, g_ptx_generic_accesses);
+    fprintf(stderr,
+            "  %lld vector groups formed from a declared alignment, "
+            "%lld separate loads removed\n",
+            g_ptx_vector_groups, g_ptx_vector_loads_saved);
+    fprintf(stderr, "  the analyses took %.3f ms\n",
+            g_ptx_analysis_seconds * 1000.0);
+  }
   return 1;
 }
 
@@ -6651,7 +6894,11 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
                 ename, p, d.mem_size);
     } else if (func->is_kernel && d.is_ptr) {
       const char *space = ptx_memory_space(d.address_space);
-      size_t alignment = pt && pt->base_type && pt->base_type->alignment
+      /* A declared `align(N)` is a proven fact about the address the launch
+       * passes, so the parameter says so and the driver holds the launch to
+       * it. Without one the element's own alignment is all that is known. */
+      size_t alignment = pt && pt->pointee_align ? pt->pointee_align
+                         : pt && pt->base_type && pt->base_type->alignment
                              ? pt->base_type->alignment
                              : 4;
       if (!space) {
@@ -6889,8 +7136,59 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
   }
 
   /* --- walk instructions --- */
+  clock_t analysis_start = clock();
+  PtxVectorPlan *vector_plan = ptx_plan_vector_loads(program, func);
+  g_ptx_analysis_seconds +=
+      (double)(clock() - analysis_start) / (double)CLOCKS_PER_SEC;
   for (size_t ii = 0; ii < func->instruction_count && !fn.error; ii++) {
     const IRInstruction *in = &func->instructions[ii];
+    if (vector_plan && in->op == IR_OP_LOAD && vector_plan[ii].absorbed) {
+      continue;
+    }
+    if (vector_plan && in->op == IR_OP_LOAD && vector_plan[ii].width) {
+      unsigned char width = vector_plan[ii].width;
+      const IROperand *base = NULL;
+      long long offset = 0;
+      const MtlcType *pointer_type;
+      char addrreg[24];
+      char names[4][24];
+      char list[128];
+      size_t used = 0;
+      int is_unsigned = 0;
+      PtxClass cls;
+      MtlcTypeKind elem;
+      const char *space;
+      ptx_address_parts(func, ii, &in->lhs, &base, &offset);
+      pointer_type = ptx_load_pointer_type(program, func, base);
+      elem = pointer_type && pointer_type->base_type
+                 ? pointer_type->base_type->kind
+                 : MTLC_TYPE_VOID;
+      cls = elem_class(elem, &is_unsigned);
+      space = ptx_load_space(pointer_type ? pointer_type->address_space
+                                          : MTLC_ADDRESS_SPACE_GENERIC);
+      use_as(&fn, base, PC_B64, addrreg);
+      list[0] = '\0';
+      for (unsigned char k = 0; k < width; k++) {
+        const IRInstruction *member =
+            &func->instructions[vector_plan[ii].members[k]];
+        PtxVal dv = {0};
+        dv.cls = cls;
+        dv.is_unsigned = is_unsigned;
+        dv = destination_value(&fn, &member->dest, dv);
+        reg_name(cls, dv.idx, names[k]);
+        if (member->dest.name) {
+          bind_value(&fn, member->dest.name, dv);
+        }
+        used += (size_t)snprintf(list + used, sizeof(list) - used, "%s%s",
+                                 k ? ", " : "", names[k]);
+      }
+      sb_printf(&fn.body, "\tld%s.v%u.%s {%s}, [%s+%lld];\n", space,
+                (unsigned)width, mem_type_suffix(elem), list, addrreg, offset);
+      g_ptx_spaced_accesses++;
+      g_ptx_vector_groups++;
+      g_ptx_vector_loads_saved += width - 1;
+      continue;
+    }
     switch (in->op) {
     case IR_OP_NOP:
     case IR_OP_ADDRESS_SPACE_ALLOC:
@@ -7151,7 +7449,13 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
       dv = destination_value(&fn, &in->dest, dv);
       char dn[24];
       reg_name(dc, dv.idx, dn);
-      const char *space = ptx_memory_space(addr.address_space);
+      const char *space = ptx_load_space(addr.address_space);
+      if (addr.address_space == MTLC_ADDRESS_SPACE_DEFAULT ||
+          addr.address_space == MTLC_ADDRESS_SPACE_GENERIC) {
+        g_ptx_generic_accesses++;
+      } else {
+        g_ptx_spaced_accesses++;
+      }
       if (!space) {
         fn_error(&fn, "PTX: invalid load address space %d",
                  (int)addr.address_space);
@@ -7179,7 +7483,7 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
         PtxVal source = operand_desc(&fn, &in->lhs);
         const char *dst_space = ptx_memory_space(addr.address_space);
         const char *src_space =
-            source.is_ptr ? ptx_memory_space(source.address_space) : "";
+            source.is_ptr ? ptx_load_space(source.address_space) : "";
         char dstreg[24], srcreg[24];
         use_as(&fn, &in->dest, PC_B64, dstreg);
         use_as(&fn, &in->lhs, PC_B64, srcreg);
@@ -7240,6 +7544,12 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
         ptx_generic_address(&fn, &in->lhs, valreg);
       }
       const char *space = ptx_memory_space(addr.address_space);
+      if (addr.address_space == MTLC_ADDRESS_SPACE_DEFAULT ||
+          addr.address_space == MTLC_ADDRESS_SPACE_GENERIC) {
+        g_ptx_generic_accesses++;
+      } else {
+        g_ptx_spaced_accesses++;
+      }
       if (addr.address_space == MTLC_ADDRESS_SPACE_CONSTANT) {
         fn_error(&fn, "PTX: store to constant address space");
       } else if (!space) {
@@ -8458,6 +8768,8 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
       break;
     }
   }
+
+  free(vector_plan);
 
   if (fn.error) {
     if (error) {

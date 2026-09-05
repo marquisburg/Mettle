@@ -2015,6 +2015,35 @@ static void prove_visit(void *raw, ASTNode *atom, int negated) {
       }
     }
   }
+  /* `value % K == 0` is a divisibility claim, and the arithmetic that built
+     the value answers it directly: a product of a multiple of K is one. This
+     is the route an alignment predicate over an offset takes. */
+  if (!negated && binary_parts(atom, &op, &left, &right) && op &&
+      strcmp(op, "==") == 0 && left && right) {
+    const char *inner_op = NULL;
+    ASTNode *inner_left = NULL;
+    ASTNode *inner_right = NULL;
+    long long zero = 0;
+    if (binary_parts(left, &inner_op, &inner_left, &inner_right) && inner_op &&
+        strcmp(inner_op, "%") == 0 && identifier_name(inner_left) &&
+        strcmp(identifier_name(inner_left), ctx->binding) == 0 &&
+        type_checker_eval_integer_constant_with_checker(ctx->checker, right,
+                                                        &zero) &&
+        zero == 0) {
+      long long divisor = 0;
+      if (type_checker_eval_integer_constant_with_checker(
+              ctx->checker, inner_right, &divisor) &&
+          divisor > 0) {
+        size_t known =
+            type_checker_expression_multiple_of(ctx->checker, ctx->expr, 0);
+        if (known % (size_t)divisor == 0) {
+          snprintf(ctx->route, sizeof(ctx->route),
+                   "the value is built as a multiple of %zu", known);
+          return;
+        }
+      }
+    }
+  }
   if (guards_prove_atom(ctx->checker, atom, negated, ctx->expr,
                         ctx->binding)) {
     snprintf(ctx->route, sizeof(ctx->route),

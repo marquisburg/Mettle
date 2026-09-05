@@ -2052,7 +2052,28 @@ static int type_checker_check_function_body(
       if (func_decl->is_kernel && active_param_types &&
           active_param_types[i] &&
           active_param_types[i]->kind == TYPE_POINTER) {
-        param_symbol->address_space = MTLC_ADDRESS_SPACE_GLOBAL;
+        unsigned char declared = active_param_types[i]->device_space;
+        /* A launch hands a kernel addresses it allocated on the device. It
+         * has no shared tile and no work-item private frame to hand over, so
+         * a parameter claiming one is a claim nothing can satisfy. */
+        if (declared == DEVICE_SPACE_SHARED ||
+            declared == DEVICE_SPACE_LOCAL) {
+          type_checker_set_error_at_location(
+              checker, declaration->location,
+              "kernel parameter '%s' is declared%s, and a launch has no%s "
+              "address to pass; declare it 'global', 'constant', or leave it "
+              "generic",
+              func_decl->parameter_names[i],
+              type_checker_device_space_word(declared),
+              type_checker_device_space_word(declared));
+          symbol_destroy(param_symbol);
+          symbol_table_exit_scope(checker->symbol_table);
+          return 0;
+        }
+        param_symbol->address_space =
+            declared == DEVICE_SPACE_CONSTANT ? MTLC_ADDRESS_SPACE_CONSTANT
+            : declared == DEVICE_SPACE_GENERIC ? MTLC_ADDRESS_SPACE_GENERIC
+                                               : MTLC_ADDRESS_SPACE_GLOBAL;
       }
       param_symbol->decl_line = declaration->location.line;
       param_symbol->decl_column = declaration->location.column;

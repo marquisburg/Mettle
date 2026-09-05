@@ -139,6 +139,78 @@ A frontend driving libmtlc directly reaches all four through
 `mtlc_fn_set_inline`, `mtlc_fn_set_inline_required`, `mtlc_fn_set_noinline`,
 and `mtlc_fn_set_pure`.
 
+### Address spaces and alignment in the pointer type
+
+A device pointer says where its data lives, and the type carries it:
+
+```mettle
+kernel scale(rows: float32 global align(16)*,
+             table: float32 constant*,
+             out: float32 global*, width: int32) {
+  workgroup var tile: float32[64];
+  /* ... */
+}
+```
+
+`global`, `shared`, `constant` and `local` qualify a pointer, a slice or a
+view, between the element type and the suffix: `float32 global*`,
+`float32 shared[]`, `float16 constant[,]`. A plain `T*` inside a kernel is
+generic and stays legal, so nothing that was written before has to change.
+
+What the space buys is the access. A device helper taking `float32*` loads
+through the generic path, which resolves the space at run time; the same helper
+taking `float32 global*` emits `ld.global.f32`, one taking `float32 shared*`
+emits `ld.shared.f32`, and one taking `float32 constant*` emits
+`ld.global.nc.f32`, the read-only cache path for memory the kernel only reads.
+A `constant` pointer names ordinary device memory: the constant bank is not
+where a launch's allocation is, so the non-coherent load is what the qualifier
+means here.
+
+Spaces flow one way. A `T global*` becomes a `T*` for free, because forgetting
+where something lives claims nothing. Going the other way is a claim, so it
+needs the cast `(T global*)value`, which `mettle test` re-checks when it runs
+the grid. Handing a `shared` pointer where a `global` one is wanted is refused
+outright, and the message names both spaces: they are two different memories,
+and no cast makes one the other. The same rule holds at a launch, where a
+kernel parameter's space is part of the `extern kernel` signature `dispatch`
+checks. A kernel parameter cannot be `shared` or `local`: a launch has no
+workgroup tile and no work-item frame to hand over, and the compiler says so.
+
+`align(N)` is the second half of the type: `float32 global align(16)*` says the
+address is 16-byte aligned. It is a proof, not an annotation. A cast to an
+aligned type is accepted only where the compiler can already see the
+alignment -- from a `shared` declaration, from a pointer that already declared
+one, or from the arithmetic of the offset -- and refused with the alignment the
+expression actually reached:
+
+```
+error: this address is 4-byte aligned and the cast claims 16; the offset it is
+       built from is not bounded to 16
+```
+
+An offset held in a local carries its proof in a declared type:
+
+```mettle
+type Quad = int32 where value % 4 == 0;
+var offset: Quad = (Quad)(lane * 4);
+row = (float32 global align(16)*)&rows[offset];
+```
+
+A declared alignment is what licenses a vector access: four adjacent `f32`
+loads through a `float32 global align(16)*` become one `ld.global.v4.f32`, and
+two through an `align(8)` pointer become one `ld.global.v2.f32`. Without the
+declared alignment the loads stay separate, because nothing proved the address.
+The declared alignment also reaches the kernel signature as
+`.param .u64 .ptr.global.align 16`, so the driver holds the launch to it.
+
+`--report-gpu-types` says what these analyses concluded and what they cost:
+
+```
+GPU type report: 5 of 5 device accesses named their space, 0 stayed generic
+  1 vector groups formed from a declared alignment, 3 separate loads removed
+  the analyses took 0.041 ms
+```
+
 ### Static and launch-sized workgroup memory, private memory, and barriers
 
 Kernels can allocate statically sized scalar arrays in semantic address spaces:

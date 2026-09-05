@@ -1,0 +1,37 @@
+// The same shape with no space and no alignment written anywhere. Its PTX is
+// the evidence that a kernel which does not use the feature is unchanged by
+// its presence.
+
+@noinline fn quad_sum(row: float32*) -> float32 {
+  return row[0] + row[1] + row[2] + row[3];
+}
+
+@noinline fn tile_sum(tile: float32*, count: int32) -> float32 {
+  var total: float32 = 0.0;
+  var i: int32 = 0;
+  while (i < count) {
+    total = total + tile[i];
+    i = i + 1;
+  }
+  return total;
+}
+
+@noinline fn table_lookup(table: float32*, index: int32) -> float32 {
+  return table[index];
+}
+
+kernel spaced_rows(rows: float32*,
+                   table: float32*,
+                   out: float32*,
+                   width: int32) {
+  workgroup var tile: float32[64];
+  var lane: int32 = thread.x;
+  var offset: int32 = lane * 4;
+  if (lane < 64) {
+    tile[lane] = quad_sum(&rows[offset]);
+  }
+  barrier(workgroup, global, acq_rel);
+  if (lane == 0) {
+    out[block.x] = tile_sum(&tile[0], 64) + table_lookup(table, width);
+  }
+}

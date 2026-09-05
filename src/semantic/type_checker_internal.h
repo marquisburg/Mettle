@@ -41,6 +41,30 @@ Type *type_checker_pointer_to(TypeChecker *checker, Type *base);
    produces. Canonical per element type. */
 Type *type_checker_slice_of(TypeChecker *checker, Type *element);
 Type *type_checker_view_of(TypeChecker *checker, Type *element, size_t rank);
+
+/* The same three constructors with a device address space and a claimed
+   alignment attached. `qualifiers` is the spelling those carried in the
+   source, ` global align(16)` and the like, so the built type's name reads
+   back the way it was written. */
+Type *type_checker_device_pointer_to(TypeChecker *checker, Type *base,
+                                     unsigned char space, size_t align,
+                                     const char *qualifiers);
+Type *type_checker_device_slice_of(TypeChecker *checker, Type *element,
+                                   unsigned char space, size_t align,
+                                   const char *qualifiers);
+Type *type_checker_device_view_of(TypeChecker *checker, Type *element,
+                                  size_t rank, unsigned char space,
+                                  size_t align, const char *qualifiers);
+size_t type_checker_split_device_qualifiers(const char *name, size_t length,
+                                            unsigned char *space,
+                                            size_t *align);
+const char *type_checker_device_space_word(unsigned char space);
+unsigned char type_checker_lvalue_device_space(TypeChecker *checker,
+                                               ASTNode *node);
+size_t type_checker_address_alignment(TypeChecker *checker, ASTNode *expression,
+                                      int depth);
+size_t type_checker_expression_multiple_of(TypeChecker *checker,
+                                           ASTNode *expression, int depth);
 Type *type_checker_volatile_of(TypeChecker *checker, Type *base);
 Type *type_checker_parse_pointer_type(TypeChecker *checker,
                                              const char *name);

@@ -1,0 +1,7 @@
+@noinline fn quad_sum(row: float32 global align(16)*) -> float32 {
+  return row[0] + row[1] + row[2] + row[3];
+}
+
+kernel unaligned(rows: float32 global*, out: float32 global*) {
+  out[thread.x] = quad_sum((float32 global align(16)*)&rows[thread.x * 3]);
+}

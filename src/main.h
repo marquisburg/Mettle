@@ -48,6 +48,8 @@ typedef struct {
                      fill thresholds; 0 = ask the local driver */
   int gpu_checks; /* --gpu-checks: emit kernel-side assertion traps */
   int report_launches; /* --report-launches: list every dispatch site */
+  int report_gpu_types; /* --report-gpu-types: what the device type
+                         * analyses concluded, and what they cost */
   int emit_spirv; /* --emit-spirv: lower declared kernels to SPIR-V, no object */
   int emit_arm64; /* --emit-arm64: lower scalar functions to an AArch64 ELF */
   /* --emit-arm64-obj: emit an AArch64 relocatable object instead of a host

@@ -3985,6 +3985,8 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
     options->gpu_checks = 1;
   } else if (strcmp(argv[i], "--report-launches") == 0) {
     options->report_launches = 1;
+  } else if (strcmp(argv[i], "--report-gpu-types") == 0) {
+    options->report_gpu_types = 1;
   } else if (strcmp(argv[i], "--old") == 0 && i + 1 < argc) {
     options->swap_old_name = argv[++i];
   } else if (strcmp(argv[i], "--new") == 0 && i + 1 < argc) {
@@ -5892,7 +5894,8 @@ static int compile_emit_ptx(IRProgram *ir_program, ASTNode *program,
   PtxEmitOptions ptx_options = {options->ptx_target, options->ptx_isa_major,
                                 options->ptx_isa_minor,
                                 options->ptx_tensor_tuple_budget,
-                                options->gpu_checks};
+                                options->gpu_checks,
+                                options->report_gpu_types};
   int ok;
 
   if (!compile_optimize_device_ir(ir_program, program, options, profile)) {
@@ -7375,6 +7378,9 @@ void print_usage(const char *program_name) {
   printf("  --report-launches   List every dispatch site with the grid and\n"
          "                      block the compiler can fold, and the kernel\n"
          "                      each names\n");
+  printf("  --report-gpu-types  Say what the device address-space, alignment,\n"
+         "                      layout and uniformity analyses concluded, and\n"
+         "                      what they cost\n");
   printf("  --gpu-tensor-tuple-budget=N\n"
          "                      PTX resident-fragment ceiling (0=architecture\n"
          "                      default); enables measured resident/replay variants\n"

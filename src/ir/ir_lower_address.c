@@ -1262,6 +1262,13 @@ int ir_lower_lvalue_address(IRLoweringContext *context,
         load_data.lhs = ir_clone_operand_local(&slice_address);
         load_data.rhs = ir_operand_int(8);
         load_data.alias_class = IR_ALIAS_CLASS_POINTER;
+        /* The data pointer's own type is what says where the elements live,
+         * so a `T global[]` indexes through a global address rather than a
+         * generic one. */
+        if (array_type->field_types && array_type->field_count > 0) {
+          load_data.value_type =
+              mtlc_type_from_frontend(array_type->field_types[0]);
+        }
         lowered_base = ir_emit(context, function, &load_data);
         ir_operand_destroy(&load_data.lhs);
       }

@@ -230,6 +230,36 @@ as they arrive.
 Diagnostics are colored when stderr is a terminal. `NO_COLOR` turns that off
 and `CLICOLOR_FORCE` turns it on regardless.
 
+## Device types
+
+A GPU kernel states in its types where its memory lives and how tightly it is
+aligned, and the refusals name the thing that failed rather than the rule. A
+space mismatch names both spaces:
+
+```text
+error[E0004]: Type mismatch: expected 'float32 shared*', found 'float32 global*'
+  help: shared memory is wanted and this address is in global memory; the two
+        are different memories, so no cast makes one the other
+```
+
+An unproven alignment names the alignment the expression reached:
+
+```text
+error[E0003]: this address is 4-byte aligned and the cast claims 16; the offset
+              it is built from is not bounded to 16
+```
+
+A kernel parameter in a space a launch cannot supply names the space:
+
+```text
+error[E0003]: kernel parameter 'tile' is declared shared, and a launch has no
+              shared address to pass; declare it 'global', 'constant', or leave
+              it generic
+```
+
+`--report-gpu-types` prints what these analyses concluded and what they cost.
+[GPU offload](gpu.md) covers the surface.
+
 ## Optimization remarks
 
 Diagnostics say what is wrong with the program. Remarks say what the optimizer

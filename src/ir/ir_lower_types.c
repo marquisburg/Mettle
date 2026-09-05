@@ -177,6 +177,25 @@ int ir_build_slice_operand_from_array(IRLoweringContext *context,
   return value->name != NULL;
 }
 
+/* A device storage binding already holds the address of its storage: the
+   allocation produced a pointer, and there is no separate object to take the
+   address of. Decaying it is therefore the identity. */
+static int ir_symbol_is_address_space_allocation(const IRFunction *function,
+                                                 const char *name) {
+  if (!function || !name) {
+    return 0;
+  }
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *instruction = &function->instructions[i];
+    if (instruction->op == IR_OP_ADDRESS_SPACE_ALLOC &&
+        instruction->dest.kind == IR_OPERAND_SYMBOL && instruction->dest.name &&
+        strcmp(instruction->dest.name, name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 int ir_decay_array_operand_to_address(IRLoweringContext *context,
                                       IRFunction *function, IROperand *value,
                                       SourceLocation location) {
@@ -185,6 +204,9 @@ int ir_decay_array_operand_to_address(IRLoweringContext *context,
   if (!context || !function || !value ||
       value->kind != IR_OPERAND_SYMBOL || !value->name) {
     return 0;
+  }
+  if (ir_symbol_is_address_space_allocation(function, value->name)) {
+    return 1;
   }
   if (!ir_emit_address_of_symbol(context, function, value->name, location,
                                  &address)) {

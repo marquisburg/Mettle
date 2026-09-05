@@ -1,0 +1,3 @@
+kernel unlaunchable(tile: float32 shared*, out: float32 global*) {
+  out[thread.x] = tile[thread.x];
+}

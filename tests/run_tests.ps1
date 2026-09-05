@@ -2528,6 +2528,10 @@ $cases = @(
   @{ Name = "err_gpu_launch_record_abi"; Path = "tests/err_gpu_launch_record_abi.mettle"; ShouldSucceed = $false; Pattern = "GPU launch argument 0 has unsupported ABI type 'Message'" },
   @{ Name = "err_gpu_spirv_record_parameter"; Path = "tests/err_gpu_spirv_record_parameter.mettle"; ShouldSucceed = $false; Args = @("--emit-spirv"); Pattern = "no by-value record parameter ABI" },
   @{ Name = "err_gpu_spirv_record_return"; Path = "tests/err_gpu_spirv_record_return.mettle"; ShouldSucceed = $false; Args = @("--emit-spirv"); Pattern = "no by-value record call ABI" },
+  @{ Name = "err_gpu_space_mismatch"; Path = "tests/err_gpu_space_mismatch.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "shared memory is wanted and this address is in global memory" },
+  @{ Name = "err_gpu_kernel_shared_param"; Path = "tests/err_gpu_kernel_shared_param.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "kernel parameter 'tile' is declared shared, and a launch has no shared address to pass" },
+  @{ Name = "err_gpu_space_cast"; Path = "tests/err_gpu_space_cast.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "this address is in global memory and the cast claims shared memory" },
+  @{ Name = "err_gpu_align_unproven"; Path = "tests/err_gpu_align_unproven.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "this address is 4-byte aligned and the cast claims 16" },
   @{ Name = "err_gpu_no_kernel"; Path = "tests/err_gpu_no_kernel.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "GPU module has no kernel entry points" },
   @{ Name = "err_gpu_recursive_device_call"; Path = "tests/err_gpu_recursive_device_call.mettle"; ShouldSucceed = $false; Args = @("--emit-ptx"); Pattern = "GPU device call graph is recursive at 'recurse'" },
   @{ Name = "err_gpu_recursive_device_call_spirv"; Path = "tests/err_gpu_recursive_device_call.mettle"; ShouldSucceed = $false; Args = @("--emit-spirv"); Pattern = "GPU device call graph is recursive at 'recurse'" },
@@ -14671,6 +14675,60 @@ catch {
   $failed++
   Write-CaseResult -Name "tensor_matmul_offline" -Passed $false `
     -Reason $_.Exception.Message
+}
+
+# Address spaces and alignment in the pointer type. The spaced module must
+# name the memory behind every access and widen its aligned run into one vector
+# load; the unspaced twin beside it must come out exactly as the golden it had
+# before the feature existed, which is what says a kernel not using it pays
+# nothing.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $spacedPtx = Join-Path $tmpDir "gpu_address_spaces.ptx"
+  $spacedOut = & $CompilerPath -O --emit-ptx --gpu-arch=portable --report-gpu-types `
+    tests/gpu/address_spaces.mettle -o $spacedPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "spaced emit failed: $spacedOut" }
+  if ($spacedOut -notmatch "5 of 5 device accesses named their space, 0 stayed generic") {
+    throw "--report-gpu-types did not report a fully spaced module: $spacedOut"
+  }
+  if ($spacedOut -notmatch "1 vector groups formed from a declared alignment, 3 separate loads removed") {
+    throw "--report-gpu-types did not report the aligned vector group: $spacedOut"
+  }
+  $spacedText = Get-Content -Raw $spacedPtx
+  foreach ($line in ($spacedText -split "`n")) {
+    if ($line -match "^\s*(ld|st)\.(?!param|global|shared|const|local)") {
+      throw "a generic access survived in a fully spaced module: $line"
+    }
+  }
+  foreach ($required in @("ld\.global\.v4\.f32", "ld\.shared\.f32",
+                          "ld\.global\.nc\.f32", "st\.shared\.f32",
+                          "\.ptr\.global\.align 16")) {
+    if ($spacedText -notmatch $required) {
+      throw "spaced module is missing '$required'"
+    }
+  }
+
+  $genericPtx = Join-Path $tmpDir "gpu_address_spaces_generic.ptx"
+  $genericOut = & $CompilerPath -O --emit-ptx --gpu-arch=portable `
+    tests/gpu/address_spaces_generic.mettle -o $genericPtx 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "generic emit failed: $genericOut" }
+  $goldenPath = "tests/gpu/address_spaces_generic.ptx.golden"
+  $goldenText = (Get-Content -Raw $goldenPath) -replace "`r`n", "`n"
+  $emittedText = (Get-Content -Raw $genericPtx) -replace "`r`n", "`n"
+  if ($emittedText -ne $goldenText) {
+    throw "the unspaced twin's PTX changed; address spaces are not free"
+  }
+  if ($ptxas) {
+    $spacedCubin = Join-Path $tmpDir "gpu_address_spaces.cubin"
+    $asmOut = & $ptxas.Source -arch=compute_75 $spacedPtx -o $spacedCubin 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "ptxas rejected the spaced module: $asmOut" }
+  }
+  Write-CaseResult -Name "gpu_address_spaces" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "gpu_address_spaces" -Passed $false -Reason $_.Exception.Message
 }
 
 $total++

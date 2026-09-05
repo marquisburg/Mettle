@@ -1,0 +1,4 @@
+kernel renamed(rows: float32 global*, out: float32 global*) {
+  var tile: float32 shared* = (float32 shared*)rows;
+  out[thread.x] = tile[thread.x];
+}

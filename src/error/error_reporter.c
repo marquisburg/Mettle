@@ -928,6 +928,22 @@ void error_reporter_print_errors(ErrorReporter *reporter) {
   diag_style_output_end();
 }
 
+/* The space a pointer type's spelling names, or "generic" when it names none. */
+static const char *type_name_device_space(const char *name) {
+  static const char *const words[] = {"global", "shared", "constant", "local"};
+  size_t i;
+  if (!name) {
+    return "generic";
+  }
+  for (i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
+    const char *found = strstr(name, words[i]);
+    if (found && found > name && found[-1] == ' ') {
+      return words[i];
+    }
+  }
+  return "generic";
+}
+
 /* Truncate a source line for display if it exceeds SNIPPET_MAX_COLS.
    Returns a heap-allocated string; caller must free. */
 static char *snippet_truncate(const char *line) {
@@ -1299,6 +1315,31 @@ char *error_reporter_suggest_for_type_mismatch(const char *expected,
              "declared type to '%s'",
              actual, expected, actual);
     return mettle_strdup(buf);
+  }
+
+  /* Two device pointers that differ only in where their data lives. Naming
+     both spaces is the whole diagnosis: shared memory and global memory are
+     two different memories, and a pointer into one is not a pointer into the
+     other however the arithmetic that produced it looked. */
+  {
+    const char *expected_space = type_name_device_space(expected);
+    const char *actual_space = type_name_device_space(actual);
+    if (type_name_is_pointer(expected) && type_name_is_pointer(actual) &&
+        strcmp(expected_space, actual_space) != 0) {
+      if (strcmp(actual_space, "generic") == 0) {
+        snprintf(buf, sizeof(buf),
+                 "this address is %s and %s memory is wanted; say where it "
+                 "came from in its type, or claim it with (%s)value, which "
+                 "`mettle test` re-checks",
+                 actual_space, expected_space, expected);
+      } else {
+        snprintf(buf, sizeof(buf),
+                 "%s memory is wanted and this address is in %s memory; the "
+                 "two are different memories, so no cast makes one the other",
+                 expected_space, actual_space);
+      }
+      return mettle_strdup(buf);
+    }
   }
 
   /* Two pointers to different things: a cast is possible but rarely what the

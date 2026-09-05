@@ -432,6 +432,14 @@ Type *type_create(TypeKind kind, const char *name) {
   type->base_type = NULL;
   type->array_size = 0;
   type->view_rank = 0;
+  type->device_space = DEVICE_SPACE_NONE;
+  type->declared_align = 0;
+  type->view_layout = 0;
+  type->view_layout_param = 0;
+  type->view_extents[0] = 0;
+  type->view_extents[1] = 0;
+  type->view_extents[2] = 0;
+  type->view_extents[3] = 0;
   type->fn_param_types = NULL;
   type->fn_param_count = 0;
   type->fn_return_type = NULL;

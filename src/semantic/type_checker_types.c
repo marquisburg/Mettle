@@ -291,7 +291,9 @@ int type_checker_ensure_multi_return_type(TypeChecker *checker,
  * something that does not know N, and it is what `new T[n]` produces. The two
  * fields are ordinary ones, so `.length` and `.data` read the way any struct's
  * fields read, and the value copies and passes the way a 16-byte struct does. */
-Type *type_checker_slice_of(TypeChecker *checker, Type *element) {
+Type *type_checker_device_slice_of(TypeChecker *checker, Type *element,
+                                   unsigned char space, size_t align,
+                                   const char *qualifiers) {
   const char *element_name = NULL;
   size_t name_length = 0;
   char *name = NULL;
@@ -301,25 +303,31 @@ Type *type_checker_slice_of(TypeChecker *checker, Type *element) {
   if (!checker || !element) {
     return NULL;
   }
+  if (!qualifiers) {
+    qualifiers = "";
+  }
   element_name = element->name ? element->name : "?";
-  name_length = strlen(element_name) + 3;
+  name_length = strlen(element_name) + strlen(qualifiers) + 3;
   name = malloc(name_length);
   if (!name) {
     return NULL;
   }
-  snprintf(name, name_length, "%s[]", element_name);
+  snprintf(name, name_length, "%s%s[]", element_name, qualifiers);
 
   slice = type_create(TYPE_SLICE, name);
   free(name);
   if (!slice) {
     return NULL;
   }
-  data = type_checker_pointer_to(checker, element);
+  data = type_checker_device_pointer_to(checker, element, space, align,
+                                       qualifiers);
   if (!data || !type_alloc_fields(slice, 2)) {
     type_destroy(slice);
     return NULL;
   }
   slice->base_type = element;
+  slice->device_space = space;
+  slice->declared_align = align;
   slice->size = 16;
   slice->alignment = 8;
   type_set_field(slice, 0, "data", data, 0);
@@ -329,7 +337,14 @@ Type *type_checker_slice_of(TypeChecker *checker, Type *element) {
   return type_checker_canon_type(checker, slice);
 }
 
-Type *type_checker_view_of(TypeChecker *checker, Type *element, size_t rank) {
+Type *type_checker_slice_of(TypeChecker *checker, Type *element) {
+  return type_checker_device_slice_of(checker, element, DEVICE_SPACE_NONE, 0,
+                                      "");
+}
+
+Type *type_checker_device_view_of(TypeChecker *checker, Type *element,
+                                  size_t rank, unsigned char space,
+                                  size_t align, const char *qualifiers) {
   const char *element_name = NULL;
   size_t name_length = 0;
   char *name = NULL;
@@ -342,16 +357,20 @@ Type *type_checker_view_of(TypeChecker *checker, Type *element, size_t rank) {
   if (!checker || !element) {
     return NULL;
   }
+  if (!qualifiers) {
+    qualifiers = "";
+  }
   if (rank <= 1) {
-    return type_checker_slice_of(checker, element);
+    return type_checker_device_slice_of(checker, element, space, align,
+                                        qualifiers);
   }
   element_name = element->name ? element->name : "?";
-  name_length = strlen(element_name) + rank + 2;
+  name_length = strlen(element_name) + strlen(qualifiers) + rank + 2;
   name = malloc(name_length);
   if (!name) {
     return NULL;
   }
-  snprintf(name, name_length, "%s[", element_name);
+  snprintf(name, name_length, "%s%s[", element_name, qualifiers);
   for (size_t i = 1; i < rank; i++) {
     strcat(name, ",");
   }
@@ -362,7 +381,8 @@ Type *type_checker_view_of(TypeChecker *checker, Type *element, size_t rank) {
   if (!view) {
     return NULL;
   }
-  data = type_checker_pointer_to(checker, element);
+  data = type_checker_device_pointer_to(checker, element, space, align,
+                                       qualifiers);
   snprintf(extent_name, sizeof(extent_name), "int64[%zu]", rank);
   dims = type_checker_get_type_by_name(checker, extent_name);
   snprintf(extent_name, sizeof(extent_name), "int64[%zu]", rank - 1);
@@ -373,6 +393,8 @@ Type *type_checker_view_of(TypeChecker *checker, Type *element, size_t rank) {
   }
   view->base_type = element;
   view->view_rank = rank;
+  view->device_space = space;
+  view->declared_align = align;
   view->size = 16 * rank;
   view->alignment = 8;
   type_set_field(view, 0, "data", data, 0);
@@ -389,17 +411,27 @@ Type *type_checker_view_of(TypeChecker *checker, Type *element, size_t rank) {
  * works while the name is a plain identifier and fails the moment it is not:
  * `&slot` on a `fn(int32) -> int32` global asked for a type named
  * "fn(int32) -> int32*", which nothing registers. */
-Type *type_checker_pointer_to(TypeChecker *checker, Type *base) {
+Type *type_checker_view_of(TypeChecker *checker, Type *element, size_t rank) {
+  return type_checker_device_view_of(checker, element, rank, DEVICE_SPACE_NONE,
+                                     0, "");
+}
+
+Type *type_checker_device_pointer_to(TypeChecker *checker, Type *base,
+                                     unsigned char space, size_t align,
+                                     const char *qualifiers) {
   if (!checker || !base) {
     return NULL;
   }
+  if (!qualifiers) {
+    qualifiers = "";
+  }
   const char *base_name = base->name ? base->name : "ptr";
-  size_t pointer_name_len = strlen(base_name) + 2;
+  size_t pointer_name_len = strlen(base_name) + strlen(qualifiers) + 2;
   char *pointer_name = malloc(pointer_name_len);
   if (!pointer_name) {
     return NULL;
   }
-  snprintf(pointer_name, pointer_name_len, "%s*", base_name);
+  snprintf(pointer_name, pointer_name_len, "%s%s*", base_name, qualifiers);
 
   Type *existing = type_checker_get_type_by_name(checker, pointer_name);
   if (existing) {
@@ -413,11 +445,18 @@ Type *type_checker_pointer_to(TypeChecker *checker, Type *base) {
     return NULL;
   }
   pointer_type->base_type = base;
+  pointer_type->device_space = space;
+  pointer_type->declared_align = align;
   if (!type_compute_layout(pointer_type)) {
     type_destroy(pointer_type);
     return NULL;
   }
   return type_checker_canon_type(checker, pointer_type);
+}
+
+Type *type_checker_pointer_to(TypeChecker *checker, Type *base) {
+  return type_checker_device_pointer_to(checker, base, DEVICE_SPACE_NONE, 0,
+                                        "");
 }
 
 Type *type_checker_volatile_of(TypeChecker *checker, Type *base) {
@@ -484,6 +523,73 @@ Type *type_checker_volatile_of(TypeChecker *checker, Type *base) {
   }
 }
 
+/* Peel `global`, `shared`, `constant`, `local` and `align(N)` off the head of
+   a type spelling. The parser writes them in that order and always directly in
+   front of the pointer, slice or view suffix they qualify, so the tail of the
+   head is the whole search. Returns the length of what is left. */
+size_t type_checker_split_device_qualifiers(const char *name, size_t length,
+                                            unsigned char *space,
+                                            size_t *align) {
+  static const struct {
+    const char *word;
+    unsigned char space;
+  } spaces[] = {{" global", DEVICE_SPACE_GLOBAL},
+                {" shared", DEVICE_SPACE_SHARED},
+                {" constant", DEVICE_SPACE_CONSTANT},
+                {" local", DEVICE_SPACE_LOCAL}};
+  size_t i;
+  if (space) {
+    *space = DEVICE_SPACE_NONE;
+  }
+  if (align) {
+    *align = 0;
+  }
+  if (!name) {
+    return 0;
+  }
+  if (length > 8 && name[length - 1] == ')') {
+    size_t open = length - 1;
+    while (open > 0 && name[open] != '(') {
+      open--;
+    }
+    if (open >= 6 && strncmp(name + open - 5, "align(", 6) == 0 &&
+        name[open - 6] == ' ') {
+      long long value = strtoll(name + open + 1, NULL, 10);
+      if (value > 0 && align) {
+        *align = (size_t)value;
+      }
+      length = open - 6;
+    }
+  }
+  for (i = 0; i < sizeof(spaces) / sizeof(spaces[0]); i++) {
+    size_t word_length = strlen(spaces[i].word);
+    if (length > word_length &&
+        strncmp(name + length - word_length, spaces[i].word, word_length) == 0) {
+      if (space) {
+        *space = spaces[i].space;
+      }
+      length -= word_length;
+      break;
+    }
+  }
+  return length;
+}
+
+/* The spelling a qualified head had, minus the head itself: ` global align(16)`
+   out of `float32 global align(16)*`. The pointer type's own name is built back
+   from it so a diagnostic reads the way the source did. */
+static char *type_checker_qualifier_text(const char *name, size_t head_length,
+                                         size_t plain_length) {
+  size_t extra = head_length - plain_length;
+  char *text = malloc(extra + 1);
+  if (!text) {
+    return NULL;
+  }
+  memcpy(text, name + plain_length, extra);
+  text[extra] = '\0';
+  return text;
+}
+
 Type *type_checker_parse_pointer_type(TypeChecker *checker,
                                              const char *name) {
   if (!checker || !name) {
@@ -492,6 +598,10 @@ Type *type_checker_parse_pointer_type(TypeChecker *checker,
 
   size_t name_len = strlen(name);
   size_t pointer_depth = 0;
+  unsigned char space = DEVICE_SPACE_NONE;
+  size_t align = 0;
+  size_t plain_len;
+  char *qualifiers = NULL;
   while (name_len > 0 && name[name_len - 1] == '*') {
     pointer_depth++;
     name_len--;
@@ -501,43 +611,68 @@ Type *type_checker_parse_pointer_type(TypeChecker *checker,
     return NULL;
   }
 
-  char *base_name = malloc(name_len + 1);
-  if (!base_name) {
+  plain_len = type_checker_split_device_qualifiers(name, name_len, &space,
+                                                   &align);
+  if (plain_len == 0) {
     return NULL;
   }
-  memcpy(base_name, name, name_len);
-  base_name[name_len] = '\0';
+  if (plain_len != name_len) {
+    qualifiers = type_checker_qualifier_text(name, name_len, plain_len);
+    if (!qualifiers) {
+      return NULL;
+    }
+  }
+
+  char *base_name = malloc(plain_len + 1);
+  if (!base_name) {
+    free(qualifiers);
+    return NULL;
+  }
+  memcpy(base_name, name, plain_len);
+  base_name[plain_len] = '\0';
 
   Type *base_type = type_checker_get_type_by_name(checker, base_name);
   free(base_name);
   if (!base_type) {
+    free(qualifiers);
     return NULL;
   }
 
   Type *current = base_type;
   for (size_t i = 0; i < pointer_depth; i++) {
     const char *current_name = current && current->name ? current->name : "ptr";
-    size_t pointer_name_len = strlen(current_name) + 2;
+    const char *qualifier_text = (i == 0 && qualifiers) ? qualifiers : "";
+    size_t pointer_name_len =
+        strlen(current_name) + strlen(qualifier_text) + 2;
     char *pointer_name = malloc(pointer_name_len);
     if (!pointer_name) {
+      free(qualifiers);
       return NULL;
     }
-    snprintf(pointer_name, pointer_name_len, "%s*", current_name);
+    snprintf(pointer_name, pointer_name_len, "%s%s*", current_name,
+             qualifier_text);
 
     Type *pointer_type = type_create(TYPE_POINTER, pointer_name);
     free(pointer_name);
     if (!pointer_type) {
+      free(qualifiers);
       return NULL;
     }
 
     pointer_type->base_type = current;
+    if (i == 0) {
+      pointer_type->device_space = space;
+      pointer_type->declared_align = align;
+    }
     if (!type_compute_layout(pointer_type)) {
       type_destroy(pointer_type);
+      free(qualifiers);
       return NULL;
     }
     current = type_checker_canon_type(checker, pointer_type);
   }
 
+  free(qualifiers);
   return current;
 }
 
@@ -812,9 +947,19 @@ int type_checker_types_equal(const Type *lhs, const Type *rhs) {
 
   switch (lhs->kind) {
   case TYPE_POINTER:
-    return type_checker_types_equal(lhs->base_type, rhs->base_type);
+    return lhs->device_space == rhs->device_space &&
+           lhs->declared_align == rhs->declared_align &&
+           type_checker_types_equal(lhs->base_type, rhs->base_type);
   case TYPE_SLICE:
     return type_view_rank(lhs) == type_view_rank(rhs) &&
+           lhs->device_space == rhs->device_space &&
+           lhs->declared_align == rhs->declared_align &&
+           lhs->view_layout == rhs->view_layout &&
+           lhs->view_layout_param == rhs->view_layout_param &&
+           lhs->view_extents[0] == rhs->view_extents[0] &&
+           lhs->view_extents[1] == rhs->view_extents[1] &&
+           lhs->view_extents[2] == rhs->view_extents[2] &&
+           lhs->view_extents[3] == rhs->view_extents[3] &&
            type_checker_types_equal(lhs->base_type, rhs->base_type);
   case TYPE_ARRAY:
     return lhs->array_size == rhs->array_size &&
@@ -1132,16 +1277,35 @@ Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
       return element ? type_checker_slice_of(checker, element) : NULL;
     }
     if (length > 2 && name[length - 2] == '[' && name[length - 1] == ']') {
-      char *element_name = malloc(length - 1);
+      size_t head = length - 2;
+      unsigned char space = DEVICE_SPACE_NONE;
+      size_t align = 0;
+      size_t plain = type_checker_split_device_qualifiers(name, head, &space,
+                                                          &align);
+      char *element_name = malloc(plain + 1);
+      char *qualifiers = NULL;
       Type *element = NULL;
-      if (!element_name) {
+      Type *slice = NULL;
+      if (!element_name || plain == 0) {
+        free(element_name);
         return NULL;
       }
-      memcpy(element_name, name, length - 2);
-      element_name[length - 2] = '\0';
+      memcpy(element_name, name, plain);
+      element_name[plain] = '\0';
+      if (plain != head) {
+        qualifiers = type_checker_qualifier_text(name, head, plain);
+        if (!qualifiers) {
+          free(element_name);
+          return NULL;
+        }
+      }
       element = type_checker_get_type_by_name(checker, element_name);
       free(element_name);
-      return element ? type_checker_slice_of(checker, element) : NULL;
+      slice = element ? type_checker_device_slice_of(checker, element, space,
+                                                     align, qualifiers)
+                      : NULL;
+      free(qualifiers);
+      return slice;
     }
     if (length > 3 && name[length - 1] == ']' && name[length - 2] == ',') {
       size_t open = length - 2;
@@ -1150,16 +1314,34 @@ Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
       }
       if (name[open] == '[' && open > 0) {
         size_t rank = length - 1 - open;
-        char *element_name = malloc(open + 1);
+        unsigned char space = DEVICE_SPACE_NONE;
+        size_t align = 0;
+        size_t plain = type_checker_split_device_qualifiers(name, open, &space,
+                                                            &align);
+        char *element_name = malloc(plain + 1);
+        char *qualifiers = NULL;
         Type *element = NULL;
-        if (!element_name) {
+        Type *view = NULL;
+        if (!element_name || plain == 0) {
+          free(element_name);
           return NULL;
         }
-        memcpy(element_name, name, open);
-        element_name[open] = '\0';
+        memcpy(element_name, name, plain);
+        element_name[plain] = '\0';
+        if (plain != open) {
+          qualifiers = type_checker_qualifier_text(name, open, plain);
+          if (!qualifiers) {
+            free(element_name);
+            return NULL;
+          }
+        }
         element = type_checker_get_type_by_name(checker, element_name);
         free(element_name);
-        return element ? type_checker_view_of(checker, element, rank) : NULL;
+        view = element ? type_checker_device_view_of(checker, element, rank,
+                                                     space, align, qualifiers)
+                       : NULL;
+        free(qualifiers);
+        return view;
       }
     }
   }
@@ -1554,7 +1736,12 @@ static int type_checker_pointer_conversion_allowed(Type *dest_type,
      carried becomes the length the value carries. Nothing is lost, and it is
      the conversion that lets a function be written once for any extent. */
   if (dest_type->kind == TYPE_SLICE && src_type->kind == TYPE_ARRAY &&
-      dest_type->base_type) {
+      dest_type->base_type &&
+      /* An array says nothing about which device memory it sits in, so it
+         cannot become a view that claims one. Whichever space the array's
+         binding has is the one to write. */
+      dest_type->device_space == DEVICE_SPACE_NONE &&
+      dest_type->declared_align == 0) {
     Type *inner = src_type;
     size_t rank = type_view_rank(dest_type);
     for (size_t level = 0; level < rank; level++) {
@@ -1599,7 +1786,9 @@ static int type_checker_pointer_conversion_allowed(Type *dest_type,
 
   /* Allow array to pointer decay (T[N] to T*) for function arguments */
   if (dest_type->kind == TYPE_POINTER && src_type->kind == TYPE_ARRAY &&
-      dest_type->base_type && src_type->base_type &&
+      dest_type->device_space == DEVICE_SPACE_NONE &&
+      dest_type->declared_align == 0 && dest_type->base_type &&
+      src_type->base_type &&
       type_checker_types_equal(dest_type->base_type, src_type->base_type)) {
     return 1;
   }
@@ -1647,6 +1836,24 @@ int type_checker_is_assignable(TypeChecker *checker, Type *dest_type,
 
   if (type_checker_types_equal(dest_type, src_type)) {
     return 1;
+  }
+
+  /* A device pointer forgets where its data lives for free: `T global*` flows
+     into `T*`, which claims nothing. The other direction is a claim nobody
+     proved, so it needs the explicit cast the interpreter re-checks, and one
+     space where another is wanted is two different memories. An alignment
+     claim travels the same way: a stronger one satisfies a weaker one. */
+  if (dest_type->kind == TYPE_POINTER && src_type->kind == TYPE_POINTER &&
+      (dest_type->device_space || src_type->device_space ||
+       dest_type->declared_align || src_type->declared_align) &&
+      type_checker_types_equal(dest_type->base_type, src_type->base_type)) {
+    int space_ok = dest_type->device_space == src_type->device_space ||
+                   dest_type->device_space == DEVICE_SPACE_NONE ||
+                   dest_type->device_space == DEVICE_SPACE_GENERIC;
+    int align_ok = dest_type->declared_align == 0 ||
+                   (src_type->declared_align &&
+                    src_type->declared_align % dest_type->declared_align == 0);
+    return space_ok && align_ok;
   }
 
   /* A Mettle string can flow to a cstring by exposing its chars pointer. */
@@ -1775,6 +1982,21 @@ int type_checker_is_assignable_from(TypeChecker *checker, Type *dest_type,
     }
   }
   if (type_checker_is_assignable(checker, dest_type, src_type)) {
+    return 1;
+  }
+  /* An array whose binding names a device space decays into a pointer or a
+     view in that space. The space comes from where the storage was declared,
+     so `workgroup var tile: float32[256]` reaches a `float32 shared*`
+     parameter and nothing else does. */
+  if (checker && dest_type && src_type && src_expr &&
+      src_type->kind == TYPE_ARRAY && dest_type->declared_align == 0 &&
+      (dest_type->kind == TYPE_POINTER ||
+       (dest_type->kind == TYPE_SLICE && type_view_rank(dest_type) == 1)) &&
+      dest_type->device_space != DEVICE_SPACE_NONE &&
+      dest_type->base_type && src_type->base_type &&
+      type_checker_types_equal(dest_type->base_type, src_type->base_type) &&
+      type_checker_lvalue_device_space(checker, src_expr) ==
+          dest_type->device_space) {
     return 1;
   }
   if (checker && dest_type && src_type && dest_type->refined_base) {

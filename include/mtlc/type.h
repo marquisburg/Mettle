@@ -57,6 +57,21 @@ typedef struct MtlcType {
    * pointer behavior; device frontends should use mtlc_type_pointer_in(). */
   MtlcAddressSpace address_space;
 
+  /* Byte alignment the pointed-to address is proven to have, beyond the
+   * element type's own. Zero means nothing extra is known. A GPU backend uses
+   * it to widen a run of adjacent element loads into one vector access. */
+  size_t pointee_align;
+
+  /* How a static device view stores its elements, and the parameter the
+   * parameterised forms carry. MTLC_VIEW_LAYOUT_NONE is an ordinary
+   * host-shaped view. */
+  MtlcViewLayout view_layout;
+  unsigned view_layout_param;
+  /* Static extents of a device view, outermost first. A zero extent is a
+   * runtime one. */
+  size_t view_extents[4];
+  unsigned view_extent_count;
+
   struct MtlcType *base_type; /* pointer/array element type */
   size_t array_size;          /* element count for MTLC_TYPE_ARRAY */
 

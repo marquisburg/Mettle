@@ -196,9 +196,12 @@ dispatch vadd[work: n](da, db, dc, n);
 ```
 
 It checks the arguments against the declaration, and the grid follows from the
-declared block. Subgroup collectives, atomics, tensor core operations, `printf`
-inside a kernel, and an occupancy report at build time all work. See
-[GPU offload](docs/gpu.md).
+declared block. A kernel says in its types where its memory lives and how it is
+laid out: `float32 global align(16)*`, `float32 shared*`, `float32 constant*`,
+and the compiler proves the alignment rather than taking it, which is what lets
+four adjacent loads become one `ld.global.v4.f32`. Subgroup collectives,
+atomics, tensor core operations, `printf` inside a kernel, and an occupancy
+report at build time all work. See [GPU offload](docs/gpu.md).
 
 **Runs your code while it compiles.** `@test` functions run in the compiler and
 leave no binary behind. `mettle trace` interprets one function and prints its

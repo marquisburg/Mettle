@@ -146,6 +146,46 @@ static MtlcTypeKind translate_kind(TypeKind kind) {
   return MTLC_TYPE_VOID;
 }
 
+static MtlcAddressSpace translate_space(unsigned char space) {
+  switch (space) {
+  case DEVICE_SPACE_GENERIC:
+    return MTLC_ADDRESS_SPACE_GENERIC;
+  case DEVICE_SPACE_GLOBAL:
+    return MTLC_ADDRESS_SPACE_GLOBAL;
+  case DEVICE_SPACE_SHARED:
+    return MTLC_ADDRESS_SPACE_WORKGROUP;
+  case DEVICE_SPACE_CONSTANT:
+    return MTLC_ADDRESS_SPACE_CONSTANT;
+  case DEVICE_SPACE_LOCAL:
+    return MTLC_ADDRESS_SPACE_PRIVATE;
+  default:
+    return MTLC_ADDRESS_SPACE_DEFAULT;
+  }
+}
+
+static MtlcViewLayout translate_layout(unsigned char layout) {
+  switch (layout) {
+  case VIEW_LAYOUT_ROW:
+    return MTLC_VIEW_LAYOUT_ROW;
+  case VIEW_LAYOUT_COL:
+    return MTLC_VIEW_LAYOUT_COL;
+  case VIEW_LAYOUT_SWIZZLE64:
+    return MTLC_VIEW_LAYOUT_SWIZZLE64;
+  case VIEW_LAYOUT_SWIZZLE128:
+    return MTLC_VIEW_LAYOUT_SWIZZLE128;
+  case VIEW_LAYOUT_INTERLEAVE:
+    return MTLC_VIEW_LAYOUT_INTERLEAVE;
+  case VIEW_LAYOUT_FRAGMENT_A:
+    return MTLC_VIEW_LAYOUT_FRAGMENT_A;
+  case VIEW_LAYOUT_FRAGMENT_B:
+    return MTLC_VIEW_LAYOUT_FRAGMENT_B;
+  case VIEW_LAYOUT_FRAGMENT_C:
+    return MTLC_VIEW_LAYOUT_FRAGMENT_C;
+  default:
+    return MTLC_VIEW_LAYOUT_NONE;
+  }
+}
+
 /* Duplicate an array of frontend Type* into an array of translated MtlcType*. */
 static MtlcType **translate_type_array(struct Type **in, size_t count) {
   if (!in || count == 0) {
@@ -183,6 +223,16 @@ MtlcType *mtlc_type_from_frontend(const Type *type) {
   out->size = type->size;
   out->alignment = type->alignment;
   out->array_size = type->array_size;
+  out->address_space = translate_space(type->device_space);
+  out->pointee_align = type->declared_align;
+  out->view_layout = translate_layout(type->view_layout);
+  out->view_layout_param = type->view_layout_param;
+  for (size_t e = 0; e < 4; e++) {
+    out->view_extents[e] = type->view_extents[e];
+    if (type->view_extents[e]) {
+      out->view_extent_count = (unsigned)(e + 1);
+    }
+  }
 
   out->base_type = mtlc_type_from_frontend(type->base_type);
   out->fn_return_type = mtlc_type_from_frontend(type->fn_return_type);

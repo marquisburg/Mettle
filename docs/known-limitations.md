@@ -308,6 +308,22 @@ against the length the value holds, under the same rule: guarded in normal
 builds, dropped under `--release`, kept under `--safe`. Pointers arriving from
 C or from inline assembly can be invalid in ways nothing can prove.
 
+## Device address spaces and alignment
+
+A device pointer's space is a fact the type carries, and the compiler moves it
+along assignments, index arithmetic and address-of. It does not move it through
+an integer: a pointer cast to `int64` and back arrives generic, and the space
+has to be written again on the way out.
+
+An `align(N)` claim is proven from the pointer it was built on and the offset
+added to it. An offset held in a mutable local carries no proof of its own, so
+either write the arithmetic where the claim is, or give the local a declared
+type whose predicate says the divisor.
+
+Adjacent loads widen into one `ld.global.v2`/`ld.global.v4` only inside a
+single block and only through a pointer whose declared alignment covers the
+whole access. Stores are never widened.
+
 ## Vectorization
 
 Reductions over `^`, `&`, and `|` have no kernel and are reported as serial.

@@ -184,6 +184,33 @@ so a function that names one keeps every value in memory.
 [Bare metal](bare-metal.md) covers what the compiler guarantees and what it
 costs.
 
+### Device address spaces and alignment
+
+A pointer, slice or view used on a GPU says which memory it names. The
+qualifier sits between the element type and the suffix:
+
+```mettle
+var rows: float32 global align(16)*;
+var tile: float32 shared*;
+var table: float32 constant*;
+var scratch: int32 local*;
+var window: float32 global[];
+```
+
+`global` is the device's own memory, `shared` a workgroup's tile, `constant`
+memory a kernel only reads, and `local` a work item's private frame. A plain
+`T*` is generic: it claims nothing, and a spaced pointer flows into one for
+free. The other direction is a claim, so it is an explicit cast the interpreter
+re-checks; a pointer in one named space never becomes a pointer in another.
+
+`align(N)` claims the address is N-byte aligned, with N a power of two up to
+4096. The claim is proven where the pointer is built -- from a `shared`
+declaration, from a pointer that already carried an alignment, or from the
+arithmetic of the offset, which a declared type such as
+`type Quad = int32 where value % 4 == 0;` can carry through a local. An
+unproven claim is refused with the alignment the expression reached. What a
+proven one buys is in [GPU offload](gpu.md#address-spaces-and-alignment-in-the-pointer-type).
+
 ## Arrays
 
 `T[N]` is N elements laid out end to end. The size is part of the type, and it

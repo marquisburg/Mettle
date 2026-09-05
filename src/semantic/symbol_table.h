@@ -44,6 +44,32 @@ typedef enum {
   TYPE_SEQUENCE
 } TypeKind;
 
+/* Where a pointer's data lives on a device. A frontend type carries it so the
+ * spelling `T global*` survives into the backend descriptor, where the GPU
+ * emitters read it. DEVICE_SPACE_NONE is an ordinary host pointer. */
+typedef enum {
+  DEVICE_SPACE_NONE = 0,
+  DEVICE_SPACE_GENERIC,
+  DEVICE_SPACE_GLOBAL,
+  DEVICE_SPACE_SHARED,
+  DEVICE_SPACE_CONSTANT,
+  DEVICE_SPACE_LOCAL
+} DeviceSpace;
+
+/* How a static device view stores its elements. `float16[128, 64] layout row`
+ * and its siblings; the names live in std/gpu as data and resolve to these. */
+typedef enum {
+  VIEW_LAYOUT_NONE = 0,
+  VIEW_LAYOUT_ROW,
+  VIEW_LAYOUT_COL,
+  VIEW_LAYOUT_SWIZZLE64,
+  VIEW_LAYOUT_SWIZZLE128,
+  VIEW_LAYOUT_INTERLEAVE,
+  VIEW_LAYOUT_FRAGMENT_A,
+  VIEW_LAYOUT_FRAGMENT_B,
+  VIEW_LAYOUT_FRAGMENT_C
+} ViewLayout;
+
 typedef struct Type {
   TypeKind kind;
   char *name;
@@ -56,6 +82,19 @@ typedef struct Type {
   struct Type *base_type; // For pointers and arrays
   size_t array_size;      // For arrays
   size_t view_rank;
+  /* `T global*`, `T shared*`, `T constant*`, `T local*`: the space the data
+   * this pointer, slice or view names lives in. A slice and a view carry the
+   * space of their data pointer. */
+  unsigned char device_space;
+  /* `align(N)`: the byte alignment the pointed-to address is proven to have.
+   * 0 means only the element type's own alignment is known. */
+  size_t declared_align;
+  /* The layout a static view's elements are stored in. */
+  unsigned char view_layout;
+  /* interleave(k) and the fragment forms carry one parameter. */
+  unsigned short view_layout_param;
+  /* Static extents for `T[128, 64]`. A zero extent is a runtime one. */
+  size_t view_extents[4];
   struct Type **fn_param_types; // For function pointers
   size_t fn_param_count;        // For function pointers
   struct Type *fn_return_type;  // For function pointers

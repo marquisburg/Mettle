@@ -13,6 +13,9 @@ typedef struct {
   /* --gpu-checks: emit the trap for `gpu_assert`. Off by default, so a
    * shipped kernel pays nothing for assertions left in the source. */
   int checks;
+  /* --report-gpu-types: print what the address-space, alignment, layout and
+   * uniformity analyses concluded, and what they cost. */
+  int report_types;
 } PtxEmitOptions;
 
 /* Lower an IR program to NVIDIA PTX text (one `.visible .entry` per kernel),

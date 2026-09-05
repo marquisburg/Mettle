@@ -4,10 +4,265 @@
 #include "monomorphize.h"
 #include "string_intern.h"
 
+/* The largest power of two that divides an integer expression, as far as the
+   source says. 1 means nothing is known. This is what an alignment claim is
+   proven from: `&a[i * 4]` on a 4-byte element is 16-byte aligned when `a` is,
+   because the offset is a multiple of 16 whatever `i` holds. */
+size_t type_checker_expression_multiple_of(TypeChecker *checker,
+                                           ASTNode *expression, int depth) {
+  long long folded = 0;
+  if (!expression || depth > 16) {
+    return 1;
+  }
+  if (type_checker_eval_integer_constant_with_checker(checker, expression,
+                                                      &folded)) {
+    unsigned long long magnitude =
+        folded < 0 ? (unsigned long long)(-folded) : (unsigned long long)folded;
+    if (magnitude == 0) {
+      return 4096;
+    }
+    return (size_t)(magnitude & (~magnitude + 1));
+  }
+  /* A declared type may say it: `type Quad = int32 where value % 4 == 0;` is
+     a divisor the checker reads off the type rather than off the arithmetic,
+     which is how an offset held in a local still carries its proof. */
+  if (expression->resolved_type && expression->resolved_type->refinement) {
+    ASTNode *predicate = expression->resolved_type->refinement;
+    if (predicate->type == AST_BINARY_EXPRESSION) {
+      BinaryExpression *equality = (BinaryExpression *)predicate->data;
+      long long zero = 0;
+      if (equality && equality->operator &&
+          strcmp(equality->operator, "==") == 0 && equality->left &&
+          equality->left->type == AST_BINARY_EXPRESSION && equality->right &&
+          type_checker_eval_integer_constant_with_checker(checker,
+                                                          equality->right,
+                                                          &zero) &&
+          zero == 0) {
+        BinaryExpression *modulo = (BinaryExpression *)equality->left->data;
+        long long divisor = 0;
+        if (modulo && modulo->operator && strcmp(modulo->operator, "%") == 0 &&
+            type_checker_eval_integer_constant_with_checker(
+                checker, modulo->right, &divisor) &&
+            divisor > 0 && divisor <= 4096 &&
+            (divisor & (divisor - 1)) == 0) {
+          return (size_t)divisor;
+        }
+      }
+    }
+  }
+  switch (expression->type) {
+  case AST_BINARY_EXPRESSION: {
+    BinaryExpression *binary = (BinaryExpression *)expression->data;
+    size_t left, right;
+    if (!binary || !binary->operator) {
+      return 1;
+    }
+    left = type_checker_expression_multiple_of(checker, binary->left, depth + 1);
+    right =
+        type_checker_expression_multiple_of(checker, binary->right, depth + 1);
+    if (strcmp(binary->operator, "*") == 0) {
+      return left > 4096 / right ? 4096 : left * right;
+    }
+    if (strcmp(binary->operator, "+") == 0 ||
+        strcmp(binary->operator, "-") == 0 ||
+        strcmp(binary->operator, "|") == 0) {
+      return left < right ? left : right;
+    }
+    if (strcmp(binary->operator, "<<") == 0) {
+      long long shift = 0;
+      if (type_checker_eval_integer_constant_with_checker(checker, binary->right,
+                                                          &shift) &&
+          shift >= 0 && shift < 12) {
+        size_t scaled = left << shift;
+        return scaled > 4096 ? 4096 : scaled;
+      }
+      return 1;
+    }
+    return 1;
+  }
+  case AST_CAST_EXPRESSION: {
+    CastExpression *cast = (CastExpression *)expression->data;
+    return cast ? type_checker_expression_multiple_of(checker, cast->operand,
+                                                      depth + 1)
+                : 1;
+  }
+  default:
+    break;
+  }
+  return 1;
+}
+
+/* The alignment an address expression is known to have. An `align(N)` claim is
+   accepted only where this reaches N; the number it did reach is what the
+   refusal reports. */
+size_t type_checker_address_alignment(TypeChecker *checker, ASTNode *expression,
+                                      int depth) {
+  if (!checker || !expression || depth > 16) {
+    return 0;
+  }
+  if (expression->type == AST_CAST_EXPRESSION) {
+    CastExpression *cast = (CastExpression *)expression->data;
+    if (expression->resolved_type && expression->resolved_type->declared_align) {
+      return expression->resolved_type->declared_align;
+    }
+    return cast ? type_checker_address_alignment(checker, cast->operand,
+                                                 depth + 1)
+                : 0;
+  }
+  if (expression->resolved_type && expression->resolved_type->declared_align) {
+    return expression->resolved_type->declared_align;
+  }
+  if (expression->type == AST_UNARY_EXPRESSION) {
+    UnaryExpression *unary = (UnaryExpression *)expression->data;
+    if (unary && unary->operator && strcmp(unary->operator, "&") == 0 &&
+        unary->operand && unary->operand->type == AST_INDEX_EXPRESSION) {
+      ArrayIndexExpression *index = (ArrayIndexExpression *)unary->operand->data;
+      Type *base = index && index->array ? index->array->resolved_type : NULL;
+      Type *element = base ? base->base_type : NULL;
+      size_t base_align = 0;
+      size_t stride = element ? element->size : 0;
+      size_t offset_multiple;
+      if (!index || !base || !element || stride == 0) {
+        return 0;
+      }
+      if (base->declared_align) {
+        base_align = base->declared_align;
+      } else if (type_checker_lvalue_device_space(checker, index->array) ==
+                 DEVICE_SPACE_SHARED) {
+        /* A workgroup tile is emitted 32-byte aligned, which is what makes a
+           swizzled tile's vector accesses legal. */
+        base_align = 32;
+      } else if (base->kind == TYPE_ARRAY) {
+        base_align = base->alignment ? base->alignment : element->size;
+      } else if (base->kind == TYPE_POINTER || base->kind == TYPE_SLICE) {
+        /* Nothing was declared, so all that is known is that the elements are
+           where their own type puts them. */
+        base_align = element->alignment ? element->alignment : element->size;
+      }
+      if (!base_align) {
+        return 0;
+      }
+      offset_multiple =
+          type_checker_expression_multiple_of(checker, index->index, 0);
+      if (offset_multiple > 4096 / (stride ? stride : 1)) {
+        offset_multiple = 4096;
+      } else {
+        offset_multiple *= stride;
+      }
+      return base_align < offset_multiple ? base_align : offset_multiple;
+    }
+  }
+  if (expression->type == AST_IDENTIFIER) {
+    Identifier *identifier = (Identifier *)expression->data;
+    Symbol *symbol = identifier && identifier->name
+                         ? symbol_table_lookup(checker->symbol_table,
+                                               identifier->name)
+                         : NULL;
+    if (symbol && symbol->is_address_space_binding &&
+        symbol->address_space == MTLC_ADDRESS_SPACE_WORKGROUP) {
+      return 32;
+    }
+    if (symbol && symbol->type && symbol->type->kind == TYPE_ARRAY) {
+      return symbol->type->alignment;
+    }
+  }
+  return 0;
+}
+
+/* The word a device space is written with, with the leading space the type
+   spelling needs: ` global`, ` shared`, ` constant`, ` local`. */
+const char *type_checker_device_space_word(unsigned char space) {
+  switch (space) {
+  case DEVICE_SPACE_GLOBAL:
+    return " global";
+  case DEVICE_SPACE_SHARED:
+    return " shared";
+  case DEVICE_SPACE_CONSTANT:
+    return " constant";
+  case DEVICE_SPACE_LOCAL:
+    return " local";
+  case DEVICE_SPACE_GENERIC:
+  default:
+    return "";
+  }
+}
+
+static unsigned char type_checker_space_from_mtlc(MtlcAddressSpace space) {
+  switch (space) {
+  case MTLC_ADDRESS_SPACE_GLOBAL:
+    return DEVICE_SPACE_GLOBAL;
+  case MTLC_ADDRESS_SPACE_WORKGROUP:
+    return DEVICE_SPACE_SHARED;
+  case MTLC_ADDRESS_SPACE_CONSTANT:
+    return DEVICE_SPACE_CONSTANT;
+  case MTLC_ADDRESS_SPACE_PRIVATE:
+    return DEVICE_SPACE_LOCAL;
+  case MTLC_ADDRESS_SPACE_GENERIC:
+    return DEVICE_SPACE_GENERIC;
+  default:
+    return DEVICE_SPACE_NONE;
+  }
+}
+
+/* Where the storage an lvalue names lives. Taking an address inside a `shared`
+   tile yields a shared pointer, and indexing a `T global*` yields a global
+   one, so `&a[i]` keeps the fact the declaration stated. */
+unsigned char type_checker_lvalue_device_space(TypeChecker *checker,
+                                               ASTNode *node) {
+  int depth = 0;
+  while (node && depth++ < 32) {
+    switch (node->type) {
+    case AST_IDENTIFIER: {
+      Identifier *identifier = (Identifier *)node->data;
+      Symbol *symbol = identifier && identifier->name
+                           ? symbol_table_lookup(checker->symbol_table,
+                                                 identifier->name)
+                           : NULL;
+      if (symbol && symbol->is_address_space_binding) {
+        return type_checker_space_from_mtlc(symbol->address_space);
+      }
+      if (symbol && symbol->type && symbol->type->device_space) {
+        return symbol->type->device_space;
+      }
+      return DEVICE_SPACE_NONE;
+    }
+    case AST_INDEX_EXPRESSION: {
+      ArrayIndexExpression *index = (ArrayIndexExpression *)node->data;
+      Type *base = index && index->array ? index->array->resolved_type : NULL;
+      if (base && base->device_space) {
+        return base->device_space;
+      }
+      node = index ? index->array : NULL;
+      break;
+    }
+    case AST_MEMBER_ACCESS: {
+      MemberAccess *member = (MemberAccess *)node->data;
+      node = member ? member->object : NULL;
+      break;
+    }
+    case AST_UNARY_EXPRESSION: {
+      UnaryExpression *unary = (UnaryExpression *)node->data;
+      Type *operand = unary && unary->operand ? unary->operand->resolved_type
+                                              : NULL;
+      if (unary && unary->operator && strcmp(unary->operator, "*") == 0 &&
+          operand && operand->device_space) {
+        return operand->device_space;
+      }
+      node = unary ? unary->operand : NULL;
+      break;
+    }
+    default:
+      return DEVICE_SPACE_NONE;
+    }
+  }
+  return DEVICE_SPACE_NONE;
+}
+
 /* `p->m()` and `(*p).m()` both parse to a method call whose object is a deref of
  * a pointer-to-struct. That spelling selects the lifted method that takes the
  * receiver as a pointer, so the call passes `p` itself and the method can write
  * through it. Returns the pointer expression, or NULL for a value receiver. */
+
 static ASTNode *type_checker_pointer_receiver(TypeChecker *checker,
                                               ASTNode *object) {
   UnaryExpression *unary = NULL;
@@ -2257,14 +2512,21 @@ static Type *type_checker_infer_unary(TypeChecker *checker,
 
       const char *operand_name =
           operand_type->name ? operand_type->name : "unknown";
-      size_t pointer_name_len = strlen(operand_name) + 2;
-      char *pointer_name = malloc(pointer_name_len);
+      unsigned char operand_space = DEVICE_SPACE_NONE;
+      const char *space_word = "";
+      size_t pointer_name_len;
+      char *pointer_name;
+      operand_space = type_checker_lvalue_device_space(checker, unop->operand);
+      space_word = type_checker_device_space_word(operand_space);
+      pointer_name_len = strlen(operand_name) + strlen(space_word) + 2;
+      pointer_name = malloc(pointer_name_len);
       if (!pointer_name) {
         type_checker_set_error_at_location(checker, expression->location,
                                            "Memory allocation failed");
         return NULL;
       }
-      snprintf(pointer_name, pointer_name_len, "%s*", operand_name);
+      snprintf(pointer_name, pointer_name_len, "%s%s*", operand_name,
+               space_word);
 
       Type *pointer_type = type_checker_get_type_by_name(checker, pointer_name);
       free(pointer_name);
@@ -2272,7 +2534,8 @@ static Type *type_checker_infer_unary(TypeChecker *checker,
         /* The spelling is not a registered name, which is ordinary for a
          * function-pointer or other structural operand. Build the pointer
          * from the type instead of from its spelling. */
-        pointer_type = type_checker_pointer_to(checker, operand_type);
+        pointer_type = type_checker_device_pointer_to(
+            checker, operand_type, operand_space, 0, space_word);
       }
       if (!pointer_type) {
         type_checker_set_error_at_location(checker, expression->location,
@@ -3784,6 +4047,40 @@ static Type *type_checker_infer_cast(TypeChecker *checker,
                target_type->name);
       type_checker_set_error_at_location(checker, expression->location,
                                          error_msg);
+      return NULL;
+    }
+
+    /* A cast may claim a space nobody stated, and `mettle test` re-checks the
+       claim when it runs the grid. It may not rename one space to another: no
+       arithmetic turns a shared address into a global one. */
+    if (operand_type->kind == TYPE_POINTER && target_type->kind == TYPE_POINTER &&
+        operand_type->device_space != DEVICE_SPACE_NONE &&
+        operand_type->device_space != DEVICE_SPACE_GENERIC &&
+        target_type->device_space != DEVICE_SPACE_NONE &&
+        target_type->device_space != DEVICE_SPACE_GENERIC &&
+        operand_type->device_space != target_type->device_space) {
+      type_checker_set_error_at_location(
+          checker, expression->location,
+          "this address is in%s memory and the cast claims%s memory; the two "
+          "are different memories, so no cast makes one the other",
+          type_checker_device_space_word(operand_type->device_space),
+          type_checker_device_space_word(target_type->device_space));
+      return NULL;
+    }
+
+    /* An alignment is a fact about an address, so a cast may only restate one
+       the compiler can already see. Claiming a stronger one is refused with
+       the alignment the expression actually reached. */
+    if (target_type->declared_align &&
+        target_type->declared_align >
+            type_checker_address_alignment(checker, cast_expr->operand, 0)) {
+      size_t reached =
+          type_checker_address_alignment(checker, cast_expr->operand, 0);
+      type_checker_set_error_at_location(
+          checker, expression->location,
+          "this address is %zu-byte aligned and the cast claims %zu; the "
+          "offset it is built from is not bounded to %zu",
+          reached, target_type->declared_align, target_type->declared_align);
       return NULL;
     }
 

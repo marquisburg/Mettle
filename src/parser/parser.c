@@ -3207,6 +3207,106 @@ static char *parser_parse_type_arguments(Parser *parser, char *type_name) {
   return full_type;
 }
 
+/* `T global*`, `T shared align(16)*`, `T constant[]`: the space a device
+   pointer, slice or view names, and the alignment its address is claimed to
+   have. Both are contextual: `global` is only a qualifier where a pointer,
+   slice or view suffix follows it, so an identifier named `global` elsewhere
+   still reads as one. */
+static const char *parser_device_space_word(Parser *parser) {
+  static const char *const words[] = {"global", "shared", "constant", "local"};
+  size_t i;
+  if (!parser_is_identifier_like(parser->current_token.type) ||
+      !parser->current_token.value) {
+    return NULL;
+  }
+  for (i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
+    if (strcmp(parser->current_token.value, words[i]) == 0) {
+      return words[i];
+    }
+  }
+  return NULL;
+}
+
+static int parser_token_starts_pointer_suffix(TokenType type) {
+  return type == TOKEN_MULTIPLY || type == TOKEN_LBRACKET;
+}
+
+static char *parser_append_qualifier(char *type_name, const char *word) {
+  size_t length;
+  char *next;
+  if (!type_name || !word) {
+    free(type_name);
+    return NULL;
+  }
+  length = strlen(type_name) + strlen(word) + 2;
+  next = malloc(length);
+  if (!next) {
+    free(type_name);
+    return NULL;
+  }
+  snprintf(next, length, "%s %s", type_name, word);
+  free(type_name);
+  return next;
+}
+
+static char *parser_parse_space_qualifiers(Parser *parser, char *type_name) {
+  const char *word;
+  if (!type_name) {
+    return NULL;
+  }
+  word = parser_device_space_word(parser);
+  if (word && (parser_token_starts_pointer_suffix(parser->peek_token.type) ||
+               (parser_is_identifier_like(parser->peek_token.type) &&
+                parser->peek_token.value &&
+                strcmp(parser->peek_token.value, "align") == 0))) {
+    parser_advance(parser);
+    type_name = parser_append_qualifier(type_name, word);
+    if (!type_name) {
+      return NULL;
+    }
+  }
+  if (parser_at_contextual_keyword(parser, "align", TOKEN_LPAREN)) {
+    char written[32];
+    long long value;
+    char *end = NULL;
+    parser_advance(parser);
+    parser_advance(parser);
+    if (parser->current_token.type != TOKEN_NUMBER ||
+        !parser->current_token.value) {
+      parser_set_error(parser, "Expected a byte count inside 'align(...)'");
+      free(type_name);
+      return NULL;
+    }
+    value = strtoll(parser->current_token.value, &end, 0);
+    if (value <= 0 || value > 4096 || (value & (value - 1)) != 0) {
+      parser_set_error(parser,
+                       "'align(N)' takes a power of two from 1 to 4096");
+      free(type_name);
+      return NULL;
+    }
+    parser_advance(parser);
+    if (parser->current_token.type != TOKEN_RPAREN) {
+      parser_set_error(parser, "Expected ')' to close 'align('");
+      free(type_name);
+      return NULL;
+    }
+    parser_advance(parser);
+    snprintf(written, sizeof(written), "align(%lld)", value);
+    type_name = parser_append_qualifier(type_name, written);
+    if (!type_name) {
+      return NULL;
+    }
+    if (!parser_token_starts_pointer_suffix(parser->current_token.type)) {
+      parser_set_error(parser,
+                       "'align(N)' qualifies a pointer, a slice or a view; "
+                       "write it as 'T align(16)*' or 'T align(16)[]'");
+      free(type_name);
+      return NULL;
+    }
+  }
+  return type_name;
+}
+
 static char *parser_parse_pointer_suffix(Parser *parser, char *type_name) {
   while (parser->current_token.type == TOKEN_MULTIPLY) {
     size_t next_len = strlen(type_name) + 2;
@@ -3409,6 +3509,10 @@ static char *parser_parse_type_annotation_ex(Parser *parser, int allow_array) {
     return NULL;
   }
   type_name = parser_parse_type_arguments(parser, type_name);
+  if (!type_name) {
+    return NULL;
+  }
+  type_name = parser_parse_space_qualifiers(parser, type_name);
   if (!type_name) {
     return NULL;
   }
