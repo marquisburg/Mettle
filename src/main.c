@@ -969,6 +969,10 @@ static int object_needs_tracy_helpers(const char *object_path) {
 }
 
 
+/* mettle_link_elf_native: the failure was already reported in full and no
+ * fallback link should follow it. */
+#define MTLC_ELF_LINK_REPORTED 2
+
 #define METTLE_DEFAULT_ELF_INTERPRETER "/lib64/ld-linux-x86-64.so.2"
 
 static int mettle_elf_dynamic_link_requested(const CompilerOptions *options) {
@@ -1204,21 +1208,33 @@ static int mettle_link_elf_native(const char *startup_object,
 
   if (!link_resolution_build(object_paths, count, &resolution_options,
                              &resolution, &error_message)) {
-    fprintf(stderr, "Error: Native ELF link failed: %s\n",
-            error_message ? error_message : "symbol resolution failed");
+    int unresolved = error_message &&
+                     strstr(error_message, "Unresolved external symbol") != NULL;
+    if (unresolved) {
+      fprintf(stderr, "Error: %s\n", error_message);
+    } else {
+      fprintf(stderr, "Error: Native ELF link failed: %s\n",
+              error_message ? error_message : "symbol resolution failed");
+    }
     free(error_message);
     mettle_free_shared_libraries(library_paths, library_count);
-    return 1;
+    return unresolved ? MTLC_ELF_LINK_REPORTED : 1;
   }
 
   if (!elf_image_emit_executable(resolution, executable_filename,
                                  &emission_options, &error_message)) {
-    fprintf(stderr, "Error: Native ELF link failed: %s\n",
-            error_message ? error_message : "image emission failed");
+    int unresolved = error_message &&
+                     strstr(error_message, "Unresolved external symbol") != NULL;
+    if (unresolved) {
+      fprintf(stderr, "Error: %s\n", error_message);
+    } else {
+      fprintf(stderr, "Error: Native ELF link failed: %s\n",
+              error_message ? error_message : "image emission failed");
+    }
     free(error_message);
     link_resolution_destroy(resolution);
     mettle_free_shared_libraries(library_paths, library_count);
-    return 1;
+    return unresolved ? MTLC_ELF_LINK_REPORTED : 1;
   }
 
   free(error_message);
@@ -1453,14 +1469,22 @@ static int mettle_link_elf_executable(const char *object_filename,
     goto cleanup;
   }
 
+  int native_status = 1;
   if (!(options && options->link_argument_count > 0) &&
-      !mettle_elf_external_linker_requested(options) &&
-      mettle_link_elf_native(startup_object, object_filename,
-                             executable_filename, freestanding_object,
-                             (const char *const *)extra_objects,
-                             extra_object_count,
-                             !mettle_elf_keep_symbols(options), options) == 0) {
-    result = 0;
+      !mettle_elf_external_linker_requested(options)) {
+    native_status = mettle_link_elf_native(
+        startup_object, object_filename, executable_filename,
+        freestanding_object, (const char *const *)extra_objects,
+        extra_object_count, !mettle_elf_keep_symbols(options), options);
+    if (native_status == 0) {
+      result = 0;
+    }
+  }
+
+  /* A name nothing provides is not something a second linker can find. Falling
+   * back would fail the same way and bury the diagnostic under its noise. */
+  if (native_status == MTLC_ELF_LINK_REPORTED) {
+    goto cleanup;
   }
 
   /* A link that binds shared libraries, or that emits one, has no fallback:

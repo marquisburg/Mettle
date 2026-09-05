@@ -13,6 +13,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* safety.c asks the runtime where this thread's stack tops out. The
+ * freestanding runtime that answers it is not part of this harness. */
+void *mettle_thread_stack_high(void) { return NULL; }
+
 static jmp_buf g_landing;
 static int g_trapped;
 static char g_message[512];
