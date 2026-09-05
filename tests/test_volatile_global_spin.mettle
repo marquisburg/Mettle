@@ -1,0 +1,54 @@
+import "std/io";
+
+var gate_flag: volatile int32 = 0;
+var gate_seen: volatile int32 = 0;
+
+fn arm() {
+  gate_flag = 0;
+  gate_seen = 0;
+}
+
+fn spin_until_set(limit: int32) -> int32 {
+  var turns: int32 = 0;
+  while (gate_flag == 0) {
+    turns = turns + 1;
+    gate_seen = turns;
+    if (turns >= limit) { return turns; }
+  }
+  return turns;
+}
+
+fn release() {
+  gate_flag = 1;
+}
+
+fn count_reads(n: int32) -> int32 {
+  var total: int32 = 0;
+  var i: int32 = 0;
+  while (i < n) {
+    total = total + gate_flag;
+    i = i + 1;
+  }
+  return total;
+}
+
+fn main() -> int32 {
+  var fails: int32 = 0;
+
+  arm();
+  var spun: int32 = spin_until_set(8);
+  if (spun != 8) { println("a flag never set should spin to the limit, got {spun}"); fails = fails + 1; }
+  if (gate_seen != 8) { println("the volatile write was not observable, got {gate_seen}"); fails = fails + 1; }
+
+  release();
+  spun = spin_until_set(8);
+  if (spun != 0) { println("a set flag should not spin, got {spun}"); fails = fails + 1; }
+
+  arm();
+  if (count_reads(16) != 0) { println("reads of a cleared flag should sum to 0"); fails = fails + 1; }
+  release();
+  if (count_reads(16) != 16) { println("every read must reach memory, not a cached register"); fails = fails + 1; }
+
+  println("fails={fails}");
+  return fails;
+}

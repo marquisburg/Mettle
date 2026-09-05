@@ -3131,7 +3131,7 @@ int mir_encode(MirFunction *fn) {
       if (!code_generator_binary_emit_simd_affine_map_f32_inline(
               &ctx->code, (unsigned)in->dst.imm, (unsigned)in->a.imm,
               (unsigned)in->b.imm, (in->cc & 1) != 0, (in->cc & 2) != 0,
-              (in->cc & 4) != 0)) {
+              (in->cc & 4) != 0, (in->cc & 8) != 0)) {
         ok = enc_err(fn, "out of memory emitting inline affine-map kernel");
       }
       break;

@@ -736,11 +736,19 @@ int code_generator_binary_emit_simd_affine_map_f32_loop(BinaryCodeBuffer *b,
  * coefficients from their operands instead and shares only the loop. */
 int code_generator_binary_emit_simd_affine_map_f32_inline(
     BinaryCodeBuffer *b, unsigned a_bits, unsigned b_bits, unsigned c_bits,
-    int b_is_one, int b_is_zero, int c_is_zero) {
-  if (!binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, a_bits) ||
-      !wcs_movd_xmm_reg(b, 4, BINARY_GP_RAX) ||
-      !wcs_avx_vpbroadcastd_ymm(b, 4, 4) ||
-      !binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, b_bits) ||
+    int b_is_one, int b_is_zero, int c_is_zero, int a_runtime) {
+  /* a -> ymm4. When a is a runtime scale the lowering has already placed its
+   * scalar in XMM4, so just broadcast it; otherwise materialize the immediate. */
+  if (a_runtime) {
+    if (!wcs_avx_vpbroadcastd_ymm(b, 4, 4)) {
+      return 0;
+    }
+  } else if (!binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, a_bits) ||
+             !wcs_movd_xmm_reg(b, 4, BINARY_GP_RAX) ||
+             !wcs_avx_vpbroadcastd_ymm(b, 4, 4)) {
+    return 0;
+  }
+  if (!binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, b_bits) ||
       !wcs_movd_xmm_reg(b, 5, BINARY_GP_RAX) ||
       !wcs_avx_vpbroadcastd_ymm(b, 5, 5) ||
       !binary_emit_mov_reg_imm64(b, BINARY_GP_RAX, c_bits) ||

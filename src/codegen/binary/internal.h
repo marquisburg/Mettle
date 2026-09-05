@@ -833,7 +833,7 @@ int code_generator_binary_emit_simd_fill_loop_bytewalk(BinaryCodeBuffer *b, long
 /* Shared float32 affine-map loop (RCX=src iterated, RDX=dst, R9=src end ptr,
  * ymm4=a, ymm5=b, ymm3=c broadcasts): fallback + MIR passthrough share it. */
 int code_generator_binary_emit_simd_affine_map_f32_loop(BinaryCodeBuffer *b, int b_is_one, int b_is_zero, int c_is_zero);
-int code_generator_binary_emit_simd_affine_map_f32_inline(BinaryCodeBuffer *b, unsigned a_bits, unsigned b_bits, unsigned c_bits, int b_is_one, int b_is_zero, int c_is_zero);
+int code_generator_binary_emit_simd_affine_map_f32_inline(BinaryCodeBuffer *b, unsigned a_bits, unsigned b_bits, unsigned c_bits, int b_is_one, int b_is_zero, int c_is_zero, int a_runtime);
 /* Shared float64 affine-map loop + MIR inline passthrough (coeffs from raw
  * 64-bit IEEE bits; assumes RCX=src, RDX=dst, R8=count marshalled). */
 int code_generator_binary_emit_simd_affine_map_f64_loop(BinaryCodeBuffer *b, int b_is_one, int b_is_zero, int c_is_zero);

@@ -482,6 +482,11 @@ $cases = @(
     ShouldSucceed = $true
   },
   @{
+    Name          = "volatile_global_is_not_cached"
+    Path          = "tests/test_volatile_global_spin.mettle"
+    ShouldSucceed = $true
+  },
+  @{
     Name           = "volatile_survives_release"
     Path           = "tests/test_volatile.mettle"
     ShouldSucceed  = $true

@@ -59,6 +59,14 @@ static const char *mir_env_skipfn(void) {
 
 static int g_mir_gate_reported = 0;
 
+static const char *mir_operand_kind_name(int kind);
+
+static const char *mir_bail_kind(const char *reason, int kind) {
+  static char joined[64];
+  snprintf(joined, sizeof(joined), "%s:%s", reason, mir_operand_kind_name(kind));
+  return joined;
+}
+
 static int mir_trace_bail(const IRFunction *fn, const char *reason) {
   g_mir_gate_reported = 1;
   if (mir_env_trace()) {
@@ -177,11 +185,26 @@ static int mir_global_address_taken_in_module(CodeGenerator *g,
   return ir_program_global_address_taken(g->ir_program, name);
 }
 
+/* True if the source declared `name` volatile. Reading or writing such a global
+ * is observable in itself, so its value may not live in a register: a spin on
+ * one would read its cache vreg forever and never see another thread's write. */
+static int mir_global_is_volatile(CodeGenerator *g, const char *name) {
+  const IRModuleSymbol *s = NULL;
+  if (!g || !g->ir_program || !name) {
+    return 0;
+  }
+  s = ir_program_lookup_symbol(g->ir_program, name);
+  return s && s->is_volatile;
+}
+
 /* True if `name` resolves to a read-accessible global scalar, a value we can
  * cache in a register at function entry (used by both the eligibility gate and
  * the entry-load emitter, so they agree exactly on what counts as cacheable). */
 static int mir_name_is_global_scalar(CodeGenerator *g, const char *name) {
   if (!mir_name_is_global_variable(g, name)) {
+    return 0;
+  }
+  if (mir_global_is_volatile(g, name)) {
     return 0;
   }
   return code_generator_binary_symbol_is_scalar_accessible(g, name);
@@ -391,6 +414,24 @@ static MirOperand mir_value_operand(MirFunction *fn, CodeGenerator *g,
     fn->has_error = 1;
     return mir_op_none();
   }
+}
+
+static MirOperand mir_gp_value_operand(MirFunction *fn, CodeGenerator *g,
+                                       BinaryFunctionContext *ctx,
+                                       MirNameMap *map, const IROperand *op) {
+  if (op->kind == IR_OPERAND_FLOAT) {
+    if (op->float_bits == 32) {
+      float single = (float)op->float_value;
+      uint32_t single_bits;
+      memcpy(&single_bits, &single, sizeof(single_bits));
+      return mir_op_imm((long long)(unsigned long long)single_bits);
+    }
+    double wide = op->float_value;
+    uint64_t wide_bits;
+    memcpy(&wide_bits, &wide, sizeof(wide_bits));
+    return mir_op_imm((long long)wide_bits);
+  }
+  return mir_value_operand(fn, g, ctx, map, op);
 }
 
 /* ---- compare/shift helpers ---------------------------------------------- */
@@ -1290,6 +1331,19 @@ static int mir_call_sysv_returns_in_gp_registers(CodeGenerator *g,
   return 1;
 }
 
+static const char *mir_operand_kind_name(int kind) {
+  switch (kind) {
+  case IR_OPERAND_NONE: return "none";
+  case IR_OPERAND_TEMP: return "temp";
+  case IR_OPERAND_SYMBOL: return "symbol";
+  case IR_OPERAND_INT: return "int";
+  case IR_OPERAND_FLOAT: return "float";
+  case IR_OPERAND_STRING: return "string";
+  case IR_OPERAND_LABEL: return "label";
+  default: return "?";
+  }
+}
+
 static int mir_call_is_supported(CodeGenerator *g,
                                  const IRFunction *ir_function,
                                  const IRInstruction *in) {
@@ -1427,8 +1481,10 @@ static int mir_call_is_supported(CodeGenerator *g,
       continue;
     }
     if (arg->kind != IR_OPERAND_TEMP && arg->kind != IR_OPERAND_SYMBOL &&
-        arg->kind != IR_OPERAND_INT && arg->kind != IR_OPERAND_STRING) {
-      mir_call_trace("arg_operand_kind");
+        arg->kind != IR_OPERAND_INT && arg->kind != IR_OPERAND_STRING &&
+        arg->kind != IR_OPERAND_FLOAT) {
+      mir_call_trace_named("arg_operand_kind",
+                           mir_operand_kind_name((int)arg->kind));
       return 0;
     }
     /* A global AGGREGATE has no cached value vreg; it may only feed an
@@ -1527,10 +1583,7 @@ static int mir_gate_control(CodeGenerator *generator,
     }
     /* branch_zero on a float value (e.g. errdefer on a float return) needs a
      * float-zero compare; float branches are deferred -> fall back. */
-    if (in->lhs.kind == IR_OPERAND_TEMP &&
-        mir_temp_is_float(generator, ir_function, in->lhs.name, 0)) {
-      return mir_trace_bail(ir_function, "branch_zero:float");
-    }
+    break;
     break;
   case IR_OP_BRANCH_EQ: {
     /* if (lhs == rhs) goto label: integer equality (switch/match dispatch).
@@ -1679,7 +1732,7 @@ static int mir_gate_value(CodeGenerator *generator,
               0) {
         break;
       }
-      return mir_trace_bail(ir_function, "assign:operand_kind");
+      return mir_trace_bail(ir_function, mir_bail_kind("assign:operand_kind", in->lhs.kind));
     }
     break;
   default:
@@ -1714,16 +1767,18 @@ static int mir_gate_memory(CodeGenerator *generator,
       }
       break;
     }
-    if (in->lhs.kind != IR_OPERAND_TEMP && in->lhs.kind != IR_OPERAND_SYMBOL) {
-      return mir_trace_bail(ir_function, "load:address_kind");
+    if (in->lhs.kind != IR_OPERAND_TEMP && in->lhs.kind != IR_OPERAND_SYMBOL &&
+        in->lhs.kind != IR_OPERAND_INT) {
+      return mir_trace_bail(ir_function, mir_bail_kind("load:address_kind", in->lhs.kind));
     }
     if (in->dest.kind != IR_OPERAND_TEMP && in->dest.kind != IR_OPERAND_SYMBOL) {
       return mir_trace_bail(ir_function, "load:dest");
     }
     break;
   case IR_OP_STORE:
-    if (in->dest.kind != IR_OPERAND_TEMP && in->dest.kind != IR_OPERAND_SYMBOL) {
-      return 0; /* address */
+    if (in->dest.kind != IR_OPERAND_TEMP && in->dest.kind != IR_OPERAND_SYMBOL &&
+        in->dest.kind != IR_OPERAND_INT) {
+      return mir_trace_bail(ir_function, mir_bail_kind("store:address_kind", in->dest.kind));
     }
     if (in->lhs.kind != IR_OPERAND_TEMP && in->lhs.kind != IR_OPERAND_SYMBOL &&
         in->lhs.kind != IR_OPERAND_INT && in->lhs.kind != IR_OPERAND_FLOAT) {
@@ -1800,7 +1855,8 @@ static int mir_gate_select(CodeGenerator *generator,
   }
   case IR_OP_RETURN:
     if (in->lhs.kind != IR_OPERAND_NONE && in->lhs.kind != IR_OPERAND_TEMP &&
-        in->lhs.kind != IR_OPERAND_SYMBOL && in->lhs.kind != IR_OPERAND_INT) {
+        in->lhs.kind != IR_OPERAND_SYMBOL && in->lhs.kind != IR_OPERAND_INT &&
+        in->lhs.kind != IR_OPERAND_FLOAT) {
       return mir_trace_bail(ir_function, "return:operand_kind");
     }
     /* An INDIRECT-returning function returns anything the indirect-copy
@@ -1942,15 +1998,14 @@ static int mir_gate_fill_value(CodeGenerator *generator,
   /* The fill value: a compile-time INT, or a runtime invariant GP value
    * (mem_fill's splatted word). A float-valued symbol would resolve to an
    * XMM vreg the RAX marshalling cannot take, so it stays deferred. */
-  if (in->arguments[2].kind != IR_OPERAND_INT) {
-    if ((in->arguments[2].kind != IR_OPERAND_TEMP &&
-         in->arguments[2].kind != IR_OPERAND_SYMBOL) ||
-        mir_arg_float_bits(generator, ir_function, &in->arguments[2]) != 0 ||
-        (in->arguments[2].kind == IR_OPERAND_TEMP &&
-         mir_temp_is_float(generator, ir_function, in->arguments[2].name,
-                           0))) {
-      return mir_trace_bail(ir_function, "simd_fill:value");
-    }
+  (void)generator;
+  if (in->arguments[2].kind != IR_OPERAND_INT &&
+      in->arguments[2].kind != IR_OPERAND_FLOAT &&
+      in->arguments[2].kind != IR_OPERAND_TEMP &&
+      in->arguments[2].kind != IR_OPERAND_SYMBOL) {
+    return mir_trace_bail(ir_function,
+                          mir_bail_kind("simd_fill:value",
+                                        in->arguments[2].kind));
   }
   return 1;
 }
@@ -2057,9 +2112,8 @@ static int mir_gate_affine(CodeGenerator *generator,
        * saxpy `y=a*x+y` shape where a varies per pass; it is marshalled into
        * an xmm and broadcast at runtime. b and c (args 2,3) must stay
        * compile-time so their broadcasts are baked. F32 stays const-only. */
-      if (in->op == IR_OP_SIMD_AFFINE_MAP_F64 && k == 1 &&
-          (in->arguments[k].kind == IR_OPERAND_TEMP ||
-           in->arguments[k].kind == IR_OPERAND_SYMBOL)) {
+      if (k == 1 && (in->arguments[k].kind == IR_OPERAND_TEMP ||
+                     in->arguments[k].kind == IR_OPERAND_SYMBOL)) {
         continue;
       }
       return mir_trace_bail(ir_function, "affine_map:coeff");
@@ -2652,6 +2706,12 @@ static int mir_function_is_eligible_inner(CodeGenerator *generator,
       for (gate = 0; gate < sizeof(GATES) / sizeof(GATES[0]); gate++) {
         int handled = 0;
         if (!GATES[gate](generator, ir_function, in, i, &handled)) {
+          if (!g_mir_gate_reported) {
+            static char reason[48];
+            snprintf(reason, sizeof(reason), "gate%u:op%d", (unsigned)gate,
+                     (int)in->op);
+            mir_trace_bail(ir_function, reason);
+          }
           return 0;
         }
         if (handled) {
@@ -3438,7 +3498,20 @@ static MirOperand mir_address_operand(MirFunction *fn, CodeGenerator *g,
       return mir_op_vreg(a);
     }
   }
-  return mir_value_operand(fn, g, ctx, map, op);
+  {
+    MirOperand addr = mir_value_operand(fn, g, ctx, map, op);
+    if (addr.kind == MIR_OPK_IMM) {
+      MirVregId t = mir_new_vreg(fn, MIR_RC_GP, 8);
+      if (t == MIR_VREG_NONE ||
+          !mir_emit1(fn, MIR_MOV, mir_op_vreg(t), addr, mir_op_none(), 8, 0,
+                     0)) {
+        fn->has_error = 1;
+        return mir_op_none();
+      }
+      return mir_op_vreg(t);
+    }
+    return addr;
+  }
 }
 
 /* A width-tagged float register move (xmm copy). */
@@ -3992,6 +4065,21 @@ static int mir_lower_control(MirFunction *fn, CodeGenerator *g,
 
   case IR_OP_BRANCH_ZERO: {
     /* if (cond == 0) goto label  ->  test cond; je label */
+    int cfb = code_generator_binary_operand_float_bits(g, ctx, &in->lhs);
+    if (cfb) {
+      /* A float condition is zero when it compares equal to 0.0, which is the
+       * composite ordered-equality FSETCC, then a branch on that 0/1. */
+      int cw = cfb / 8;
+      MirOperand fv = coerce_float_operand(fn, g, ctx, map, &in->lhs, cw);
+      MirOperand fz = mir_float_const_operand(fn, 0.0, cw);
+      MirVregId eq = mir_new_vreg(fn, MIR_RC_GP, 8);
+      if (eq == MIR_VREG_NONE ||
+          !mir_emit1(fn, MIR_FSETCC, mir_op_vreg(eq), fv, fz, cw, 0, 0x94)) {
+        return 0;
+      }
+      return mir_emit1(fn, MIR_JCC, mir_op_label(in->text), mir_op_vreg(eq),
+                       mir_op_none(), 8, 0, 0x85);
+    }
     if (in->lhs.kind == IR_OPERAND_INT) {
       if (in->lhs.int_value != 0) {
         return 1;
@@ -5134,7 +5222,7 @@ static int mir_marshal_stack_args(const MirCallArgs *c) {
       }
       val = mir_op_vreg(t);
     } else {
-      val = mir_value_operand(fn, g, ctx, map, &in->arguments[a]);
+      val = mir_gp_value_operand(fn, g, ctx, map, &in->arguments[a]);
     }
     if (!mir_emit1(fn, MIR_STORE_OUTARG, mir_op_none(), val,
                    mir_op_imm(slot), 8, 0, 0)) {
@@ -5186,7 +5274,7 @@ static int mir_marshal_gp_args(const MirCallArgs *c) {
       }
       continue;
     }
-    MirOperand arg = mir_value_operand(fn, g, ctx, map, &in->arguments[a]);
+    MirOperand arg = mir_gp_value_operand(fn, g, ctx, map, &in->arguments[a]);
     if (!mir_emit1(fn, MIR_MOV, mir_op_phys(reg, MIR_RC_GP), arg,
                    mir_op_none(), 8, 0, 0)) {
       return 0;
@@ -5668,7 +5756,7 @@ static int mir_marshal_indirect_gp(MirFunction *fn, CodeGenerator *g,
       }
       continue;
     }
-    MirOperand arg = mir_value_operand(fn, g, ctx, map, &in->arguments[a]);
+    MirOperand arg = mir_gp_value_operand(fn, g, ctx, map, &in->arguments[a]);
     if (!mir_emit1(fn, MIR_MOV, mir_op_phys(reg, MIR_RC_GP), arg,
                    mir_op_none(), 8, 0, 0)) {
       return 0;
@@ -6145,7 +6233,7 @@ static int mir_lower_fill(MirFunction *fn, CodeGenerator *g,
      * register among the three targets). */
     MirOperand base = mir_value_operand(fn, g, ctx, map, &in->lhs);
     MirOperand cnt = mir_value_operand(fn, g, ctx, map, &in->rhs);
-    MirOperand val = mir_value_operand(fn, g, ctx, map, &in->arguments[2]);
+    MirOperand val = mir_gp_value_operand(fn, g, ctx, map, &in->arguments[2]);
     long long size = in->arguments[0].int_value;
     long long mode = in->arguments[1].int_value;
     /* Mode-0 with a runtime offset and/or nonzero start (int64 index): fold
@@ -6234,8 +6322,18 @@ static int mir_lower_affine_map(MirFunction *fn, CodeGenerator *g,
                    mir_op_none(), 8, 0, 0)) {
       return 0;
     }
-    long long a_bits = (long long)(uint32_t)mir_float_bits_at(
-        in->arguments[1].float_value, 4);
+    int a32_runtime = in->arguments[1].kind != IR_OPERAND_FLOAT;
+    if (a32_runtime) {
+      MirOperand av =
+          coerce_float_operand(fn, g, ctx, map, &in->arguments[1], 4);
+      if (!mir_emit_fmov(fn, mir_op_phys(BINARY_XMM4, MIR_RC_XMM), av, 4)) {
+        return 0;
+      }
+    }
+    long long a_bits =
+        a32_runtime ? 0
+                    : (long long)(uint32_t)mir_float_bits_at(
+                          in->arguments[1].float_value, 4);
     long long b_bits = (long long)(uint32_t)mir_float_bits_at(
         in->arguments[2].float_value, 4);
     long long c_bits = (long long)(uint32_t)mir_float_bits_at(
@@ -6245,7 +6343,8 @@ static int mir_lower_affine_map(MirFunction *fn, CodeGenerator *g,
     int c_is_zero = in->arguments[3].float_value == 0.0;
     unsigned char flags = (unsigned char)((b_is_one ? 1 : 0) |
                                           (b_is_zero ? 2 : 0) |
-                                          (c_is_zero ? 4 : 0));
+                                          (c_is_zero ? 4 : 0) |
+                                          (a32_runtime ? 8 : 0));
     return mir_emit1(fn, MIR_SIMD_AFFINE_MAP_F32, mir_op_imm(a_bits),
                      mir_op_imm(b_bits), mir_op_imm(c_bits), 4, 0, flags);
   }

@@ -8,9 +8,9 @@ fn opaque(x: int32) -> int32 {
     return x + 1;
 }
 
-fn saxpy(a: float32, x: float32*, y: float32*, n: int32) {
+fn saxpy(a: float32, b: float32, x: float32*, y: float32*, n: int32) {
     for i in 0..n {
-        y[i] = a * x[i] + y[i];
+        y[i] = a * x[i] + b * y[i];
     }
 }
 
@@ -154,7 +154,7 @@ fn main() -> int32 {
         mm[i] = 0.5;
         i = i + 1;
     }
-    saxpy(2.0, &xs[0], &ys[0], 64);
+    saxpy(2.0, ys[0] + 1.0, &xs[0], &ys[0], 64);
     with_call(&ys[0], 64);
     matvec(&mm[0], &xs[0], &ys[0], 4, 64);
     var iv: int32[64];
