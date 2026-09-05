@@ -722,6 +722,10 @@ const char *mir_opcode_name(MirOpcode op);
  * 0 on failure (sets fn->has_error). Defined in mir_regalloc.c. */
 int mir_regalloc(MirFunction *fn);
 
+static inline int mir_xmm_is_encoder_scratch(BinaryXmmRegister reg) {
+  return reg == BINARY_XMM4 || reg == BINARY_XMM5;
+}
+
 static inline int mir_fsetcc_unordered_cc(unsigned char cc) {
   if (cc == 0x94) {
     return 0x9B;

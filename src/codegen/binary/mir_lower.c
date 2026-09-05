@@ -1183,6 +1183,7 @@ static int mir_call_indirect_is_supported(CodeGenerator *g,
   }
 
   const BinaryAbi *call_abi = code_generator_binary_active_abi();
+  size_t indirect_float_slot = 0;
   for (size_t a = 0; a < in->argument_count; a++) {
     MtlcType *pt = ft->fn_param_types ? ft->fn_param_types[a] : NULL;
     const IROperand *arg = &in->arguments[a];
@@ -1201,6 +1202,15 @@ static int mir_call_indirect_is_supported(CodeGenerator *g,
       return 0;
     }
     if (code_generator_binary_resolved_type_float_bits(pt) != 0) {
+      size_t slot = call_abi && call_abi->counts_classes_separately
+                        ? indirect_float_slot++
+                        : a;
+      if (call_abi && call_abi->float_param_registers &&
+          slot < call_abi->float_param_count &&
+          mir_xmm_is_encoder_scratch(call_abi->float_param_registers[slot])) {
+        mir_call_trace("indirect_arg_float_scratch_register");
+        return 0;
+      }
       if (arg->kind != IR_OPERAND_TEMP && arg->kind != IR_OPERAND_SYMBOL &&
           arg->kind != IR_OPERAND_INT && arg->kind != IR_OPERAND_FLOAT) {
         mir_call_trace("indirect_arg_float_operand_kind");
@@ -1465,6 +1475,7 @@ static int mir_call_is_supported(CodeGenerator *g,
    * are homed only when they fall in an XMM register; a float STACK arg (5th+
    * positional under Win64) is still deferred to the fallback. */
   const BinaryAbi *call_abi = code_generator_binary_active_abi();
+  size_t float_slot = 0;
   for (size_t a = 0; a < in->argument_count; a++) {
     MtlcType *pt = callee->data.function.parameter_types
                    ? callee->data.function.parameter_types[a]
@@ -1475,6 +1486,19 @@ static int mir_call_is_supported(CodeGenerator *g,
       return 0;
     }
     if (code_generator_binary_resolved_type_float_bits(pt) != 0) {
+      /* XMM4/XMM5 are the encoder's float scratch. Where the convention also
+       * makes them argument registers -- SysV's fifth and sixth float -- the
+       * value staged for a later argument lands in the register an earlier one
+       * was already marshalled into, so such a call stays on the baseline. */
+      size_t slot = call_abi && call_abi->counts_classes_separately
+                        ? float_slot++
+                        : a + (size_t)hidden;
+      if (call_abi && call_abi->float_param_registers &&
+          slot < call_abi->float_param_count &&
+          mir_xmm_is_encoder_scratch(call_abi->float_param_registers[slot])) {
+        mir_call_trace("arg_float_scratch_register");
+        return 0;
+      }
       /* Float parameter: any scalar source works (literals fold, float values
        * width-convert, int values cvtsi2sd -- coerce_float_operand). */
       if (arg->kind != IR_OPERAND_TEMP && arg->kind != IR_OPERAND_SYMBOL &&
