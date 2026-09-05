@@ -46,8 +46,12 @@
  *     clobber the allocator must know about, but both are the reason a function
  *     running an inline kernel keeps its rbp frame: the staging slots are
  *     addressed off the frame base, and rsp is not stable across these bodies.
- *   - No kernel here writes xmm6..15, so float values that span one (which the
- *     allocator places in the callee-saved xmm8..15 tier) are safe. */
+ *   - simd_lcg_u32 is the only kernel here that writes xmm6..15 (xmm6..9), and
+ *     it saves and restores those four around its own body, so a caller's
+ *     callee-saved lanes survive it. Nothing else touches them. A float value
+ *     cannot span any kernel in a register regardless: a kernel is a call
+ *     barrier and is not xmm-preserving, so mir_color_reg_mask gives such a
+ *     value no register at all. */
 
 #define GPCLOB(reg) (1u << (unsigned)(reg))
 
@@ -117,6 +121,8 @@ static const MirIrKernel kMirIrKernels[] = {
      code_generator_binary_emit_simd_exp_f32, 0},
     {IR_OP_SIMD_OUTER_LANE_F64, "simd_outer_lane_f64",
      code_generator_binary_emit_simd_outer_lane_f64, 0},
+    {IR_OP_SIMD_LCG_U32, "simd_lcg_u32",
+     code_generator_binary_emit_simd_lcg_u32, 0},
 };
 
 #define MIR_IR_KERNEL_COUNT \

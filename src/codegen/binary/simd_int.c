@@ -150,9 +150,16 @@ int code_generator_binary_emit_simd_lcg_u32(
     return 0;
   }
 
-  /* Stack pool (rsp stable, no calls): [rsp+0..31]=P[1..8], [rsp+32..63]=Q[1..8]. */
-  if (!binary_emit_sub_rsp_imm32(b, 64)) {
+  /* Stack pool (rsp stable, no calls): [rsp+0..31]=P[1..8], [rsp+32..63]=Q[1..8].
+   * [rsp+64..127] holds xmm6..xmm9, which the lanes and their accumulators
+   * below overwrite and which MS-x64 makes this function's to give back. */
+  if (!binary_emit_sub_rsp_imm32(b, 128)) {
     return 0;
+  }
+  for (int x = 6; x <= 9; x++) {
+    if (!simd_movdqu_mem_xmm_disp(b, BINARY_GP_RSP, 64 + 16 * (x - 6), x)) {
+      return 0;
+    }
   }
   for (int j = 0; j < 8; j++) {
     if (!binary_emit_mov_reg_imm32_zero_extend(b, BINARY_GP_R11, P[j + 1]) ||
@@ -269,7 +276,12 @@ int code_generator_binary_emit_simd_lcg_u32(
     return 0;
   }
 
-  if (!binary_emit_add_rsp_imm32(b, 64)) {
+  for (int x = 6; x <= 9; x++) {
+    if (!simd_movdqu_xmm_mem_disp(b, x, BINARY_GP_RSP, 64 + 16 * (x - 6))) {
+      return 0;
+    }
+  }
+  if (!binary_emit_add_rsp_imm32(b, 128)) {
     return 0;
   }
   return code_generator_binary_emit_destination_store(generator, context,
