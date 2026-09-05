@@ -1521,14 +1521,15 @@ static int mir_gate_control(CodeGenerator *generator,
     }
     break;
   case IR_OP_BRANCH_ZERO:
-    if (in->lhs.kind != IR_OPERAND_TEMP && in->lhs.kind != IR_OPERAND_SYMBOL) {
-      return 0;
+    if (in->lhs.kind != IR_OPERAND_TEMP && in->lhs.kind != IR_OPERAND_SYMBOL &&
+        in->lhs.kind != IR_OPERAND_INT) {
+      return mir_trace_bail(ir_function, "branch_zero:operand_kind");
     }
     /* branch_zero on a float value (e.g. errdefer on a float return) needs a
      * float-zero compare; float branches are deferred -> fall back. */
     if (in->lhs.kind == IR_OPERAND_TEMP &&
         mir_temp_is_float(generator, ir_function, in->lhs.name, 0)) {
-      return 0;
+      return mir_trace_bail(ir_function, "branch_zero:float");
     }
     break;
   case IR_OP_BRANCH_EQ: {
@@ -1620,11 +1621,11 @@ static int mir_gate_convert(CodeGenerator *generator,
      * direction is resolved from operand types during lowering, which is
      * exhaustive for these, so it cannot fail mid-function. */
     if (in->dest.kind != IR_OPERAND_TEMP && in->dest.kind != IR_OPERAND_SYMBOL) {
-      return 0;
+      return mir_trace_bail(ir_function, "cast:dest");
     }
     if (in->lhs.kind != IR_OPERAND_TEMP && in->lhs.kind != IR_OPERAND_SYMBOL &&
         in->lhs.kind != IR_OPERAND_INT && in->lhs.kind != IR_OPERAND_FLOAT) {
-      return 0;
+      return mir_trace_bail(ir_function, "cast:operand_kind");
     }
     break;
   case IR_OP_UNARY:
@@ -1647,7 +1648,7 @@ static int mir_gate_convert(CodeGenerator *generator,
     }
     if (in->lhs.kind != IR_OPERAND_TEMP && in->lhs.kind != IR_OPERAND_SYMBOL &&
         in->lhs.kind != IR_OPERAND_INT && in->lhs.kind != IR_OPERAND_FLOAT) {
-      return 0;
+      return mir_trace_bail(ir_function, "unary:operand_kind");
     }
     break;
   default:
@@ -1667,7 +1668,7 @@ static int mir_gate_value(CodeGenerator *generator,
   switch (in->op) {
   case IR_OP_ASSIGN:
     if (in->dest.kind != IR_OPERAND_TEMP && in->dest.kind != IR_OPERAND_SYMBOL) {
-      return 0;
+      return mir_trace_bail(ir_function, "assign:dest");
     }
     if (in->lhs.kind != IR_OPERAND_TEMP && in->lhs.kind != IR_OPERAND_SYMBOL &&
         in->lhs.kind != IR_OPERAND_INT && in->lhs.kind != IR_OPERAND_FLOAT) {
@@ -1678,7 +1679,7 @@ static int mir_gate_value(CodeGenerator *generator,
               0) {
         break;
       }
-      return 0;
+      return mir_trace_bail(ir_function, "assign:operand_kind");
     }
     break;
   default:
@@ -1726,7 +1727,7 @@ static int mir_gate_memory(CodeGenerator *generator,
     }
     if (in->lhs.kind != IR_OPERAND_TEMP && in->lhs.kind != IR_OPERAND_SYMBOL &&
         in->lhs.kind != IR_OPERAND_INT && in->lhs.kind != IR_OPERAND_FLOAT) {
-      return 0; /* value */
+      return mir_trace_bail(ir_function, "store:value_kind");
     }
     break;
   case IR_OP_PREFETCH:
@@ -1745,7 +1746,7 @@ static int mir_gate_memory(CodeGenerator *generator,
                                  NULL) ||
         !mir_local_or_param_type(generator, ir_function, in->rhs.name,
                                  NULL)) {
-      return 0;
+      return mir_trace_bail(ir_function, "rotate_add:operand");
     }
     break;
   case IR_OP_NEW:
@@ -1800,7 +1801,7 @@ static int mir_gate_select(CodeGenerator *generator,
   case IR_OP_RETURN:
     if (in->lhs.kind != IR_OPERAND_NONE && in->lhs.kind != IR_OPERAND_TEMP &&
         in->lhs.kind != IR_OPERAND_SYMBOL && in->lhs.kind != IR_OPERAND_INT) {
-      return 0;
+      return mir_trace_bail(ir_function, "return:operand_kind");
     }
     /* An INDIRECT-returning function returns anything the indirect-copy
      * machinery can source: a struct LOCAL or TEMP home (a call result
@@ -2483,7 +2484,7 @@ static int mir_gate_globals(CodeGenerator *generator,
   if (scratch_fn.has_error) {
     mir_name_map_destroy(&defined);
     mir_function_destroy(&scratch_fn);
-    return 0;
+    return mir_trace_bail(ir_function, "globals:lowering_error");
   }
   /* Any SYMBOL operand not defined in this function is a global access. It is
    * eligible iff it is a plain scalar global (no address-of in scope, an
@@ -3991,6 +3992,13 @@ static int mir_lower_control(MirFunction *fn, CodeGenerator *g,
 
   case IR_OP_BRANCH_ZERO: {
     /* if (cond == 0) goto label  ->  test cond; je label */
+    if (in->lhs.kind == IR_OPERAND_INT) {
+      if (in->lhs.int_value != 0) {
+        return 1;
+      }
+      return mir_emit1(fn, MIR_JMP, mir_op_label(in->text), mir_op_none(),
+                       mir_op_none(), 8, 0, 0);
+    }
     MirOperand cond = mir_value_operand(fn, g, ctx, map, &in->lhs);
     return mir_emit1(fn, MIR_JCC, mir_op_label(in->text), cond, mir_op_none(), 8,
                      0, 0x84 /* je */);

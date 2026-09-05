@@ -371,6 +371,27 @@ static int ir_lower_interpolation(IRLoweringContext *context,
                                   ASTNode *expression,
                                   IROperand *out_value);
 
+static void ir_declare_string_eq_helper(IRLoweringContext *context) {
+  IRModuleSymbol entry = {0};
+  MtlcType *params[2];
+  if (!context || !context->program || !context->type_checker) {
+    return;
+  }
+  if (ir_program_lookup_symbol(context->program, "mettle_string_eq")) {
+    return;
+  }
+  params[0] = mtlc_type_from_frontend(context->type_checker->builtin_string);
+  params[1] = params[0];
+  entry.name = (char *)"mettle_string_eq";
+  entry.kind = IR_MODSYM_FUNCTION;
+  entry.is_extern = 1;
+  entry.type = mtlc_type_from_frontend(context->type_checker->builtin_int32);
+  entry.return_type = entry.type;
+  entry.param_types = params;
+  entry.param_count = 2;
+  ir_program_add_symbol(context->program, &entry);
+}
+
 static void ir_declare_string_free_helper(IRLoweringContext *context) {
   IRModuleSymbol entry = {0};
   MtlcType *params[1];
@@ -1948,6 +1969,7 @@ static int ir_lower_string_compare(IRLoweringContext *context,
         return 0;
       }
 
+      ir_declare_string_eq_helper(context);
       IROperand call_args[2];
       call_args[0] = left;
       call_args[1] = right;

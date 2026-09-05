@@ -3,6 +3,24 @@
 #include "frontend/mtlc_frontend.h"
 #include "string_intern.h"
 
+static void ir_declare_swap_apply_helper(IRLoweringContext *context) {
+  IRModuleSymbol entry = {0};
+  if (!context || !context->program || !context->type_checker) {
+    return;
+  }
+  if (ir_program_lookup_symbol(context->program, "mettle_swap_apply")) {
+    return;
+  }
+  entry.name = (char *)"mettle_swap_apply";
+  entry.kind = IR_MODSYM_FUNCTION;
+  entry.is_extern = 1;
+  entry.type = mtlc_type_from_frontend(context->type_checker->builtin_int64);
+  entry.return_type = entry.type;
+  entry.param_types = NULL;
+  entry.param_count = 0;
+  ir_program_add_symbol(context->program, &entry);
+}
+
 static int ir_lower_multi_return_value(IRLoweringContext *context,
                                        IRFunction *function,
                                        ReturnStatement *return_statement,
@@ -572,6 +590,7 @@ int ir_lower_statement_with_defers(IRLoweringContext *context,
    * whole cost, and a program with no quiesce point never emits it and never
    * links the swap runtime. */
   case AST_QUIESCE_STATEMENT: {
+    ir_declare_swap_apply_helper(context);
     IRInstruction apply = {0};
     apply.op = IR_OP_CALL;
     apply.location = statement->location;
