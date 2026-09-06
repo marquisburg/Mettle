@@ -194,14 +194,19 @@
         mov cr3, edi
         lgdt [gdt_pointer]
         mov eax, cr4
-        or eax, 0x20
+        or eax, 0x40220
         mov cr4, eax
+        xor ecx, ecx
+        xor edx, edx
+        mov eax, 7
+        xsetbv
         mov ecx, 0xc0000080
         rdmsr
         or eax, 0x100
         wrmsr
         mov eax, cr0
-        or eax, 0x80000001
+        and eax, 0xfffffffb
+        or eax, 0x80000003
         mov cr0, eax
         jmp 0x08:long_mode
 

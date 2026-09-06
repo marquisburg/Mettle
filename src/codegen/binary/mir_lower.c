@@ -1014,6 +1014,43 @@ static int mir_call_is_runtime_trap(const IRInstruction *in) {
 static int mir_call_is_runtime_hook(const IRInstruction *in);
 static int mir_runtime_hook_is_supported(const IRInstruction *in);
 
+static int mir_asm_next_binding(const char **cursor, char *name,
+                                size_t capacity) {
+  const char *at = *cursor ? strchr(*cursor, '{') : NULL;
+  while (at) {
+    const char *start = at + 1;
+    const char *end;
+    size_t length;
+    while (*start == ' ' || *start == '\t') {
+      start++;
+    }
+    end = start;
+    while (*end && *end != '}' && *end != ' ' && *end != '\t') {
+      end++;
+    }
+    length = (size_t)(end - start);
+    while (*end == ' ' || *end == '\t') {
+      end++;
+    }
+    if (*end == '}' && length > 0 && length < capacity) {
+      memcpy(name, start, length);
+      name[length] = '\0';
+      *cursor = end + 1;
+      return 1;
+    }
+    at = strchr(at + 1, '{');
+  }
+  *cursor = NULL;
+  return 0;
+}
+
+static int mir_name_is_volatile_global_scalar(CodeGenerator *g,
+                                              const char *name) {
+  return mir_name_is_global_variable(g, name) &&
+         mir_global_is_volatile(g, name) &&
+         code_generator_binary_symbol_is_scalar_accessible(g, name);
+}
+
 static const BinaryGpRegister MIR_SYSCALL_SYSV_REGISTERS[] = {
     BINARY_GP_RDI, BINARY_GP_RSI, BINARY_GP_RDX,
     BINARY_GP_R10, BINARY_GP_R8,  BINARY_GP_R9};
@@ -1665,6 +1702,23 @@ static int mir_gate_control(CodeGenerator *generator,
     }
     break;
   }
+  case IR_OP_INLINE_ASM: {
+    const char *cursor = in->text;
+    char name[128];
+    int count = 0;
+    while (mir_asm_next_binding(&cursor, name, sizeof(name))) {
+      if (mir_local_or_param_type(generator, ir_function, name, NULL)) {
+        if (++count > MIR_ASM_MAX_BINDS) {
+          return mir_trace_bail(ir_function, "asm:bindings>max");
+        }
+        continue;
+      }
+      if (!mir_name_is_global_variable(generator, name)) {
+        return mir_trace_bail(ir_function, "asm:binding");
+      }
+    }
+    break;
+  }
   default:
     *handled = 0;
     break;
@@ -1918,6 +1972,20 @@ static int mir_gate_select(CodeGenerator *generator,
     break;
   }
   case IR_OP_RETURN:
+    if (in->lhs.kind == IR_OPERAND_STRING) {
+      int literal_ok =
+          (mir_type_is_indirect_aggregate(generator,
+                                          ir_function->return_type_name) &&
+           mir_indirect_source_is_supported(generator, ir_function,
+                                            &in->lhs)) ||
+          code_generator_binary_type_is_cstring(
+              code_generator_binary_get_resolved_type(
+                  generator, ir_function->return_type_name, 1));
+      if (!literal_ok) {
+        return mir_trace_bail(ir_function, "return:string_literal");
+      }
+      break;
+    }
     if (in->lhs.kind != IR_OPERAND_NONE && in->lhs.kind != IR_OPERAND_TEMP &&
         in->lhs.kind != IR_OPERAND_SYMBOL && in->lhs.kind != IR_OPERAND_INT &&
         in->lhs.kind != IR_OPERAND_FLOAT) {
@@ -2343,15 +2411,8 @@ static int mir_gate_function_shape(CodeGenerator *generator,
   /* An `asm` block is written against named stack homes and clobbers whatever
    * registers it likes. The allocated frame has neither, so the whole function
    * goes to the baseline emitter, which keeps every value in its own slot. */
-  if (ir_function->is_naked || ir_function->is_interrupt ||
-      ir_function_has_inline_asm(ir_function)) {
-    return mir_trace_bail(ir_function, "inline_asm");
-  }
-  /* A volatile access must reach memory exactly as often as the source says.
-   * The allocated frame keeps values in registers and fuses accesses, so a
-   * function holding one is emitted by the baseline, which does neither. */
-  if (ir_function->has_volatile_access) {
-    return mir_trace_bail(ir_function, "volatile_access");
+  if (ir_function->is_naked) {
+    return mir_trace_bail(ir_function, "naked");
   }
   /* A function reached from outside under SysV takes and returns aggregates by
    * eightbyte. That prologue and that return live in the baseline emitter, so
@@ -2466,7 +2527,12 @@ static void mir_scan_global_write(CodeGenerator *generator,
         !found && in->op == IR_OP_STORE &&
         mir_name_is_global_aggregate(generator, ir_function, in->dest.name);
     if (!found && !agg_addr_dest &&
+        mir_name_is_volatile_global_scalar(generator, in->dest.name)) {
+      return;
+    }
+    if (!found && !agg_addr_dest &&
         !mir_name_is_global_scalar(generator, in->dest.name)) {
+      mir_call_trace_named("global_write", in->dest.name);
       *globals_ok = 0;
       return;
     }
@@ -2519,7 +2585,8 @@ static void mir_scan_global_operands(CodeGenerator *generator,
             break;
           }
         }
-        if (!found && !mir_name_is_global_scalar(generator, reads[k]->name)) {
+        if (!found && !mir_name_is_global_scalar(generator, reads[k]->name) &&
+            !mir_name_is_volatile_global_scalar(generator, reads[k]->name)) {
           /* A global AGGREGATE name is usable in the positions where the
            * lowering materializes its RIP-relative address instead of a
            * cached value: a LOAD/PREFETCH address (`*@g [w]`), or the source
@@ -2533,6 +2600,7 @@ static void mir_scan_global_operands(CodeGenerator *generator,
                 mir_operand_struct_home_size(generator, ir_function,
                                              &in->dest) > 0));
           if (!agg_ok) {
+            mir_call_trace_named("global_read", reads[k]->name);
             *globals_ok = 0;
             break;
           }
@@ -2556,8 +2624,10 @@ static void mir_scan_global_operands(CodeGenerator *generator,
         }
       }
       if (!found && !mir_name_is_global_scalar(generator, arg->name) &&
+          !mir_name_is_volatile_global_scalar(generator, arg->name) &&
           !((in->op == IR_OP_CALL || in->op == IR_OP_CALL_INDIRECT) &&
             mir_name_is_global_aggregate(generator, ir_function, arg->name))) {
+        mir_call_trace_named("global_arg", arg->name);
         *globals_ok = 0;
         break;
       }
@@ -3251,7 +3321,8 @@ static unsigned long long *mir_compute_global_dirty_masks(
     for (size_t i = 0; i < n; i++) {
       const IRInstruction *in = &irf->instructions[i];
       unsigned long long s = mask[i];
-      if (in->op == IR_OP_CALL || in->op == IR_OP_CALL_INDIRECT) {
+      if (in->op == IR_OP_CALL || in->op == IR_OP_CALL_INDIRECT ||
+          in->op == IR_OP_INLINE_ASM) {
         s = 0; /* kill first: the flush+reload cleans, THEN a @g=f() dest
                   capture re-dirties below */
       }
@@ -4157,6 +4228,79 @@ static int mir_lower_control(MirFunction *fn, CodeGenerator *g,
   case IR_OP_JUMP:
     return mir_emit1(fn, MIR_JMP, mir_op_label(in->text), mir_op_none(),
                      mir_op_none(), 8, 0, 0);
+
+  case IR_OP_INLINE_ASM: {
+    MirAsmAux *aux = (MirAsmAux *)calloc(1, sizeof(MirAsmAux));
+    const char *cursor = in->text;
+    char name[128];
+    MirInst asm_inst;
+    if (!aux) {
+      fn->has_error = 1;
+      return 0;
+    }
+    aux->ir = in;
+    while (mir_asm_next_binding(&cursor, name, sizeof(name))) {
+      MtlcType *type = mir_local_or_param_type(g, fn->ir_function, name, NULL);
+      int seen = 0;
+      MirVregId v;
+      int bytes;
+      if (!type) {
+        continue;
+      }
+      for (int k = 0; k < aux->count; k++) {
+        if (strcmp(aux->names[k], name) == 0) {
+          seen = 1;
+          break;
+        }
+      }
+      if (seen) {
+        continue;
+      }
+      if (aux->count >= MIR_ASM_MAX_BINDS) {
+        free(aux);
+        fn->has_error = 1;
+        return 0;
+      }
+      {
+        IROperand probe;
+        char *owned = mir_function_own_aux(fn, mettle_strdup(name));
+        if (!owned) {
+          free(aux);
+          return 0;
+        }
+        memset(&probe, 0, sizeof(probe));
+        probe.kind = IR_OPERAND_SYMBOL;
+        probe.name = owned;
+        MirOperand value = mir_value_operand(fn, g, ctx, map, &probe);
+        if (value.kind != MIR_OPK_VREG) {
+          free(aux);
+          fn->has_error = 1;
+          return 0;
+        }
+        v = value.vreg;
+        aux->names[aux->count] = owned;
+      }
+      bytes = (int)((code_generator_abi_type_size(type) + 7) & ~(size_t)7);
+      fn->vregs[v].address_taken = 1;
+      if (fn->vregs[v].home_bytes < bytes) {
+        fn->vregs[v].home_bytes = bytes;
+      }
+      aux->vregs[aux->count] = v;
+      aux->count++;
+    }
+    if (!mir_function_own_aux(fn, aux)) {
+      return 0;
+    }
+    memset(&asm_inst, 0, sizeof(asm_inst));
+    asm_inst.op = MIR_INLINE_ASM;
+    asm_inst.dst = mir_op_none();
+    asm_inst.a = mir_op_none();
+    asm_inst.b = mir_op_none();
+    asm_inst.width = 8;
+    asm_inst.ir_index = -1;
+    asm_inst.aux = aux;
+    return mir_emit(fn, &asm_inst);
+  }
 
   case IR_OP_BRANCH_ZERO: {
     /* if (cond == 0) goto label  ->  test cond; je label */
@@ -5072,8 +5216,19 @@ static int mir_lower_return(MirFunction *fn, CodeGenerator *g,
   *handled = 1;
   switch (in->op) {
   case IR_OP_RETURN: {
+    if (!fn->returns_indirect && in->lhs.kind == IR_OPERAND_STRING) {
+      if (!mir_emit_global_writebacks(fn, g, map, wb) ||
+          !mir_emit1(fn, MIR_LEA_CSTR, mir_op_phys(BINARY_GP_RAX, MIR_RC_GP),
+                     mir_op_symbol(in->lhs.name ? in->lhs.name : ""),
+                     mir_op_none(), 8, 0, 0)) {
+        return 0;
+      }
+      return mir_emit1(fn, MIR_RET, mir_op_none(), mir_op_none(), mir_op_none(),
+                       8, 0, 0);
+    }
     if (fn->returns_indirect && (in->lhs.kind == IR_OPERAND_SYMBOL ||
-                                 in->lhs.kind == IR_OPERAND_TEMP)) {
+                                 in->lhs.kind == IR_OPERAND_TEMP ||
+                                 in->lhs.kind == IR_OPERAND_STRING)) {
       /* INDIRECT struct return: copy the struct into the caller's hidden slot
        * (whose pointer the prologue homed into indirect_return_vreg), then
        * leave that pointer in RAX as the Win64/SysV ABI requires. The source
@@ -10354,6 +10509,49 @@ static void mir_sink_cold_exits(MirFunction *fn) {
 
 /* ---- emit entry --------------------------------------------------------- */
 
+static int mir_emit_volatile_global_reads(MirFunction *fn, CodeGenerator *g,
+                                          MirNameMap *map,
+                                          const IRInstruction *in,
+                                          const MirAddrFold *fold) {
+  const IROperand *reads[5];
+  size_t count = 0;
+  reads[count++] = &in->lhs;
+  reads[count++] = &in->rhs;
+  if (in->op == IR_OP_STORE) {
+    reads[count++] = &in->dest;
+  }
+  if (fold && fold->valid) {
+    reads[count++] = &fold->base;
+    reads[count++] = &fold->index;
+  }
+  for (size_t k = 0; k < count + in->argument_count; k++) {
+    const IROperand *op =
+        k < count ? reads[k] : &in->arguments[k - count];
+    const char *name = op->name;
+    if (op->kind != IR_OPERAND_SYMBOL || !name ||
+        (in->op == IR_OP_ADDRESS_OF && op == &in->lhs) ||
+        !mir_name_is_volatile_global_scalar(g, name)) {
+      continue;
+    }
+    if (!mir_emit_global_reload_names(fn, g, map, &name, 1)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int mir_emit_volatile_global_write(MirFunction *fn, CodeGenerator *g,
+                                          MirNameMap *map,
+                                          const IRInstruction *in) {
+  const char *name = in->dest.name;
+  if (in->op == IR_OP_STORE || in->op == IR_OP_DECLARE_LOCAL ||
+      in->dest.kind != IR_OPERAND_SYMBOL || !name ||
+      !mir_name_is_volatile_global_scalar(g, name)) {
+    return 1;
+  }
+  return mir_emit_global_flush_names(fn, g, map, &name, 1);
+}
+
 int code_generator_binary_emit_function_via_mir(
     CodeGenerator *generator,
     IRFunction *ir_function, BinaryFunctionContext *context) {
@@ -10363,6 +10561,7 @@ int code_generator_binary_emit_function_via_mir(
   mir_function_init(&fn, context);
   fn.generator = generator;
   fn.ir_function = ir_function;
+  fn.reserve_rbx = ir_function->is_interrupt ? 1 : 0;
   memset(&map, 0, sizeof(map));
 
   /* Globals this function writes: register-promoted (cached at entry, written
@@ -10693,7 +10892,8 @@ int code_generator_binary_emit_function_via_mir(
      * pointer memory op for this purpose too: an address-taken global it walks
      * over must be flushed from its cache vreg first and reloaded after. */
     int kernel_op =
-        mir_ir_kernel_index_for_op(ir_function->instructions[i].op) >= 0;
+        mir_ir_kernel_index_for_op(ir_function->instructions[i].op) >= 0 ||
+        ir_function->instructions[i].op == IR_OP_INLINE_ASM;
     int mem_op = ir_function->instructions[i].op == IR_OP_LOAD ||
                  ir_function->instructions[i].op == IR_OP_STORE || kernel_op;
     int store_op = ir_function->instructions[i].op == IR_OP_STORE || kernel_op;
@@ -10703,9 +10903,18 @@ int code_generator_binary_emit_function_via_mir(
       free(folds);
       goto oom;
     }
+    if (!mir_emit_volatile_global_reads(&fn, generator, &map,
+                                        &ir_function->instructions[i],
+                                        &folds[i])) {
+      free(fold_skip);
+      free(folds);
+      goto oom;
+    }
     if (folds[i].valid) {
       if (!mir_lower_folded_access(&fn, generator, context, &map,
-                                   &ir_function->instructions[i], &folds[i])) {
+                                   &ir_function->instructions[i], &folds[i]) ||
+          !mir_emit_volatile_global_write(&fn, generator, &map,
+                                          &ir_function->instructions[i])) {
         free(fold_skip);
         free(folds);
         goto oom;
@@ -10724,10 +10933,14 @@ int code_generator_binary_emit_function_via_mir(
        * the written ones first (the callee may read them), lower the call, then
        * reload cached globals only when the callee may have written them. */
       const IRInstruction *cin = &ir_function->instructions[i];
-      int is_call = cin->op == IR_OP_CALL || cin->op == IR_OP_CALL_INDIRECT;
+      int is_call = cin->op == IR_OP_CALL || cin->op == IR_OP_CALL_INDIRECT ||
+                    cin->op == IR_OP_INLINE_ASM;
       int call_writes_globals =
-          is_call ? mir_call_may_write_globals(generator, ir_function, i, cin)
-                  : 0;
+          cin->op == IR_OP_INLINE_ASM
+              ? 1
+              : (is_call ? mir_call_may_write_globals(generator, ir_function,
+                                                      i, cin)
+                         : 0);
       if (is_call && wb.all_count > 0 &&
           !mir_emit_global_writebacks(&fn, generator, &map, &wb)) {
         free(fold_skip);
@@ -10735,7 +10948,8 @@ int code_generator_binary_emit_function_via_mir(
         goto oom;
       }
       if (!mir_lower_instruction(&fn, generator, context, &map,
-                                 &ir_function->instructions[i], &wb)) {
+                                 &ir_function->instructions[i], &wb) ||
+          !mir_emit_volatile_global_write(&fn, generator, &map, cin)) {
         free(fold_skip);
         free(folds);
         goto oom;
