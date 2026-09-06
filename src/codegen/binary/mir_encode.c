@@ -3522,6 +3522,19 @@ int mir_encode(MirFunction *fn) {
         ok = enc_err(fn, "out of memory emitting trap puts");
         break;
       }
+      /* Then where the rest of the report lives. This path carries no line
+       * table, so the message above is the whole report: without this the
+       * program says what went wrong and nothing about where, and nothing
+       * tells the reader that -s is what changes that. */
+      if (!code_generator_binary_emit_cstring_literal_address(
+              fn->generator, ctx,
+              "  rebuild with -s for the file, line and stack trace", arg0) ||
+          !binary_emit_call_placeholder(&ctx->code, &off) ||
+          !binary_call_relocation_table_add(&ctx->call_relocations, "puts",
+                                            off)) {
+        ok = enc_err(fn, "out of memory emitting trap hint");
+        break;
+      }
       if (!binary_emit_mov_reg_imm64(&ctx->code, arg0, 1)) {
         ok = enc_err(fn, "out of memory emitting trap exit arg");
         break;

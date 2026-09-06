@@ -264,7 +264,7 @@ int ir_emit_null_check(IRLoweringContext *context, IRFunction *function,
   if (!ir_emit(context, function, &trap) ||
       !ir_emit_runtime_trap_ex(
           context, function, location, 1u,
-          "Fatal error: Null pointer dereference", NULL, NULL)) {
+          "Fatal error: null pointer dereference", NULL, NULL)) {
     free(trap_label);
     free(ok_label);
     return 0;
@@ -733,7 +733,7 @@ int ir_emit_bounds_check(IRLoweringContext *context,
   trap.text = trap_label;
   if (!ir_emit(context, function, &trap) ||
       !ir_emit_runtime_trap_ex(context, function, location, 2u,
-                               "Fatal error: Array index out of bounds", index,
+                               "Fatal error: array index out of bounds", index,
                                &compare.rhs)) {
     free(trap_label);
     free(ok_label);

@@ -6964,6 +6964,59 @@ catch {
 }
 
 
+# What a crash report says, and how many times it says the innermost frame.
+#
+# A trap raised from a runtime helper reports the caller's address as the
+# program counter and the helper's own frame as the frame pointer, so the first
+# link in the chain was the return into that same caller: every report the
+# safety path made printed its innermost frame twice, one byte apart. And a
+# build without -s carries no line table, so its whole report was one line with
+# nothing saying where the rest lives.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $crashExe = Join-Path $tmpDir "crash_report_frames.exe"
+  $crashBuild = & $CompilerPath --build --safe -s "tests/test_crash_report_frames.mettle" -o $crashExe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the crash fixture did not build: $crashBuild" }
+  $crashOut = & $crashExe 2>&1 | Out-String
+  if ($crashOut -match "unreached=") { throw "the crash fixture did not trap: $crashOut" }
+
+  $frames = @()
+  foreach ($line in ($crashOut -split "`r?`n")) {
+    if ($line -match "^\s*#(\d+)\s+(\S+)\s+at\s") { $frames += $Matches[2] }
+  }
+  $wanted = @("level_four", "level_three", "level_two", "level_one", "main")
+  if ($frames.Count -lt $wanted.Count) {
+    throw "the trace named $($frames.Count) frames, expected at least $($wanted.Count):`n$crashOut"
+  }
+  for ($i = 0; $i -lt $wanted.Count; $i++) {
+    if ($frames[$i] -ne $wanted[$i]) {
+      throw "frame $i is '$($frames[$i])', expected '$($wanted[$i])':`n$crashOut"
+    }
+  }
+
+  # A default build names neither file nor line, and has to say so. A separate
+  # fixture, because that report only appears where the compiler injected the
+  # check itself rather than where the hardware faulted.
+  $plainExe = Join-Path $tmpDir "crash_report_plain.exe"
+  $plainBuild = & $CompilerPath --build "tests/test_crash_report_plain.mettle" -o $plainExe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "the plain crash fixture did not build: $plainBuild" }
+  $plainOut = & $plainExe 2>&1 | Out-String
+  if ($plainOut -notmatch "rebuild with -s") {
+    throw "a default build reported a crash without saying how to locate it:`n$plainOut"
+  }
+
+  # One spelling, whichever path reported it.
+  if ($crashOut -cmatch "Fatal error: [A-Z]" -or $plainOut -cmatch "Fatal error: [A-Z]") {
+    throw "two spellings of the same headline:`n$crashOut`n$plainOut"
+  }
+  Write-CaseResult -Name "crash_report_frames" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "crash_report_frames" -Passed $false -Reason $_.Exception.Message
+}
+
 # Volatile accesses standing in the way of every optimization that would like
 # to move one. The pass driver signs the volatile accesses before and after
 # each pass and refuses a build that changed them, so a violation is a named

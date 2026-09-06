@@ -494,7 +494,17 @@ static void mettle_crash_write_trap_report(uintptr_t program_counter,
   if (filename && line > 0) {
     mettle_crash_write_location_arrow(function_name, filename, line, column);
     mettle_crash_write_source_snippet(site, arg0, arg1);
+    return;
   }
+
+  /* A build without -s carries no trap sites, no line table and no function
+   * table, so everything above found nothing and the whole report is one line.
+   * Crash reporting is on by default, so this is what most people see, and it
+   * used to say nothing about where the answer lives. */
+  mettle_crash_write_stderr(
+      "  no source location in this build; rebuild with -s for the file, line "
+      "and stack trace");
+  mettle_crash_write_newline();
 }
 
 static void mettle_crash_print_frame(size_t index, uintptr_t program_counter) {
@@ -569,7 +579,8 @@ static void mettle_crash_print_trace_from_frame(uintptr_t program_counter,
   mettle_crash_print_frame(0, program_counter);
 
   uintptr_t current_frame = frame_pointer;
-  for (size_t index = 1; index < 32; index++) {
+  size_t index = 1;
+  while (index < 32) {
     uintptr_t next_frame = 0;
     uintptr_t return_address = 0;
 
@@ -586,8 +597,21 @@ static void mettle_crash_print_trace_from_frame(uintptr_t program_counter,
       break;
     }
 
+    /* A trap raised from a runtime helper reports the caller's address as the
+     * program counter and the helper's own frame as the frame pointer, so the
+     * first link in the chain is the return into that same caller: the trace
+     * printed its innermost frame twice, one byte apart, on every report the
+     * safety path has ever made. Recognizing it costs one comparison and
+     * leaves the hardware-fault path alone, where a faulting address is never
+     * equal to a return address. */
+    if (index == 1 && return_address == program_counter) {
+      current_frame = next_frame;
+      continue;
+    }
+
     mettle_crash_print_frame(index, return_address - 1u);
     current_frame = next_frame;
+    index++;
   }
   mettle_crash_write_precision_hint();
 }

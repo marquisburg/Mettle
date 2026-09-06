@@ -1,0 +1,28 @@
+// A four-deep call chain that ends in a trap, so the report has four distinct
+// frames to name.
+//
+// The trace used to print its innermost frame twice, one byte apart, on every
+// report the safety path made: the trap reports the caller's address as the
+// program counter and the helper's own frame as the frame pointer, so the
+// first link in the chain is the return into that same caller.
+//
+// The array has a size the compiler can see, so the bounds check is injected
+// in an ordinary build too. That half checks the other half of the report: a
+// build without -s carries no line table, so its whole report is the headline,
+// and it has to say where the rest lives.
+import "std/io";
+
+@noinline fn level_four(a: int32*, at: int32) -> int32 { return a[at]; }
+@noinline fn level_three(a: int32*, at: int32) -> int32 { return level_four(a, at); }
+@noinline fn level_two(a: int32*, at: int32) -> int32 { return level_three(a, at); }
+@noinline fn level_one(a: int32*, at: int32) -> int32 { return level_two(a, at); }
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var storage: int32[4];
+  var i: int32 = 0;
+  while (i < 4) { storage[i] = i; i = i + 1; }
+  var v: int32 = level_one(&storage[0], argc * 9999);
+  print("unreached=");
+  println("{(int64)v}");
+  return 0;
+}

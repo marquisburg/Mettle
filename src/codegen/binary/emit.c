@@ -2475,7 +2475,20 @@ int code_generator_binary_emit_runtime_trap_call(
                    generator, context, message_operand, arg0)) {
       return 0;
     }
+    /* Then a second line saying where the rest of the report lives. Crash
+     * reporting is on by default, so this path is what most people see, and
+     * on its own it names neither the file nor the line nor the call that got
+     * there. The hint costs one string and one call on a path that is about
+     * to end the process. */
     if (!binary_emit_sub_rsp_imm32(&context->code, shadow) ||
+        !binary_emit_call_placeholder(&context->code, &displacement_offset) ||
+        !binary_call_relocation_table_add(&context->call_relocations,
+                                          puts_symbol, displacement_offset) ||
+        !binary_emit_add_rsp_imm32(&context->code, shadow) ||
+        !code_generator_binary_emit_cstring_literal_address(
+            generator, context,
+            "  rebuild with -s for the file, line and stack trace", arg0) ||
+        !binary_emit_sub_rsp_imm32(&context->code, shadow) ||
         !binary_emit_call_placeholder(&context->code, &displacement_offset) ||
         !binary_call_relocation_table_add(&context->call_relocations,
                                           puts_symbol, displacement_offset) ||

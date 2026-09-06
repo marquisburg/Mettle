@@ -1,0 +1,17 @@
+// An index the compiler bounds-checks in an ordinary build, so the trap fires
+// without --safe and the report is the degraded one most people see.
+//
+// That build carries no line table, so the headline is the whole report. It
+// has to say where the rest lives, and it has to spell the headline the same
+// way every other path spells it.
+import "std/io";
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var storage: int32[4];
+  var i: int32 = 0;
+  while (i < 4) { storage[i] = i; i = i + 1; }
+  var at: int32 = argc * 9999;
+  print("unreached=");
+  println("{(int64)storage[at]}");
+  return 0;
+}
