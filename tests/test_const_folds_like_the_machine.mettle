@@ -55,6 +55,18 @@ const TRUNC_NEG: int32 = (int32)(-2.9);
 const SIZE: int32 = (int32)(4);
 var table: int32[SIZE];
 
+// And a `case` label, which evaluated its value without the checker and so
+// could not resolve the type a cast names.
+@noinline fn pick(code: int32) -> int32 {
+  switch (code) {
+    case (int32)(1): { return 11; }
+    case 1 + 1: { return 22; }
+    case (int32)(2) + (int32)(1): { return 33; }
+    case (int32)(4)..(int32)(6): { return 44; }
+    default: { return 99; }
+  }
+}
+
 fn main(argc: int32, argv: cstring*) -> int32 {
   var wrong: int32 = 0;
 
@@ -83,6 +95,12 @@ fn main(argc: int32, argv: cstring*) -> int32 {
 
   table[3] = 9;
   if (table[3] != 9) { wrong = wrong + 1048576; }
+
+  if (pick(1) != 11) { wrong = wrong + 134217728; }
+  if (pick(2) != 22) { wrong = wrong + 268435456; }
+  if (pick(3) != 33) { wrong = wrong + 536870912; }
+  if (pick(5) != 44) { wrong = wrong + 1073741824; }
+  if (pick(9) != 99) { wrong = wrong + 8; }
 
   // The same expressions at run time, through a call the folder cannot see
   // into, must give the folded answers back.

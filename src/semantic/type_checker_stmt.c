@@ -999,8 +999,12 @@ int type_checker_check_switch_statement(TypeChecker *checker,
       }
 
       long long case_value = 0;
-      int case_eval_ok =
-          type_checker_eval_integer_constant(case_clause->value, &case_value);
+      /* With the checker, a cast and a named constant fold here the same way
+         they fold in a `const` initializer. Without it `case (int32)(1):` was
+         "must be a compile-time integer constant expression", which is what it
+         plainly is. */
+      int case_eval_ok = type_checker_eval_integer_constant_with_checker(
+          checker, case_clause->value, &case_value);
       if (!case_eval_ok &&
           case_clause->value->type == AST_IDENTIFIER) {
         Identifier *cid = (Identifier *)case_clause->value->data;
@@ -1067,8 +1071,8 @@ int type_checker_check_switch_statement(TypeChecker *checker,
         }
 
         long long case_high_value = 0;
-        int high_eval_ok = type_checker_eval_integer_constant(
-            case_clause->value_high, &case_high_value);
+        int high_eval_ok = type_checker_eval_integer_constant_with_checker(
+            checker, case_clause->value_high, &case_high_value);
         if (!high_eval_ok &&
             case_clause->value_high->type == AST_IDENTIFIER) {
           Identifier *hid = (Identifier *)case_clause->value_high->data;
