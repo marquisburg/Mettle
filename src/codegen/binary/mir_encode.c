@@ -2080,16 +2080,11 @@ static int mir_home_parameters(MirFunction *fn) {
   if (pc == 0) {
     return 1;
   }
-  int is_float[MIR_MAX_PARAMS + 1];
-  BinaryArgLocation locs[MIR_MAX_PARAMS + 1];
-  if (hidden) {
-    is_float[0] = 0; /* hidden out-pointer is an integer arg */
-  }
-  for (size_t i = 0; i < pc; i++) {
-    is_float[i + hidden] = fn->params[i].is_float;
-  }
-  if (!code_generator_binary_compute_arg_layout(abi, is_float, pc + hidden, locs,
-                                                NULL)) {
+  BinaryArgLocation locs[MIR_PARAM_SLOTS];
+  size_t first_slot[MIR_MAX_PARAMS];
+  size_t nslots = 0;
+  (void)hidden;
+  if (!mir_param_layout(fn, abi, locs, first_slot, &nslots)) {
     return enc_err(fn, "failed to compute parameter layout");
   }
 
@@ -2103,7 +2098,59 @@ static int mir_home_parameters(MirFunction *fn) {
     if (!fn->vregs[p->vreg].assigned) {
       continue; /* unused parameter */
     }
-    const BinaryArgLocation *loc = &locs[i + hidden];
+    const BinaryArgLocation *loc = &locs[first_slot[i]];
+    if (p->sysv_in_memory) {
+      MirOperand dst = mir_op_vreg(p->vreg);
+      int rbp_offset = 16 + abi->shadow_space_size + loc->stack_offset;
+      if (loc->kind != BINARY_ARG_ON_STACK ||
+          !binary_emit_lea_reg_mem(&fn->context->code, SCRATCH_A,
+                                   frame_base(fn),
+                                   frame_disp(fn, rbp_offset)) ||
+          !store_from(fn, &dst, SCRATCH_A)) {
+        return enc_err(fn, "out of memory homing a memory-class parameter");
+      }
+      continue;
+    }
+    if (p->sysv_eightbytes > 0) {
+      MirOperand dst = mir_op_vreg(p->vreg);
+      BinaryCodeBuffer *code = &fn->context->code;
+      int soff = spill_off(&fn->vregs[p->sysv_storage]);
+      for (int e = 0; e < p->sysv_eightbytes; e++) {
+        const BinaryArgLocation *le = &locs[first_slot[i] + (size_t)e];
+        int d = frame_disp(fn, -soff) + 8 * e;
+        int ok;
+        if (le->kind == BINARY_ARG_IN_GP_REGISTER) {
+          ok = binary_emit_mov_mem_reg(code, frame_base(fn), d,
+                                       le->gp_register);
+        } else if (le->kind == BINARY_ARG_IN_XMM_REGISTER) {
+          ok = binary_emit_movq_reg_xmm(code, SCRATCH_A, le->xmm_register) &&
+               binary_emit_mov_mem_reg(code, frame_base(fn), d, SCRATCH_A);
+        } else {
+          int rbp_offset = 16 + abi->shadow_space_size + le->stack_offset;
+          ok = binary_emit_mov_reg_mem(code, SCRATCH_A, frame_base(fn),
+                                       frame_disp(fn, rbp_offset)) &&
+               binary_emit_mov_mem_reg(code, frame_base(fn), d, SCRATCH_A);
+        }
+        if (!ok) {
+          return enc_err(fn, "out of memory rebuilding an aggregate parameter");
+        }
+      }
+      if (!binary_emit_lea_reg_mem(code, SCRATCH_A, frame_base(fn),
+                                   frame_disp(fn, -soff)) ||
+          !store_from(fn, &dst, SCRATCH_A)) {
+        return enc_err(fn, "out of memory homing an aggregate parameter");
+      }
+      continue;
+    }
+    if (p->sysv_direct_sse && loc->kind == BINARY_ARG_IN_XMM_REGISTER) {
+      MirOperand dst = mir_op_vreg(p->vreg);
+      if (!binary_emit_movq_reg_xmm(&fn->context->code, SCRATCH_A,
+                                    loc->xmm_register) ||
+          !store_from(fn, &dst, SCRATCH_A)) {
+        return enc_err(fn, "out of memory homing a float-class aggregate");
+      }
+      continue;
+    }
     if (!p->is_float) {
       if (loc->kind == BINARY_ARG_IN_GP_REGISTER) {
         if (!mir_home_gp_param(fn, p, loc->gp_register)) {
@@ -3559,7 +3606,10 @@ int mir_encode(MirFunction *fn) {
        * hence the absolute rsp offset is shadow + outgoing_stack_bytes + the
        * per-arg slot offset (in->a.imm). rsp is fixed after the prologue. */
       const BinaryAbi *oa = code_generator_binary_active_abi();
-      int off = oa->shadow_space_size + fn->outgoing_stack_bytes + (int)in->a.imm;
+      int off = in->b.kind == MIR_OPK_IMM && in->b.imm == 1
+                    ? oa->shadow_space_size + (int)in->a.imm
+                    : oa->shadow_space_size + fn->outgoing_stack_bytes +
+                          (int)in->a.imm;
       BinaryGpRegister D;
       int dst_in_reg = dst_is_reg(fn, &in->dst, &D);
       BinaryGpRegister target = dst_in_reg ? D : SCRATCH_A;

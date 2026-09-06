@@ -1050,6 +1050,8 @@ static int mir_call_is_runtime_trap(const IRInstruction *in) {
 
 static int mir_call_is_runtime_hook(const IRInstruction *in);
 static int mir_runtime_hook_is_supported(const IRInstruction *in);
+static int mir_call_sysv_arg_class(CodeGenerator *g, const IRInstruction *in,
+                                   size_t a, BinarySysvAggregate *agg);
 
 static int mir_asm_next_binding(const char **cursor, char *name,
                                 size_t capacity) {
@@ -1461,12 +1463,19 @@ static int mir_call_sysv_returns_in_gp_registers(CodeGenerator *g,
       out->eightbyte_count > 2) {
     return 0;
   }
-  for (e = 0; e < out->eightbyte_count; e++) {
-    if (out->classes[e] != BINARY_EIGHTBYTE_INTEGER) {
-      return 0;
-    }
-  }
+  (void)e;
   return 1;
+}
+
+static int mir_sysv_aggregate_class(CodeGenerator *g, const char *fn_name,
+                                    MtlcType *t, BinarySysvAggregate *agg) {
+  if (!t || !fn_name ||
+      !code_generator_binary_active_abi()->counts_classes_separately ||
+      !code_generator_binary_function_is_abi_public(g, fn_name)) {
+    return 0;
+  }
+  return code_generator_binary_classify_sysv_aggregate(t, agg) &&
+         (agg->in_memory || agg->eightbyte_count > 0);
 }
 
 static const char *mir_operand_kind_name(int kind) {
@@ -1559,22 +1568,20 @@ static int mir_call_is_supported(CodeGenerator *g,
     if (sysv_probe->counts_classes_separately &&
         code_generator_binary_function_is_abi_public(g, in->text)) {
       size_t a = 0;
-      if (ret && code_generator_type_is_aggregate(ret)) {
-        /* A 16-byte-or-less aggregate comes back in RAX/RDX; MIR spills it
-         * into the destination's home after the call. Anything larger, or
-         * carrying a float eightbyte, still goes to the baseline emitter. */
-        if (!mir_call_sysv_returns_in_gp_registers(g, in->text, ret, NULL) ||
-            mir_operand_struct_home_size(g, ir_function, &in->dest) == 0) {
+      if (ret && code_generator_type_is_aggregate(ret) &&
+          mir_call_sysv_returns_in_gp_registers(g, in->text, (MtlcType *)ret,
+                                                NULL)) {
+        if (mir_operand_struct_home_size(g, ir_function, &in->dest) == 0) {
           mir_call_trace("sysv_extern_aggregate_ret");
           return 0;
         }
         sysv_gp_return = 1;
       }
       for (a = 0; a < in->argument_count; a++) {
-        MtlcType *pt = callee->data.function.parameter_types
-                           ? callee->data.function.parameter_types[a]
-                           : NULL;
-        if (pt && code_generator_type_is_aggregate(pt)) {
+        BinarySysvAggregate agg;
+        if (mir_call_sysv_arg_class(g, in, a, &agg) &&
+            !mir_indirect_source_is_supported(g, ir_function,
+                                              &in->arguments[a])) {
           mir_call_trace("sysv_extern_aggregate_arg");
           return 0;
         }
@@ -2495,35 +2502,53 @@ static int mir_gate_function_shape(CodeGenerator *generator,
   if (ir_function->is_naked) {
     return mir_trace_bail(ir_function, "naked");
   }
-  /* A function reached from outside under SysV takes and returns aggregates by
-   * eightbyte. That prologue and that return live in the baseline emitter, so
-   * the whole function goes there. */
-  if (code_generator_binary_active_abi()->counts_classes_separately &&
-      code_generator_binary_function_is_abi_public(generator,
-                                                   ir_function->name)) {
-    BinarySysvAggregate agg;
-    if (code_generator_binary_classify_sysv_aggregate(
-            code_generator_binary_get_resolved_type(
-                generator, ir_function->return_type_name, 1),
-            &agg)) {
-      mir_trace_bail(ir_function, "sysv_public_aggregate_ret");
-      return 0;
-    }
-    for (size_t i = 0; i < ir_function->parameter_count; i++) {
-      if (code_generator_binary_classify_sysv_aggregate(
-              code_generator_binary_get_resolved_type(
-                  generator,
-                  ir_function->parameter_types
-                      ? ir_function->parameter_types[i]
-                      : NULL,
-                  0),
-              &agg)) {
-        mir_trace_bail(ir_function, "sysv_public_aggregate_param");
-        return 0;
-      }
-    }
+  return 1;
+}
+
+static int mir_sysv_bind_param(CodeGenerator *g, const char *fn_name,
+                               MtlcType *pt, MirParam *p) {
+  BinarySysvAggregate agg;
+  p->sysv_eightbytes = 0;
+  p->sysv_in_memory = 0;
+  p->sysv_sse[0] = 0;
+  p->sysv_sse[1] = 0;
+  p->sysv_size = 0;
+  p->sysv_direct_sse = 0;
+  p->sysv_storage = MIR_VREG_NONE;
+  if (!pt || !code_generator_type_is_aggregate(pt) ||
+      !mir_sysv_aggregate_class(g, fn_name, pt, &agg)) {
+    return 0;
+  }
+  p->sysv_size = (int)agg.size;
+  if (code_generator_abi_classify(pt) != ABI_PASS_INDIRECT) {
+    p->sysv_direct_sse =
+        agg.eightbyte_count == 1 && agg.classes[0] == BINARY_EIGHTBYTE_SSE;
+    return 1;
+  }
+  if (agg.in_memory) {
+    p->sysv_in_memory = 1;
+    return 1;
+  }
+  p->sysv_eightbytes = (int)agg.eightbyte_count;
+  for (size_t e = 0; e < agg.eightbyte_count && e < 2; e++) {
+    p->sysv_sse[e] = agg.classes[e] == BINARY_EIGHTBYTE_SSE;
   }
   return 1;
+}
+
+static int mir_sysv_returns_in_registers(CodeGenerator *g,
+                                         const IRFunction *ir_function,
+                                         BinarySysvAggregate *agg) {
+  MtlcType *rt = code_generator_binary_get_resolved_type(
+      g, ir_function->return_type_name, 1);
+  BinarySysvAggregate local;
+  if (!agg) {
+    agg = &local;
+  }
+  return rt && code_generator_type_is_aggregate(rt) &&
+         mir_sysv_aggregate_class(g, ir_function->name, rt, agg) &&
+         !agg->in_memory && agg->eightbyte_count > 0 &&
+         code_generator_abi_classify(rt) == ABI_PASS_INDIRECT;
 }
 
 static int mir_gate_signature(CodeGenerator *generator,
@@ -2552,25 +2577,34 @@ static int mir_gate_signature(CodeGenerator *generator,
      * shifting every user parameter up by one, model that here so the on-stack
      * detection matches the prologue's homing exactly. */
     int hidden = mir_type_is_indirect_aggregate(generator,
-                                                ir_function->return_type_name)
+                                                ir_function->return_type_name) &&
+                         !mir_sysv_returns_in_registers(generator, ir_function,
+                                                        NULL)
                      ? 1
                      : 0;
     if (ir_function->parameter_count > 0) {
       const BinaryAbi *abi = code_generator_binary_active_abi();
-      int aug_float[MIR_MAX_PARAMS + 1];
-      BinaryArgLocation locs[MIR_MAX_PARAMS + 1];
-      size_t n = ir_function->parameter_count + (size_t)hidden;
-      if (n > MIR_MAX_PARAMS) {
-        return mir_trace_bail(ir_function, "sig:params>max");
-      }
-      if (hidden) {
-        aug_float[0] = 0; /* hidden out-pointer is an integer arg */
-      }
+      MirFunction probe;
+      BinaryArgLocation locs[MIR_PARAM_SLOTS];
+      size_t first_slot[MIR_MAX_PARAMS];
+      size_t n = 0;
+      memset(&probe, 0, sizeof(probe));
+      probe.returns_indirect = hidden;
       for (size_t i = 0; i < ir_function->parameter_count; i++) {
-        aug_float[i + (size_t)hidden] = pis_float[i];
+        MirParam *p = &probe.params[probe.param_count++];
+        MtlcType *rt = code_generator_binary_get_resolved_type(
+            generator,
+            ir_function->parameter_types ? ir_function->parameter_types[i]
+                                         : NULL,
+            0);
+        p->vreg = MIR_VREG_NONE;
+        p->arg_index = (int)i;
+        p->width = 8;
+        p->is_signed = 0;
+        p->is_float = pis_float[i];
+        mir_sysv_bind_param(generator, ir_function->name, rt, p);
       }
-      if (!code_generator_binary_compute_arg_layout(abi, aug_float, n, locs,
-                                                    NULL)) {
+      if (!mir_param_layout(&probe, abi, locs, first_slot, &n)) {
         return mir_trace_bail(ir_function, "sig:arg_layout");
       }
     }
@@ -2815,8 +2849,11 @@ static int mir_gate_indirect_operands(CodeGenerator *generator,
          * source may be another home, a by-ref param (copy through its
          * pointer), or a string literal (copy from its .rdata record). */
         (in->op == IR_OP_ASSIGN && (o == &in->dest || o == &in->lhs) &&
-         mir_operand_struct_home_size(generator, ir_function, &in->dest) >
-             0 &&
+         (mir_operand_struct_home_size(generator, ir_function, &in->dest) >
+              0 ||
+          (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+           mir_name_is_global_aggregate(generator, ir_function,
+                                        in->dest.name))) &&
          mir_indirect_source_is_supported(generator, ir_function,
                                           &in->lhs)) ||
         /* An 8-byte string VALUE is a record pointer: storing a string
@@ -5336,6 +5373,57 @@ static int mir_lower_return(MirFunction *fn, CodeGenerator *g,
   *handled = 1;
   switch (in->op) {
   case IR_OP_RETURN: {
+    if (fn->returns_sysv_registers && in->lhs.kind != IR_OPERAND_NONE) {
+      const IRFunction *rirf =
+          ctx && ctx->function_name
+              ? code_generator_find_ir_function_binary(g, ctx->function_name)
+              : NULL;
+      MirVregId base = mir_emit_indirect_source_addr(
+          fn, g, ctx, map, rirf, &in->lhs, fn->sysv_return_size);
+      MirVregId parts[2] = {MIR_VREG_NONE, MIR_VREG_NONE};
+      int ints = 0;
+      int sses = 0;
+      if (base == MIR_VREG_NONE) {
+        return 0;
+      }
+      for (int e = 0; e < fn->sysv_return_eightbytes; e++) {
+        MirOperand src = mir_op_mem_vreg(base, MIR_VREG_NONE, 1, e * 8);
+        if (fn->sysv_return_sse[e]) {
+          parts[e] = mir_new_vreg(fn, MIR_RC_XMM, 8);
+          if (parts[e] == MIR_VREG_NONE ||
+              !mir_emit_fmov(fn, mir_op_vreg(parts[e]), src, 8)) {
+            return 0;
+          }
+        } else {
+          parts[e] = mir_new_vreg(fn, MIR_RC_GP, 8);
+          if (parts[e] == MIR_VREG_NONE ||
+              !mir_emit1(fn, MIR_MOV, mir_op_vreg(parts[e]), src,
+                         mir_op_none(), 8, 0, 0)) {
+            return 0;
+          }
+        }
+      }
+      if (!mir_emit_global_writebacks(fn, g, map, wb)) {
+        return 0;
+      }
+      for (int e = 0; e < fn->sysv_return_eightbytes; e++) {
+        if (fn->sysv_return_sse[e]) {
+          BinaryXmmRegister x = sses++ == 0 ? BINARY_XMM0 : BINARY_XMM1;
+          if (!mir_emit_fmov(fn, mir_op_phys(x, MIR_RC_XMM),
+                             mir_op_vreg(parts[e]), 8)) {
+            return 0;
+          }
+        } else {
+          BinaryGpRegister r = ints++ == 0 ? BINARY_GP_RAX : BINARY_GP_RDX;
+          if (!mir_emit1(fn, MIR_MOV, mir_op_phys(r, MIR_RC_GP),
+                         mir_op_vreg(parts[e]), mir_op_none(), 8, 0, 0)) {
+            return 0;
+          }
+        }
+      }
+      return mir_emit1(fn, MIR_RET, mir_op_none(), mir_op_none(), mir_op_none(),
+                       8, 0, 0);
+    }
     if (!fn->returns_indirect && in->lhs.kind == IR_OPERAND_STRING) {
       if (!mir_emit_global_writebacks(fn, g, map, wb) ||
           !mir_emit1(fn, MIR_LEA_CSTR, mir_op_phys(BINARY_GP_RAX, MIR_RC_GP),
@@ -5451,7 +5539,24 @@ typedef struct {
   const int *indirect_off;
   const int *arg_is_float;
   int hidden;
+  const size_t *first_slot;
+  const BinarySysvAggregate *sysv;
+  const MirVregId *agg_base;
 } MirCallArgs;
+
+static int mir_call_sysv_arg_class(CodeGenerator *g, const IRInstruction *in,
+                                   size_t a, BinarySysvAggregate *agg) {
+  const CgSym *callee =
+      g->ir_program ? code_generator_lookup_symbol(g, in->text) : NULL;
+  MtlcType *pt = (callee && callee->kind == CG_SYM_FUNCTION &&
+                  callee->data.function.parameter_types &&
+                  a < callee->data.function.parameter_count)
+                     ? callee->data.function.parameter_types[a]
+                     : NULL;
+  memset(agg, 0, sizeof(*agg));
+  return pt && code_generator_type_is_aggregate(pt) &&
+         mir_sysv_aggregate_class(g, in->text, pt, agg);
+}
 
 static int mir_lower_runtime_trap(MirFunction *fn, CodeGenerator *g,
                                   BinaryFunctionContext *ctx, MirNameMap *map,
@@ -5615,11 +5720,45 @@ static int mir_marshal_stack_args(const MirCallArgs *c) {
   (void)indirect_off;
   (void)arg_is_float;
   for (size_t a = 0; a < in->argument_count; a++) {
-    if (locs[a + hidden].kind != BINARY_ARG_ON_STACK) {
+    size_t s = c->first_slot[a];
+    if (c->sysv[a].size > 0) {
+      if (c->sysv[a].in_memory) {
+        MirVregId dst = mir_new_vreg(fn, MIR_RC_GP, 8);
+        if (locs[s].kind != BINARY_ARG_ON_STACK || dst == MIR_VREG_NONE ||
+            !mir_emit1(fn, MIR_LEA_OUTARG, mir_op_vreg(dst),
+                       mir_op_imm(locs[s].stack_offset), mir_op_imm(1), 8, 0,
+                       0) ||
+            !mir_emit_struct_copy(fn, dst, c->agg_base[a],
+                                  (int)c->sysv[a].size)) {
+          return 0;
+        }
+        continue;
+      }
+      for (size_t e = 0; e < c->sysv[a].eightbyte_count; e++) {
+        MirVregId t;
+        if (locs[s + e].kind != BINARY_ARG_ON_STACK) {
+          continue;
+        }
+        t = mir_new_vreg(fn, MIR_RC_GP, 8);
+        if (t == MIR_VREG_NONE ||
+            !mir_emit1(fn, MIR_MOV, mir_op_vreg(t),
+                       mir_op_mem_vreg(c->agg_base[a], MIR_VREG_NONE, 1,
+                                       (int)(e * 8u)),
+                       mir_op_none(), 8, 0, 0) ||
+            !mir_emit1(fn, MIR_STORE_OUTARG, mir_op_none(), mir_op_vreg(t),
+                       mir_op_imm(abi->shadow_space_size +
+                                  locs[s + e].stack_offset),
+                       8, 0, 0)) {
+          return 0;
+        }
+      }
       continue;
     }
-    int slot = abi->shadow_space_size + locs[a + hidden].stack_offset;
-    if (indirect_off[a] < 0 && arg_is_float[a + (size_t)hidden]) {
+    if (locs[s].kind != BINARY_ARG_ON_STACK) {
+      continue;
+    }
+    int slot = abi->shadow_space_size + locs[s].stack_offset;
+    if (indirect_off[a] < 0 && arg_is_float[s]) {
       MtlcType *fpt = (call_callee && call_callee->kind == CG_SYM_FUNCTION &&
                        call_callee->data.function.parameter_types)
                           ? call_callee->data.function.parameter_types[a]
@@ -5685,10 +5824,27 @@ static int mir_marshal_gp_args(const MirCallArgs *c) {
   (void)indirect_off;
   (void)arg_is_float;
   for (size_t a = 0; a < in->argument_count; a++) {
-    if (locs[a + hidden].kind != BINARY_ARG_IN_GP_REGISTER) {
+    size_t s = c->first_slot[a];
+    if (c->sysv[a].size > 0) {
+      for (size_t e = 0; !c->sysv[a].in_memory &&
+                         e < c->sysv[a].eightbyte_count; e++) {
+        if (locs[s + e].kind != BINARY_ARG_IN_GP_REGISTER) {
+          continue;
+        }
+        if (!mir_emit1(fn, MIR_MOV,
+                       mir_op_phys(locs[s + e].gp_register, MIR_RC_GP),
+                       mir_op_mem_vreg(c->agg_base[a], MIR_VREG_NONE, 1,
+                                       (int)(e * 8u)),
+                       mir_op_none(), 8, 0, 0)) {
+          return 0;
+        }
+      }
       continue;
     }
-    BinaryGpRegister reg = locs[a + hidden].gp_register;
+    if (locs[s].kind != BINARY_ARG_IN_GP_REGISTER) {
+      continue;
+    }
+    BinaryGpRegister reg = locs[s].gp_register;
     if (indirect_off[a] >= 0) {
       /* INDIRECT struct arg: lea &copy_slot directly into the ABI arg reg. */
       if (!mir_emit1(fn, MIR_LEA_OUTARG, mir_op_phys(reg, MIR_RC_GP),
@@ -5736,11 +5892,34 @@ static int mir_marshal_xmm_args(const MirCallArgs *c) {
   (void)indirect_off;
   (void)arg_is_float;
   for (size_t a = 0; a < in->argument_count; a++) {
-    if (locs[a + hidden].kind != BINARY_ARG_IN_XMM_REGISTER) {
+    size_t s = c->first_slot[a];
+    if (c->sysv[a].size > 0) {
+      for (size_t e = 0; !c->sysv[a].in_memory &&
+                         e < c->sysv[a].eightbyte_count; e++) {
+        MirVregId t;
+        if (locs[s + e].kind != BINARY_ARG_IN_XMM_REGISTER) {
+          continue;
+        }
+        fn->has_xmm_arg_call = 1;
+        t = mir_new_vreg(fn, MIR_RC_XMM, 8);
+        if (t == MIR_VREG_NONE ||
+            !mir_emit_fmov(fn, mir_op_vreg(t),
+                           mir_op_mem_vreg(c->agg_base[a], MIR_VREG_NONE, 1,
+                                           (int)(e * 8u)),
+                           8) ||
+            !mir_emit_fmov(fn,
+                           mir_op_phys(locs[s + e].xmm_register, MIR_RC_XMM),
+                           mir_op_vreg(t), 8)) {
+          return 0;
+        }
+      }
+      continue;
+    }
+    if (locs[s].kind != BINARY_ARG_IN_XMM_REGISTER) {
       continue;
     }
     fn->has_xmm_arg_call = 1;
-    BinaryXmmRegister xreg = locs[a + hidden].xmm_register;
+    BinaryXmmRegister xreg = locs[s].xmm_register;
     MtlcType *pt = (call_callee && call_callee->kind == CG_SYM_FUNCTION &&
                 call_callee->data.function.parameter_types)
                    ? call_callee->data.function.parameter_types[a]
@@ -5788,7 +5967,9 @@ static int mir_copy_indirect_args(MirFunction *fn, CodeGenerator *g,
                 call_callee->data.function.parameter_types)
                    ? call_callee->data.function.parameter_types[a]
                    : NULL;
-    if (!pt || code_generator_abi_classify(pt) != ABI_PASS_INDIRECT) {
+    BinarySysvAggregate sysv_probe;
+    if (!pt || code_generator_abi_classify(pt) != ABI_PASS_INDIRECT ||
+        mir_call_sysv_arg_class(g, in, a, &sysv_probe)) {
       continue;
     }
     int sz = (int)code_generator_abi_type_size(pt);
@@ -5888,15 +6069,30 @@ static int mir_emit_call_result(MirFunction *fn, CodeGenerator *g,
      * allocator cannot hand the address register one that still holds a
      * piece of the result. */
     MirVregId parts[2] = {MIR_VREG_NONE, MIR_VREG_NONE};
-    BinaryGpRegister srcs[2] = {BINARY_GP_RAX, BINARY_GP_RDX};
+    int part_is_sse[2] = {0, 0};
     size_t e = 0;
+    size_t ints = 0;
+    size_t sses = 0;
     for (e = 0; e < sysv_ret->eightbyte_count; e++) {
-      parts[e] = mir_new_vreg(fn, MIR_RC_GP, 8);
-      if (parts[e] == MIR_VREG_NONE ||
-          !mir_emit1(fn, MIR_MOV, mir_op_vreg(parts[e]),
-                     mir_op_phys(srcs[e], MIR_RC_GP), mir_op_none(), 8, 0,
-                     0)) {
-        return 0;
+      if (sysv_ret->classes[e] == BINARY_EIGHTBYTE_SSE) {
+        BinaryXmmRegister x = sses++ == 0 ? BINARY_XMM0 : BINARY_XMM1;
+        part_is_sse[e] = 1;
+        parts[e] = mir_new_vreg(fn, MIR_RC_XMM, 8);
+        if (parts[e] == MIR_VREG_NONE ||
+            !mir_emit_fmov(fn, mir_op_vreg(parts[e]),
+                           mir_op_phys(x, MIR_RC_XMM), 8)) {
+          return 0;
+        }
+        continue;
+      }
+      {
+        BinaryGpRegister r = ints++ == 0 ? BINARY_GP_RAX : BINARY_GP_RDX;
+        parts[e] = mir_new_vreg(fn, MIR_RC_GP, 8);
+        if (parts[e] == MIR_VREG_NONE ||
+            !mir_emit1(fn, MIR_MOV, mir_op_vreg(parts[e]),
+                       mir_op_phys(r, MIR_RC_GP), mir_op_none(), 8, 0, 0)) {
+          return 0;
+        }
       }
     }
     MirOperand dstsym = mir_value_operand(fn, g, ctx, map, &in->dest);
@@ -5922,9 +6118,15 @@ static int mir_emit_call_result(MirFunction *fn, CodeGenerator *g,
       return 0;
     }
     for (e = 0; e < sysv_ret->eightbyte_count; e++) {
-      if (!mir_emit1(fn, MIR_MOV,
-                     mir_op_mem_vreg(addr, MIR_VREG_NONE, 1, (int)(e * 8u)),
-                     mir_op_vreg(parts[e]), mir_op_none(), 8, 0, 0)) {
+      MirOperand slot = mir_op_mem_vreg(addr, MIR_VREG_NONE, 1, (int)(e * 8u));
+      if (part_is_sse[e]) {
+        if (!mir_emit_fmov(fn, slot, mir_op_vreg(parts[e]), 8)) {
+          return 0;
+        }
+        continue;
+      }
+      if (!mir_emit1(fn, MIR_MOV, slot, mir_op_vreg(parts[e]), mir_op_none(),
+                     8, 0, 0)) {
         return 0;
       }
     }
@@ -5969,31 +6171,6 @@ static int mir_call_return_classification(CodeGenerator *g,
     }
   }
   return sysv_gp_return;
-}
-
-static void mir_tag_float_arg_slots(CodeGenerator *g,
-                                    const IRInstruction *in,
-                                    int hidden, int *arg_is_float) {
-  /* Tag each positional slot's float class from the callee's parameter types so
-   * the ABI layout routes float args to XMM registers. Without this every arg
-   * defaults to integer and a float arg is homed into a GP register (and a
-   * float immediate then reaches the GP value path, an encoder error). */
-  {
-    const CgSym *fc = g->ir_program
-                     ? code_generator_lookup_symbol(g, in->text)
-                     : NULL;
-    if (fc && fc->kind == CG_SYM_FUNCTION &&
-        fc->data.function.parameter_types) {
-      for (size_t a = 0; a < in->argument_count &&
-                         a < fc->data.function.parameter_count;
-           a++) {
-        MtlcType *pt = fc->data.function.parameter_types[a];
-        if (pt && code_generator_binary_resolved_type_float_bits(pt) != 0) {
-          arg_is_float[a + (size_t)hidden] = 1;
-        }
-      }
-    }
-  }
 }
 
 static int mir_lower_call(MirFunction *fn, CodeGenerator *g,
@@ -6047,23 +6224,77 @@ static int mir_lower_call(MirFunction *fn, CodeGenerator *g,
     int sysv_gp_return = mir_call_return_classification(
         g, in, &ret_indirect, &sysv_ret);
     int hidden = ret_indirect ? 1 : 0;
-    int arg_is_float[MIR_MAX_PARAMS + 1] = {0};
-    mir_tag_float_arg_slots(g, in, hidden, arg_is_float);
-    BinaryArgLocation locs[MIR_MAX_PARAMS + 1];
+    int arg_is_float[MIR_PARAM_SLOTS] = {0};
+    int force_stack[MIR_PARAM_SLOTS] = {0};
+    size_t stack_slots[MIR_PARAM_SLOTS] = {0};
+    size_t first_slot[MIR_MAX_PARAMS] = {0};
+    BinarySysvAggregate sysv[MIR_MAX_PARAMS];
+    MirVregId agg_base[MIR_MAX_PARAMS];
+    BinaryArgLocation locs[MIR_PARAM_SLOTS];
     int stack_bytes = 0;
-    size_t nlocs = in->argument_count + (size_t)hidden;
-    if (nlocs > (size_t)(MIR_MAX_PARAMS + 1)) {
-      fn->has_error = 1;
-      return 0;
+    size_t nlocs = (size_t)hidden;
+    for (size_t a = 0; a < in->argument_count; a++) {
+      agg_base[a] = MIR_VREG_NONE;
+      first_slot[a] = nlocs;
+      if (mir_call_sysv_arg_class(g, in, a, &sysv[a])) {
+        if (sysv[a].in_memory) {
+          if (nlocs >= MIR_PARAM_SLOTS) {
+            fn->has_error = 1;
+            return 0;
+          }
+          force_stack[nlocs] = 1;
+          stack_slots[nlocs] = (sysv[a].size + 7u) / 8u;
+          nlocs++;
+          continue;
+        }
+        for (size_t e = 0; e < sysv[a].eightbyte_count; e++) {
+          if (nlocs >= MIR_PARAM_SLOTS) {
+            fn->has_error = 1;
+            return 0;
+          }
+          arg_is_float[nlocs++] =
+              sysv[a].classes[e] == BINARY_EIGHTBYTE_SSE ? 1 : 0;
+        }
+        continue;
+      }
+      if (nlocs >= MIR_PARAM_SLOTS) {
+        fn->has_error = 1;
+        return 0;
+      }
+      {
+        const CgSym *fc =
+            g->ir_program ? code_generator_lookup_symbol(g, in->text) : NULL;
+        MtlcType *pt = (fc && fc->kind == CG_SYM_FUNCTION &&
+                        fc->data.function.parameter_types &&
+                        a < fc->data.function.parameter_count)
+                           ? fc->data.function.parameter_types[a]
+                           : NULL;
+        arg_is_float[nlocs] =
+            pt && code_generator_binary_resolved_type_float_bits(pt) != 0;
+      }
+      nlocs++;
     }
     if (nlocs > 0 &&
-        !code_generator_binary_compute_arg_layout(abi, arg_is_float, nlocs, locs,
-                                                  &stack_bytes)) {
+        !code_generator_binary_compute_arg_layout_ex(abi, arg_is_float,
+                                                     force_stack, stack_slots,
+                                                     nlocs, locs,
+                                                     &stack_bytes)) {
       fn->has_error = 1;
       return 0;
     }
     if (stack_bytes > fn->outgoing_stack_bytes) {
       fn->outgoing_stack_bytes = stack_bytes;
+    }
+    for (size_t a = 0; a < in->argument_count; a++) {
+      if (sysv[a].size == 0) {
+        continue;
+      }
+      agg_base[a] = mir_emit_indirect_source_addr(
+          fn, g, ctx, map, fn->ir_function, &in->arguments[a],
+          (int)sysv[a].size);
+      if (agg_base[a] == MIR_VREG_NONE) {
+        return 0;
+      }
     }
     /* INDIRECT (by-value) struct arguments: the ABI passes a pointer to a
      * caller-made copy. Lay out a copy slot per such arg in the outgoing
@@ -6089,6 +6320,9 @@ static int mir_lower_call(MirFunction *fn, CodeGenerator *g,
       args.indirect_off = indirect_off;
       args.arg_is_float = arg_is_float;
       args.hidden = hidden;
+      args.first_slot = first_slot;
+      args.sysv = sysv;
+      args.agg_base = agg_base;
       if (!mir_marshal_stack_args(&args) || !mir_marshal_gp_args(&args) ||
           !mir_marshal_xmm_args(&args)) {
         return 0;
@@ -10875,6 +11109,18 @@ int code_generator_binary_emit_function_via_mir(
         (!is_agg && pt)
             ? code_generator_binary_resolved_type_is_signed_integer(pt)
             : 0;
+    mir_sysv_bind_param(generator, ir_function->name, pt,
+                        &fn.params[fn.param_count]);
+    if (fn.params[fn.param_count].sysv_eightbytes > 0) {
+      MirVregId storage = mir_new_vreg(&fn, MIR_RC_GP, 8);
+      if (storage == MIR_VREG_NONE) {
+        goto oom;
+      }
+      fn.vregs[storage].address_taken = 1;
+      fn.vregs[storage].home_bytes =
+          (fn.params[fn.param_count].sysv_size + 15) & ~15;
+      fn.params[fn.param_count].sysv_storage = storage;
+    }
     fn.param_count++;
   }
 
@@ -10885,7 +11131,15 @@ int code_generator_binary_emit_function_via_mir(
   {
     MtlcType *rt = code_generator_binary_get_resolved_type(
         generator, ir_function->return_type_name, 1);
-    if (rt && code_generator_type_is_aggregate(rt) &&
+    BinarySysvAggregate ragg;
+    if (mir_sysv_returns_in_registers(generator, ir_function, &ragg)) {
+      fn.returns_sysv_registers = 1;
+      fn.sysv_return_eightbytes = (int)ragg.eightbyte_count;
+      fn.sysv_return_size = (int)ragg.size;
+      for (size_t e = 0; e < ragg.eightbyte_count && e < 2; e++) {
+        fn.sysv_return_sse[e] = ragg.classes[e] == BINARY_EIGHTBYTE_SSE;
+      }
+    } else if (rt && code_generator_type_is_aggregate(rt) &&
         code_generator_abi_classify(rt) == ABI_PASS_INDIRECT) {
       fn.returns_indirect = 1;
       fn.indirect_return_size = (int)code_generator_abi_type_size(rt);

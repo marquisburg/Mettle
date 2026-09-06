@@ -500,6 +500,12 @@ typedef struct {
   int width;     /* 1/2/4/8 */
   int is_signed; /* sign-extend (1) vs zero-extend (0) into 64 bits */
   int is_float;  /* arrives in an XMM register (float32/float64) */
+  int sysv_eightbytes;
+  int sysv_in_memory;
+  int sysv_sse[2];
+  int sysv_size;
+  int sysv_direct_sse;
+  MirVregId sysv_storage;
 } MirParam;
 
 /* Upper bound on parameters a MIR function can take. The first few arrive in
@@ -645,6 +651,11 @@ typedef struct {
 
   int reserve_rbx;
 
+  int returns_sysv_registers;
+  int sysv_return_eightbytes;
+  int sysv_return_sse[2];
+  int sysv_return_size;
+
   int has_error;
 
   /* Label name -> instruction index, built on demand by mir_label_index.
@@ -659,6 +670,12 @@ typedef struct {
 } MirFunction;
 
 /* ---- construction ------------------------------------------------------- */
+
+#define MIR_PARAM_SLOTS (2 * MIR_MAX_PARAMS + 1)
+
+int mir_param_layout(const MirFunction *fn, const BinaryAbi *abi,
+                     BinaryArgLocation *locs, size_t *first_slot,
+                     size_t *count_out);
 
 void mir_function_init(MirFunction *fn, BinaryFunctionContext *context);
 void mir_function_destroy(MirFunction *fn);

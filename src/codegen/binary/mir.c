@@ -4,6 +4,60 @@
 #include <stdlib.h>
 #include <string.h>
 
+int mir_param_layout(const MirFunction *fn, const BinaryAbi *abi,
+                     BinaryArgLocation *locs, size_t *first_slot,
+                     size_t *count_out) {
+  int is_float[MIR_PARAM_SLOTS];
+  int force_stack[MIR_PARAM_SLOTS];
+  size_t stack_slots[MIR_PARAM_SLOTS];
+  size_t n = 0;
+  if (fn->returns_indirect) {
+    is_float[n] = 0;
+    force_stack[n] = 0;
+    stack_slots[n] = 0;
+    n++;
+  }
+  for (size_t i = 0; i < fn->param_count; i++) {
+    const MirParam *p = &fn->params[i];
+    first_slot[i] = n;
+    if (p->sysv_in_memory) {
+      if (n >= MIR_PARAM_SLOTS) {
+        return 0;
+      }
+      is_float[n] = 0;
+      force_stack[n] = 1;
+      stack_slots[n] = ((size_t)p->sysv_size + 7u) / 8u;
+      n++;
+      continue;
+    }
+    if (p->sysv_eightbytes > 0) {
+      for (int e = 0; e < p->sysv_eightbytes; e++) {
+        if (n >= MIR_PARAM_SLOTS) {
+          return 0;
+        }
+        is_float[n] = p->sysv_sse[e];
+        force_stack[n] = 0;
+        stack_slots[n] = 0;
+        n++;
+      }
+      continue;
+    }
+    if (n >= MIR_PARAM_SLOTS) {
+      return 0;
+    }
+    is_float[n] = p->is_float || p->sysv_direct_sse;
+    force_stack[n] = 0;
+    stack_slots[n] = 0;
+    n++;
+  }
+  *count_out = n;
+  if (n == 0) {
+    return 1;
+  }
+  return code_generator_binary_compute_arg_layout_ex(
+      abi, is_float, force_stack, stack_slots, n, locs, NULL);
+}
+
 void mir_function_init(MirFunction *fn, BinaryFunctionContext *context) {
   if (!fn) {
     return;
