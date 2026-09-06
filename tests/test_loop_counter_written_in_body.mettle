@@ -1,0 +1,100 @@
+// A loop whose body writes the counter is not a counted loop.
+//
+// The unroller reads a start, a limit and a step off the loop header and turns
+// them into a trip count. That arithmetic is the loop's real trip count only
+// while the counter moves by that step and nothing else. Nothing checked, so a
+// body that assigned the counter kept its own writes AND the header's
+// increment, and the unrolled copies ran a different number of times than the
+// loop would have:
+//
+//   for i in 0..6 { trips = trips + 1; i = i + 2; }
+//
+// runs twice, and `-O` ran it six times. Debug and `--safe` answered 2 while
+// `-O` and `--release` answered 6, so the level a program was built at decided
+// what it printed. The same parser accepted a while loop with two increments
+// and took one of them as the step, which is the `stride` case below.
+import "std/io";
+
+@noinline fn small() -> int32 {
+  var trips: int32 = 0;
+  for i in 0..6 {
+    trips = trips + 1;
+    i = i + 2;
+  }
+  return trips;
+}
+
+// Past any unroll budget, so whatever decides this one is not the unroller.
+@noinline fn big() -> int32 {
+  var trips: int32 = 0;
+  for i in 0..1000 {
+    trips = trips + 1;
+    i = i + 3;
+  }
+  return trips;
+}
+
+@noinline fn conditional(k: int32) -> int32 {
+  var trips: int32 = 0;
+  for i in 0..10 {
+    trips = trips + 1;
+    if (trips > k) { i = i + 4; }
+  }
+  return trips;
+}
+
+// The counter indexes an array and moves on its own, so the skipped elements
+// have to stay skipped.
+@noinline fn indexed(a: int32[], n: int32) -> int32 {
+  var sum: int32 = 0;
+  for i in 0..n {
+    sum = sum + a[i];
+    i = i + 1;
+  }
+  return sum;
+}
+
+@noinline fn stride() -> int32 {
+  var trips: int32 = 0;
+  var i: int32 = 0;
+  while (i < 12) {
+    trips = trips + 1;
+    i = i + 3;
+    i = i + 1;
+  }
+  return trips;
+}
+
+// The counter left where the body put it, read after the loop.
+@noinline fn escaped() -> int32 {
+  var last: int32 = 0;
+  for i in 0..8 {
+    i = i + 1;
+    last = i;
+  }
+  return last;
+}
+
+fn main() -> int32 {
+  var a: int32[8];
+  for i in 0..8 {
+    a[i] = i + 1;
+  }
+
+  var wrong: int32 = 0;
+  if (small() != 2) { wrong = wrong + 1; }
+  if (big() != 250) { wrong = wrong + 2; }
+  if (conditional(3) != 5) { wrong = wrong + 4; }
+  // a[0] + a[2] + a[4] + a[6] = 1 + 3 + 5 + 7
+  if (indexed(a, 8) != 16) { wrong = wrong + 8; }
+  if (stride() != 3) { wrong = wrong + 16; }
+  // i takes 1, 3, 5, 7 and the loop stops when the increment makes it 8.
+  if (escaped() != 7) { wrong = wrong + 32; }
+
+  print("loop counter wrong=");
+  println("{(int64)wrong}");
+  if (wrong != 0) {
+    return 1;
+  }
+  return 0;
+}

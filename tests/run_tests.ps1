@@ -7029,6 +7029,38 @@ catch {
   Write-CaseResult -Name "defer_and_pointer_members" -Passed $false -Reason $_.Exception.Message
 }
 
+# A loop whose body writes the counter is not a counted loop, and the level a
+# program is built at must not decide how many times it runs. This one answered
+# 2 in debug and 6 at -O, so it needs every backend and every level to agree.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $counterPrevMir = $env:METTLE_MIR
+  try {
+    foreach ($backend in @("mir", "baseline")) {
+      if ($backend -eq "baseline") { $env:METTLE_MIR = "0" } else { $env:METTLE_MIR = $null }
+      foreach ($mode in @(@(), @("-O"), @("--release"))) {
+        $fixture = "test_loop_counter_written_in_body"
+        $fixExe = Join-Path $tmpDir "$fixture.exe"
+        $fixBuild = & $CompilerPath --build @mode "tests/$fixture.mettle" -o $fixExe 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+          throw "$fixture did not build ($backend $($mode -join ' ')): $fixBuild"
+        }
+        $fixOut = & $fixExe 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0 -or $fixOut -notmatch "wrong=0") {
+          throw "$fixture failed ($backend $($mode -join ' ')): exit $LASTEXITCODE`n$fixOut"
+        }
+      }
+    }
+  }
+  finally { $env:METTLE_MIR = $counterPrevMir }
+  Write-CaseResult -Name "loop_counter_written_in_body" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "loop_counter_written_in_body" -Passed $false -Reason $_.Exception.Message
+}
+
 # Every tests/*.mettle is named by some harness, and the ones no other harness
 # names are named by a manifest. A fixture nothing runs is not a test: 45 of
 # them had accumulated, and one had been failing the whole time.

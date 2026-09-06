@@ -232,6 +232,19 @@ parsed_compare: {
     if (!ir_loop_body_opcode_is_unroll_safe(function->instructions[j].op)) {
       return 0;
     }
+    /* The trip count above is arithmetic on the start, the limit and the step,
+     * and it is only the loop's real trip count while the counter goes up by
+     * that step and nothing else. A body that assigns the counter itself makes
+     * every one of those numbers a guess: `for i in 0..6 { i = i + 2; }` runs
+     * twice, and unrolling it six times ran the body six times. Nothing here
+     * knows what the write does, so a loop that has one is not a counted loop
+     * and no caller of this parser may treat it as one. */
+    if (j != increment_index &&
+        ir_instruction_writes_symbol(&function->instructions[j]) &&
+        function->instructions[j].dest.name &&
+        strcmp(function->instructions[j].dest.name, counter_symbol) == 0) {
+      return 0;
+    }
   }
 
   *counter_symbol_out = counter_symbol;
