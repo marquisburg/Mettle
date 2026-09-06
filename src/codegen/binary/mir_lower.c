@@ -1151,6 +1151,27 @@ static int mir_call_is_inline_zero_fill(const IRInstruction *in) {
 static int mir_arg_float_bits(CodeGenerator *g, const IRFunction *ir_function,
                               const IROperand *op);
 
+static int mir_indirect_call_uses_own_types(const MtlcType *ft,
+                                            const IRInstruction *in) {
+  if (!ft) {
+    return 1;
+  }
+  if (in->argument_count != ft->fn_param_count) {
+    return 1;
+  }
+  for (size_t a = 0; ft->fn_param_types && a < ft->fn_param_count; a++) {
+    MtlcType *pt = ft->fn_param_types[a];
+    if (pt && (code_generator_type_is_aggregate(pt) ||
+               code_generator_binary_type_is_string(pt)) &&
+        code_generator_abi_classify(pt) == ABI_PASS_INDIRECT) {
+      return 1;
+    }
+  }
+  return ft->fn_return_type &&
+         (code_generator_type_is_aggregate(ft->fn_return_type) ||
+          code_generator_binary_type_is_string(ft->fn_return_type));
+}
+
 static MtlcType *mir_indirect_call_type(CodeGenerator *g,
                                     const IRFunction *ir_function,
                                     const IRInstruction *in) {
@@ -1195,12 +1216,15 @@ static int mir_call_indirect_is_supported(CodeGenerator *g,
     return 0;
   }
   MtlcType *ft = mir_indirect_call_type(g, ir_function, in);
+  if (ft && mir_indirect_call_uses_own_types(ft, in)) {
+    ft = NULL;
+  }
   if (!ft) {
     /* Callee through a TEMP (closure thunks): the fn-ptr type is unknown, so
      * classify every argument as GP -- exactly what the fallback does with a
      * NULL callee type. Anything float-valued or aggregate-valued must defer,
      * since the GP marshalling can't carry it. */
-    if (in->lhs.kind != IR_OPERAND_TEMP ||
+    if (in->lhs.kind == IR_OPERAND_TEMP &&
         mir_temp_is_float(g, (IRFunction *)ir_function, in->lhs.name, 0)) {
       mir_call_trace("indirect_no_type");
       return 0;
@@ -2786,7 +2810,6 @@ static int mir_gate_indirect_operands(CodeGenerator *generator,
         (in->op == IR_OP_CALL && o == &in->dest &&
          mir_name_is_indirect_struct_local(generator, ir_function, o->name)) ||
         (in->op == IR_OP_CALL_INDIRECT && o == &in->dest &&
-         in->lhs.kind == IR_OPERAND_TEMP &&
          mir_name_is_indirect_struct_local(generator, ir_function, o->name)) ||
         /* Whole-struct ASSIGN into a LEA-able struct home (rep-movsb): the
          * source may be another home, a by-ref param (copy through its
@@ -6316,7 +6339,11 @@ static int mir_lower_call_indirect(MirFunction *fn, CodeGenerator *g,
             ? code_generator_find_ir_function_binary(g, ctx->function_name)
             : NULL;
     MtlcType *ft = mir_indirect_call_type(g, irf, in);
-    if (!ft && in->lhs.kind != IR_OPERAND_TEMP) {
+    if (ft && mir_indirect_call_uses_own_types(ft, in)) {
+      ft = NULL;
+    }
+    if (!ft && in->lhs.kind != IR_OPERAND_TEMP &&
+        in->lhs.kind != IR_OPERAND_SYMBOL) {
       fn->has_error = 1;
       return 0;
     }
