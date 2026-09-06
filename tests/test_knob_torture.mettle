@@ -1,0 +1,124 @@
+// One program that touches what the optimization knobs turn on and off.
+//
+// Every knob in the sweep is meant to change how this compiles and not what it
+// answers. The shapes here are the ones the knobs name: a reduction and a map
+// for the vectorizers, a pair of interleaved accumulators for the SLP pass, a
+// strided walk for the prefetcher, a branch for if-conversion, float and
+// integer arithmetic side by side, a struct field walk, and a call chain deep
+// enough to inline.
+import "std/io";
+import "std/mem";
+
+struct Body {
+  x: int64;
+  y: int64;
+}
+
+@noinline fn reduce_i32(a: int32*, n: int32) -> int64 {
+  var total: int64 = 0;
+  var i: int32 = 0;
+  while (i < n) {
+    total = total + (int64)a[i];
+    i = i + 1;
+  }
+  return total;
+}
+
+@noinline fn scale_i32(a: int32*, n: int32, by: int32) {
+  var i: int32 = 0;
+  while (i < n) {
+    a[i] = a[i] * by + 1;
+    i = i + 1;
+  }
+}
+
+@noinline fn interleaved(a: int32*, b: int32*, n: int32) -> int64 {
+  var even: int64 = 0;
+  var odd: int64 = 0;
+  var i: int32 = 0;
+  while (i < n) {
+    even = even + (int64)(a[i] * b[i]);
+    odd = odd + (int64)(a[i] + b[i]);
+    i = i + 1;
+  }
+  return even ^ odd;
+}
+
+@noinline fn strided(m: int32*, rows: int32, stride: int32) -> int64 {
+  var total: int64 = 0;
+  var r: int32 = 0;
+  while (r < rows) {
+    total = total + (int64)m[r * stride];
+    r = r + 1;
+  }
+  return total;
+}
+
+@noinline fn branchy(a: int32*, n: int32, pivot: int32) -> int64 {
+  var total: int64 = 0;
+  var i: int32 = 0;
+  while (i < n) {
+    if (a[i] > pivot) { total = total + 3; } else { total = total - 1; }
+    i = i + 1;
+  }
+  return total;
+}
+
+@noinline fn floats(n: int32) -> float64 {
+  var acc: float64 = 0.0;
+  var i: int32 = 0;
+  while (i < n) {
+    acc = acc + (float64)i * 1.5 - 0.25;
+    i = i + 1;
+  }
+  return acc - (-acc);
+}
+
+@noinline fn fields(b: Body*, n: int32) -> int64 {
+  var total: int64 = 0;
+  var i: int32 = 0;
+  while (i < n) {
+    b[i].x = b[i].x + b[i].y;
+    total = total ^ b[i].x;
+    i = i + 1;
+  }
+  return total;
+}
+
+@inline fn step3(v: int64) -> int64 { return v * 3 + 1; }
+@inline fn step2(v: int64) -> int64 { return step3(v) ^ 5; }
+@inline fn step1(v: int64) -> int64 { return step2(v) + 7; }
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var n: int32 = 96;
+  var a: int32* = malloc((int64)n * 4);
+  var b: int32* = malloc((int64)n * 4);
+  var bodies: Body* = malloc((int64)n * sizeof(Body));
+
+  var i: int32 = 0;
+  while (i < n) {
+    a[i] = i * 3 + argc;
+    b[i] = n - i;
+    bodies[i].x = (int64)i;
+    bodies[i].y = (int64)(n - i);
+    i = i + 1;
+  }
+
+  var total: int64 = 0;
+  total = total + reduce_i32(a, n);
+  scale_i32(a, n, 2);
+  total = total ^ reduce_i32(a, n);
+  total = total + interleaved(a, b, n);
+  total = total ^ strided(a, 12, 8);
+  total = total + branchy(a, n, 100);
+  total = total ^ (int64)floats(40);
+  total = total + fields(bodies, n);
+  total = total ^ step1((int64)argc);
+
+  print("knob total=");
+  println("{total}");
+  free(a);
+  free(b);
+  free(bodies);
+  return 0;
+}

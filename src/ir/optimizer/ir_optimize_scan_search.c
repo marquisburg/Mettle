@@ -2091,7 +2091,9 @@ int ir_simd_slp_mac_i32_pass(IRFunction *function, int *changed) {
       no_slp = getenv("NO_SLP") ? 1 : 0;
     }
     if (no_slp) {
-      return 0;
+      /* Declining to run is success with no work done. Zero is the failure
+       * code, and the driver reports a failed pass as an internal error. */
+      return 1;
     }
   }
   for (size_t i = 0; i < function->instruction_count; i++) {
@@ -2431,7 +2433,9 @@ int ir_simd_slp_mac_i8_pass(IRFunction *function, int *changed) {
       no_slp = getenv("NO_SLP") ? 1 : 0;
     }
     if (no_slp) {
-      return 0;
+      /* Declining to run is success with no work done. Zero is the failure
+       * code, and the driver reports a failed pass as an internal error. */
+      return 1;
     }
   }
   for (size_t i = 0; i < function->instruction_count; i++) {

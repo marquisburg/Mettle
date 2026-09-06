@@ -20,6 +20,17 @@ typedef struct {
   long long max;
 } Range;
 
+/* A hard stop on proof work, in steps.
+ *
+ * The narrowing lock below bounds the shape that used to run away, but a
+ * prover that recurses over user-written expressions has no natural bound, and
+ * a compiler that appears to hang tells the programmer nothing. Past this the
+ * prover answers "unknown" and every proof that needed it refuses in the
+ * ordinary way. The whole 900-file test suite peaks near 92 thousand steps, so
+ * this is two hundred times the worst real program and a fraction of a second
+ * of work. `--proof-budget=N` sets a smaller one. */
+#define TYPE_CHECKER_PROOF_CEILING 20000000LL
+
 static Range range_unknown(void) {
   Range r;
   r.has_min = 0;
@@ -405,6 +416,32 @@ static void narrow_visit(void *raw, ASTNode *node, int negated) {
   }
 }
 
+/* Take the narrowing lock for `name`, or report that it is already held. See
+ * the field comment on TypeChecker::narrowing. */
+static int narrowing_enter(TypeChecker *checker, const char *name) {
+  size_t i;
+  if (!checker || !name) {
+    return 0;
+  }
+  for (i = 0; i < checker->narrowing_count; i++) {
+    if (strcmp(checker->narrowing[i], name) == 0) {
+      return 0;
+    }
+  }
+  if (checker->narrowing_count >= sizeof(checker->narrowing) /
+                                     sizeof(checker->narrowing[0])) {
+    return 0;
+  }
+  checker->narrowing[checker->narrowing_count++] = name;
+  return 1;
+}
+
+static void narrowing_leave(TypeChecker *checker) {
+  if (checker && checker->narrowing_count > 0) {
+    checker->narrowing_count--;
+  }
+}
+
 static void narrow_by_guards(TypeChecker *checker, const char *name,
                              Range *range, int depth) {
   NarrowContext ctx;
@@ -448,6 +485,11 @@ static int range_of(TypeChecker *checker, ASTNode *expr, Range *out,
                     int depth) {
   if (checker) {
     checker->proof_steps++;
+    if (checker->proof_steps > TYPE_CHECKER_PROOF_CEILING) {
+      checker->proof_ceiling_hit = 1;
+      *out = range_unknown();
+      return 0;
+    }
   }
   const char *op = NULL;
   ASTNode *left = NULL;
@@ -488,12 +530,14 @@ static int range_of(TypeChecker *checker, ASTNode *expr, Range *out,
       }
       *out = range_of_type(type);
     }
-    if (identifier && identifier->name) {
+    if (identifier && identifier->name &&
+        narrowing_enter(checker, identifier->name)) {
       Type *declared = expr->resolved_type ? expr->resolved_type
                                            : (symbol ? symbol->type : NULL);
       narrow_by_guards(checker, identifier->name, out, depth);
       narrow_by_monotone(checker, identifier->name, out, depth);
       narrow_by_relation(checker, declared, out, depth);
+      narrowing_leave(checker);
     }
     return out->has_min || out->has_max;
   }
@@ -1321,6 +1365,11 @@ static int frange_of(TypeChecker *checker, ASTNode *expr, FRange *out,
   ASTNode *operand = NULL;
   if (checker) {
     checker->proof_steps++;
+    if (checker->proof_steps > TYPE_CHECKER_PROOF_CEILING) {
+      checker->proof_ceiling_hit = 1;
+      *out = frange_unknown();
+      return 0;
+    }
   }
   *out = frange_unknown();
   if (!expr || depth > 32) {
@@ -1348,9 +1397,11 @@ static int frange_of(TypeChecker *checker, ASTNode *expr, FRange *out,
       return 1;
     }
     *out = frange_of_type(type);
-    if (identifier && identifier->name) {
+    if (identifier && identifier->name &&
+        narrowing_enter(checker, identifier->name)) {
       fnarrow_by_accumulator(checker, identifier->name, out, depth);
       fnarrow_by_guards(checker, identifier->name, out, depth);
+      narrowing_leave(checker);
     }
     return out->has_min || out->has_max;
   }
@@ -2202,6 +2253,10 @@ int type_checker_why_proof(const TypeChecker *checker, const char *site,
 
 long long type_checker_proof_steps(const TypeChecker *checker) {
   return checker ? checker->proof_steps : 0;
+}
+
+int type_checker_proof_ceiling_hit(const TypeChecker *checker) {
+  return checker ? checker->proof_ceiling_hit : 0;
 }
 
 void type_checker_report_proofs(const TypeChecker *checker, FILE *out) {

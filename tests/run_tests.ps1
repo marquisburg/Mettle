@@ -6964,6 +6964,182 @@ catch {
 }
 
 
+# The sign of a zero, which is the one float value negation used to lose.
+# `-x` was lowered as `0 - x`: right for every float except zero, where IEEE
+# 754 asks for -0.0 and the subtract gives +0.0, and unable to flip the sign of
+# a NaN at all. Both backends had it, written twice and wrong twice, so both
+# are checked here.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $zeroPrevMir = $env:METTLE_MIR
+  try {
+    foreach ($backend in @("mir", "baseline")) {
+      if ($backend -eq "baseline") { $env:METTLE_MIR = "0" } else { $env:METTLE_MIR = $null }
+      foreach ($mode in @(@(), @("--release"))) {
+        $zeroExe = Join-Path $tmpDir "float_signed_zero.exe"
+        $zeroBuild = & $CompilerPath --build @mode "tests/test_float_signed_zero.mettle" -o $zeroExe 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+          throw "building the signed-zero fixture ($backend $($mode -join ' ')) failed: $zeroBuild"
+        }
+        $zeroOut = & $zeroExe 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0 -or $zeroOut -notmatch "signed zero wrong=0") {
+          throw "a negated zero lost its sign ($backend $($mode -join ' ')): exit $LASTEXITCODE`n$zeroOut"
+        }
+      }
+    }
+  }
+  finally { $env:METTLE_MIR = $zeroPrevMir }
+  Write-CaseResult -Name "float_signed_zero" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "float_signed_zero" -Passed $false -Reason $_.Exception.Message
+}
+
+# A volatile spin loop at --release. Polling a memory-mapped register is the
+# central bare-metal idiom, and loop-invariant motion used to hoist the poll
+# out of the loop. The invariant checker caught it, so the build was refused
+# rather than miscompiled, which meant `examples/os` could not use --release.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  foreach ($mode in @(@(), @("-O"), @("--release"))) {
+    $volExe = Join-Path $tmpDir "volatile_licm.exe"
+    $volBuild = & $CompilerPath --build @mode "tests/test_volatile_licm.mettle" -o $volExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "a volatile spin loop did not build at '$($mode -join ' ')': $volBuild"
+    }
+    $volOut = & $volExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $volOut -notmatch "ticks = 3") {
+      throw "the volatile poll gave the wrong answer at '$($mode -join ' ')': $volOut"
+    }
+  }
+  Write-CaseResult -Name "volatile_licm_release" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "volatile_licm_release" -Passed $false -Reason $_.Exception.Message
+}
+
+# Two guards that say the same thing. Narrowing `v` by `v > hi` asks for the
+# range of `hi`, which narrows `hi` by the same guard, which asks for `v`
+# again. One guard is a walk; two are a tree, and the compiler used to spend
+# billions of steps inside type checking with no diagnostic and no progress.
+# The timeout is the assertion: a hang has no other symptom.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  foreach ($mode in @(@(), @("--release"))) {
+    $guardExe = Join-Path $tmpDir "guard_duplicate.exe"
+    $guardArgs = (@("--build") + $mode + @("tests/test_guard_duplicate_terminates.mettle", "-o", "`"$guardExe`"")) -join " "
+    $guardInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $guardInfo.FileName = (Resolve-Path $CompilerPath).Path
+    $guardInfo.Arguments = $guardArgs
+    $guardInfo.UseShellExecute = $false
+    $guardInfo.RedirectStandardError = $true
+    $guardInfo.RedirectStandardOutput = $true
+    $guardProc = [System.Diagnostics.Process]::Start($guardInfo)
+    $guardReader = $guardProc.StandardError.ReadToEndAsync()
+    $null = $guardProc.StandardOutput.ReadToEndAsync()
+    if (-not $guardProc.WaitForExit(60000)) {
+      $guardProc.Kill()
+      throw "the compiler did not terminate on duplicate guard conditions ('$($mode -join ' ')')"
+    }
+    if ($guardProc.ExitCode -ne 0) {
+      throw "the duplicate-guard fixture failed to build at '$($mode -join ' ')': exit $($guardProc.ExitCode)`n$($guardReader.Result)"
+    }
+    $guardOut = & $guardExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $guardOut -notmatch "guards total=15") {
+      throw "the duplicate-guard fixture gave the wrong answer: $guardOut"
+    }
+  }
+  Write-CaseResult -Name "duplicate_guards_terminate" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "duplicate_guards_terminate" -Passed $false -Reason $_.Exception.Message
+}
+
+# The address of a parameter, under --safe. A parameter has a stack slot and
+# no declaration to prove it by, so its slot was left undescribed and kept
+# whatever dead record the previous frame retired over the same bytes. A
+# correct program was rejected, which is the one failure the checks may not
+# have.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  foreach ($mode in @(@("--safe"), @("--release", "--safe"), @("--safe", "--native-heap"))) {
+    $paramExe = Join-Path $tmpDir "safe_parameter_address.exe"
+    $paramBuild = & $CompilerPath --build @mode "tests/test_safe_parameter_address.mettle" -o $paramExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "building the parameter-address fixture ('$($mode -join ' ')') failed: $paramBuild"
+    }
+    $paramOut = & $paramExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $paramOut -notmatch "parameter address wrong=0") {
+      throw "reading through the address of a parameter was rejected ('$($mode -join ' ')'): exit $LASTEXITCODE`n$paramOut"
+    }
+  }
+  Write-CaseResult -Name "safe_parameter_address" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "safe_parameter_address" -Passed $false -Reason $_.Exception.Message
+}
+
+# Every environment knob, set, against the answer it must not change. A knob
+# that turns an optimization off is a policy decision, and a pass that reports
+# declining as failing takes the compile down with an internal error. That has
+# happened twice, both times found by hand.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $knobPython = Get-Command python -ErrorAction SilentlyContinue
+  if (-not $knobPython) { $knobPython = Get-Command python3 -ErrorAction SilentlyContinue }
+  if (-not $knobPython) {
+    Write-CaseResult -Name "knob_sweep" -Passed $true -Reason "python not found; skipped"
+  }
+  else {
+    $knobOut = & $knobPython.Source "tests/run_knob_sweep.py" `
+      --compiler $CompilerPath --output (Join-Path $tmpDir "knob-sweep") 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "a knob changed the answer or broke the build:`n$knobOut"
+    }
+    Write-CaseResult -Name "knob_sweep" -Passed $true
+  }
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "knob_sweep" -Passed $false -Reason $_.Exception.Message
+}
+
+# Native against native, and native against the compile-time interpreter, on
+# the edge cases where a lowering and a language most easily drift apart.
+# Translation validation interprets both sides of a pass and never executes
+# native code, so the signed-zero miscompile lived in the half it could not
+# see. This is that half.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $oraclePython = Get-Command python -ErrorAction SilentlyContinue
+  if (-not $oraclePython) { $oraclePython = Get-Command python3 -ErrorAction SilentlyContinue }
+  if (-not $oraclePython) {
+    Write-CaseResult -Name "interpreter_native_oracle" -Passed $true -Reason "python not found; skipped"
+  }
+  else {
+    $oracleOut = & $oraclePython.Source "tests/run_interp_native_oracle.py" `
+      --compiler $CompilerPath --output (Join-Path $tmpDir "oracle") 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "an engine disagreed about an edge case:`n$oracleOut"
+    }
+    Write-CaseResult -Name "interpreter_native_oracle" -Passed $true
+  }
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "interpreter_native_oracle" -Passed $false -Reason $_.Exception.Message
+}
+
 # A cached global and a pointer into it, in both directions. The backend keeps
 # each referenced global scalar in a register and works from that copy, so a
 # program that also takes the global's address needs the copy written back

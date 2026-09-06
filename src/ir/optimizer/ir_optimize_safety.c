@@ -3667,6 +3667,11 @@ static int safety_describe_stack(IRProgram *program, IRFunction *function) {
       declared++;
     }
   }
+  /* A parameter has a stack slot too, and no DECLARE_LOCAL to find it by.
+   * Left undescribed, its slot keeps whatever dead descriptor the previous
+   * frame retired over the same bytes, so reading through `&parameter`
+   * reported a use-after-free in a program that had freed nothing. */
+  declared += function->parameter_count;
   if (declared == 0) {
     return 1;
   }
@@ -3705,6 +3710,32 @@ static int safety_describe_stack(IRProgram *program, IRFunction *function) {
       fprintf(stderr, "safety: describing local %s (%zu bytes) in %s\n",
               instruction->dest.name, type->size,
               function->name ? function->name : "?");
+    }
+  }
+
+  for (size_t p = 0; p < function->parameter_count; p++) {
+    const char *name = function->parameter_names ? function->parameter_names[p]
+                                                 : NULL;
+    MtlcType *type = name && function->parameter_types
+        ? ir_program_lookup_type(program, function->parameter_types[p]) : NULL;
+    if (!name || !type || type->size == 0) {
+      continue;
+    }
+    /* A name the body redeclares is a local shadowing the parameter, and the
+     * loop above already described it at the right size. */
+    if (ir_function_find_declaration(function, name, 1)) {
+      continue;
+    }
+    if (!safety_local_address_escapes(function, name)) {
+      continue;
+    }
+    locals[count].name = name;
+    locals[count].size = (long long)type->size;
+    locals[count].location = function->location;
+    count++;
+    if (safety_trace_enabled()) {
+      fprintf(stderr, "safety: describing parameter %s (%zu bytes) in %s\n",
+              name, type->size, function->name ? function->name : "?");
     }
   }
   if (count == 0) {
@@ -3994,13 +4025,22 @@ static int safety_retire_stack_notes(const IRProgram *program,
     }
 
     int declared = 0;
-    for (size_t d = 0; d < function->instruction_count; d++) {
+    /* A parameter has a slot and no declaration to prove it by. Retiring its
+     * note left the slot undescribed, so it kept whatever dead descriptor the
+     * previous frame retired over the same bytes and reading through
+     * `&parameter` reported a use-after-free in a program that freed nothing. */
+    for (size_t d = 0; d < function->parameter_count && !declared; d++) {
+      if (function->parameter_names && function->parameter_names[d] &&
+          strcmp(function->parameter_names[d], take->lhs.name) == 0) {
+        declared = 1;
+      }
+    }
+    for (size_t d = 0; d < function->instruction_count && !declared; d++) {
       const IRInstruction *candidate = &function->instructions[d];
       if (candidate->op == IR_OP_DECLARE_LOCAL &&
           candidate->dest.kind == IR_OPERAND_SYMBOL && candidate->dest.name &&
           strcmp(candidate->dest.name, take->lhs.name) == 0) {
         declared = 1;
-        break;
       }
     }
     if (declared) {

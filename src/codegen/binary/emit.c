@@ -5822,19 +5822,27 @@ int code_generator_binary_emit_unary(CodeGenerator *generator,
     }
 
     if (strcmp(op, "-") == 0) {
-      /* Negate as 0 - x at the operand precision. */
+      /* Negate by flipping the sign bit, matching mir_lower's IR_OP_UNARY so
+       * the two backends agree on 0 and NaN. `0 - x` is right for every float
+       * except zero, where IEEE 754 asks for -0.0 and the subtract yields
+       * +0.0, and it cannot flip the sign of a NaN at all.
+       *
+       * The bits go through a general register because the result leaves in
+       * one anyway, so the mask needs no constant pool entry and float32 needs
+       * no separate mask. */
       int neg_ok =
-          binary_emit_pxor_xmm_xmm(&context->code, BINARY_XMM1, BINARY_XMM1) &&
-          (fbits == 32
-               ? binary_emit_subss_xmm_xmm(&context->code, BINARY_XMM1,
-                                           BINARY_XMM0)
-               : binary_emit_subsd_xmm_xmm(&context->code, BINARY_XMM1,
-                                           BINARY_XMM0)) &&
           (fbits == 32
                ? binary_emit_movd_reg_xmm(&context->code, BINARY_GP_RAX,
-                                          BINARY_XMM1)
+                                          BINARY_XMM0)
                : binary_emit_movq_reg_xmm(&context->code, BINARY_GP_RAX,
-                                          BINARY_XMM1));
+                                          BINARY_XMM0)) &&
+          (fbits == 32
+               ? binary_emit_xor_reg_imm32(&context->code, BINARY_GP_RAX,
+                                           0x80000000u)
+               : (binary_emit_mov_reg_imm64(&context->code, BINARY_GP_R10,
+                                            0x8000000000000000ull) &&
+                  binary_emit_alu_reg_reg(&context->code, 0x31, BINARY_GP_RAX,
+                                          BINARY_GP_R10)));
       if (!neg_ok) {
         goto emit_failure;
       }

@@ -1,4 +1,4 @@
-param(
+﻿param(
   [string]$Compiler = (Join-Path $PSScriptRoot "../../bin/mettle.exe"),
   [string]$Image = (Join-Path $PSScriptRoot "mettleos.vhd"),
   [switch]$Fresh
@@ -41,7 +41,7 @@ if ($LASTEXITCODE -ne 0) { throw "the boot sector did not compile" }
 & $Compiler $stageSource --target i8086-none --image-base 0x8000 --emit-flat $stageImage
 if ($LASTEXITCODE -ne 0) { throw "the second stage did not compile" }
 
-& $Compiler $kernelSource --target x86_64-none --image-base 0x20000 --emit-flat $kernelImage
+& $Compiler $kernelSource --target x86_64-none --release --image-base 0x20000 --emit-flat $kernelImage
 if ($LASTEXITCODE -ne 0) { throw "the kernel did not compile" }
 
 $boot = [System.IO.File]::ReadAllBytes($bootImage)

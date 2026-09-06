@@ -1,0 +1,57 @@
+// The address of a parameter, read back through the pointer.
+//
+// A parameter has a stack slot like a local, and no declaration to prove it
+// by. Under --safe it was left undescribed, so it kept whatever dead record
+// the previous frame retired over the same bytes, and reading through
+// `&parameter` reported a use-after-free in a program that had freed nothing.
+// A correct program rejected is the one failure mode the checks are not
+// allowed to have.
+//
+// The recursion is what makes the slot certainly reused: each frame retires
+// its own record on the way out, and the next one lands on the same bytes.
+import "std/io";
+import "std/math";
+
+@noinline fn through_param(x: int64) -> int64 {
+  var p: int64* = &x;
+  return *p;
+}
+
+@noinline fn through_local(x: int64) -> int64 {
+  var v: int64 = x;
+  var p: int64* = &v;
+  return *p;
+}
+
+@noinline fn reinterpret(x: float64) -> int64 {
+  var p: float64* = &x;
+  var q: int64* = (int64*)p;
+  return *q;
+}
+
+@noinline fn descend(depth: int64, carry: int64) -> int64 {
+  if (depth <= 0) { return carry; }
+  var here: int64 = carry;
+  var p: int64* = &here;
+  return descend(depth - 1, *p + 1);
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var wrong: int32 = 0;
+  var n: int64 = (int64)argc;
+
+  if (through_param(n + 41) != n + 41) { wrong = wrong + 1; }
+  if (through_local(n + 41) != n + 41) { wrong = wrong + 2; }
+  if (reinterpret(f64_from_bits(0x4059000000000000 + (n - n))) !=
+      0x4059000000000000) { wrong = wrong + 4; }
+  if (descend(8, n) != n + 8) { wrong = wrong + 8; }
+
+  // The same again, so the second call runs over the first call's retired
+  // records rather than over untouched stack.
+  if (through_param(n + 7) != n + 7) { wrong = wrong + 16; }
+  if (descend(8, n) != n + 8) { wrong = wrong + 32; }
+
+  print("parameter address wrong=");
+  println("{(int64)wrong}");
+  return wrong;
+}

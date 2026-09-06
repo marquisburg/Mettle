@@ -191,6 +191,23 @@ typedef struct {
      because that is where the budget is. */
   size_t comptime_text_bytes;
   long long proof_steps;
+  /* Names whose range is being narrowed right now.
+   *
+   * Narrowing `v` by a guard `v > hi` asks for the range of `hi`, which
+   * narrows `hi` by the same guard, which asks for the range of `v`. Each
+   * level multiplies by the number of guards that mention the name, so two
+   * guards over the same pair cost 2^32 paths before the depth cap ends it,
+   * and the compiler appears to hang with no diagnostic.
+   *
+   * A name already on this stack is answered from its declared type instead.
+   * Refusing to narrow can only widen a range, and a wider range proves less,
+   * so a proof that succeeds still succeeds for the same reason. */
+  const char *narrowing[16];
+  size_t narrowing_count;
+  /* Set when the prover gave up on a ceiling rather than on the question.
+   * Every proof it then refuses reports itself in the ordinary way, so this
+   * only exists to say why they all stopped at once. */
+  int proof_ceiling_hit;
   size_t proofs_attempted;
   size_t proofs_proven;
   size_t proofs_refused;
@@ -247,6 +264,7 @@ void type_checker_report_proofs(const TypeChecker *checker, FILE *out);
 void type_checker_set_gpu_type_report(int enabled);
 void type_checker_print_gpu_type_report(FILE *out);
 long long type_checker_proof_steps(const TypeChecker *checker);
+int type_checker_proof_ceiling_hit(const TypeChecker *checker);
 int type_checker_why_proof(const TypeChecker *checker, const char *site,
                            const char *type_name, FILE *out);
 

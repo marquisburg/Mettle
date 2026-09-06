@@ -1,0 +1,401 @@
+// The edge cases where an encoder and an interpreter are most likely to
+// disagree, each reduced to one integer.
+//
+// Ordinary arithmetic already agrees to the digit over hundreds of iterations,
+// so a fuzzer that samples the middle of the range proves nothing about the
+// ends. These are the ends. Every float answer is reported as its bit pattern,
+// because that is the only comparison that can tell +0.0 from -0.0 or one NaN
+// from another, and those two are exactly what a wrong lowering loses.
+//
+// Each case takes its input from `argc` so nothing folds to a literal, and
+// each returns int64 so one printer serves them all. The runner compares the
+// answers across both backends and against the compile-time interpreter; it
+// holds no expected values of its own.
+import "std/io";
+import "std/math";
+
+@noinline fn f64_of(v: int64) -> float64 { return (float64)v; }
+@noinline fn f32_of(v: int64) -> float32 { return (float32)v; }
+@noinline fn negate(x: float64) -> float64 { return -x; }
+@noinline fn negate32(x: float32) -> float32 { return -x; }
+@noinline fn divide(a: float64, b: float64) -> float64 { return a / b; }
+@noinline fn multiply(a: float64, b: float64) -> float64 { return a * b; }
+@noinline fn add(a: float64, b: float64) -> float64 { return a + b; }
+
+@noinline fn idiv(a: int64, b: int64) -> int64 { return a / b; }
+@noinline fn imod(a: int64, b: int64) -> int64 { return a % b; }
+@noinline fn shl64(a: int64, b: int64) -> int64 { return a << b; }
+@noinline fn shr64(a: int64, b: int64) -> int64 { return a >> b; }
+@noinline fn shl32(a: int32, b: int32) -> int32 { return a << b; }
+@noinline fn shr32(a: int32, b: int32) -> int32 { return a >> b; }
+@noinline fn to_i32(x: float64) -> int32 { return (int32)x; }
+@noinline fn to_i64(x: float64) -> int64 { return (int64)x; }
+@noinline fn f32_bits(x: float32) -> int32 {
+  var p: float32* = &x;
+  var q: int32* = (int32*)p;
+  return *q;
+}
+
+// ---- signed zero -----------------------------------------------------------
+
+export fn case_neg_zero_f64(z: int64) -> int64 {
+  return f64_bits(negate(f64_of(z)));
+}
+
+export fn case_neg_zero_f32(z: int64) -> int64 {
+  return (int64)f32_bits(negate32(f32_of(z)));
+}
+
+export fn case_neg_neg_zero(z: int64) -> int64 {
+  return f64_bits(negate(negate(f64_of(z))));
+}
+
+export fn case_zero_times_minus_one(z: int64) -> int64 {
+  return f64_bits(multiply(f64_of(z), f64_of(0 - 1)));
+}
+
+export fn case_zero_plus_neg_zero(z: int64) -> int64 {
+  return f64_bits(add(f64_of(z), negate(f64_of(z))));
+}
+
+// ---- infinities from signed zeros ------------------------------------------
+
+export fn case_one_over_pos_zero(z: int64) -> int64 {
+  return f64_bits(divide(f64_of(z + 1), f64_of(z)));
+}
+
+export fn case_one_over_neg_zero(z: int64) -> int64 {
+  return f64_bits(divide(f64_of(z + 1), negate(f64_of(z))));
+}
+
+export fn case_zero_over_zero(z: int64) -> int64 {
+  return f64_bits(divide(f64_of(z), f64_of(z))) & 0x7FF8000000000000;
+}
+
+// ---- NaN sign and payload --------------------------------------------------
+
+export fn case_nan_negated(z: int64) -> int64 {
+  var nan: float64 = f64_from_bits(0x7FF8000000000000 + z);
+  return f64_bits(negate(nan));
+}
+
+export fn case_nan_payload_kept(z: int64) -> int64 {
+  var nan: float64 = f64_from_bits(0x7FF8000000ABCDEF + z);
+  return f64_bits(add(nan, f64_of(z + 1)));
+}
+
+export fn case_neg_nan_negated(z: int64) -> int64 {
+  var nan: float64 = f64_from_bits((int64)0xFFF8000000000000 + z);
+  return f64_bits(negate(nan));
+}
+
+// ---- denormals -------------------------------------------------------------
+
+export fn case_denormal_halved(z: int64) -> int64 {
+  var tiny: float64 = f64_from_bits(0x0000000000000004 + z);
+  return f64_bits(divide(tiny, f64_of(z + 2)));
+}
+
+export fn case_denormal_negated(z: int64) -> int64 {
+  var tiny: float64 = f64_from_bits(0x0000000000000001 + z);
+  return f64_bits(negate(tiny));
+}
+
+export fn case_underflow_to_zero(z: int64) -> int64 {
+  var tiny: float64 = f64_from_bits(0x0000000000000001 + z);
+  return f64_bits(divide(tiny, f64_of(z + 4)));
+}
+
+// ---- integer division at the edge ------------------------------------------
+
+export fn case_intmin_div_minus_one(z: int64) -> int64 {
+  return idiv((0 - 9223372036854775807) - 1 + z, (0 - 1));
+}
+
+export fn case_intmin_mod_minus_one(z: int64) -> int64 {
+  return imod((0 - 9223372036854775807) - 1 + z, (0 - 1));
+}
+
+export fn case_negative_div_truncates(z: int64) -> int64 {
+  return idiv((0 - 7) - z, 2);
+}
+
+export fn case_negative_mod_sign(z: int64) -> int64 {
+  return imod((0 - 7) - z, 2);
+}
+
+// ---- shifts at and beyond the width ----------------------------------------
+
+export fn case_shl64_at_width(z: int64) -> int64 {
+  return shl64(1 + z, 64);
+}
+
+export fn case_shl64_past_width(z: int64) -> int64 {
+  return shl64(1 + z, 65);
+}
+
+export fn case_shr64_at_width(z: int64) -> int64 {
+  return shr64((0 - 1) - z, 64);
+}
+
+export fn case_shl32_at_width(z: int64) -> int64 {
+  return (int64)shl32(1 + (int32)z, 32);
+}
+
+export fn case_shr32_negative(z: int64) -> int64 {
+  return (int64)shr32((0 - 8) - (int32)z, 2);
+}
+
+export fn case_shl64_by_63(z: int64) -> int64 {
+  return shl64(1 + z, 63);
+}
+
+// ---- float to int out of range ---------------------------------------------
+
+export fn case_f64_to_i32_too_big(z: int64) -> int64 {
+  return (int64)to_i32(f64_of(z) + 3000000000.0);
+}
+
+export fn case_f64_to_i32_negative_big(z: int64) -> int64 {
+  return (int64)to_i32(f64_of(z) - 3000000000.0);
+}
+
+export fn case_f64_to_i64_too_big(z: int64) -> int64 {
+  return to_i64(f64_of(z) + 1.0e19);
+}
+
+export fn case_nan_to_i32(z: int64) -> int64 {
+  return (int64)to_i32(f64_from_bits(0x7FF8000000000000 + z));
+}
+
+export fn case_inf_to_i64(z: int64) -> int64 {
+  return to_i64(divide(f64_of(z + 1), f64_of(z)));
+}
+
+
+// ---- narrow widths ---------------------------------------------------------
+//
+// The two backends each decide separately what a narrow type does on
+// overflow, on a shift, and on the way in and out of a wider register. That is
+// three semantic decisions written twice, and the negate bug is what happens
+// when one of those pairs drifts.
+
+@noinline fn i8_of(v: int64) -> int8 { return (int8)v; }
+@noinline fn i16_of(v: int64) -> int16 { return (int16)v; }
+@noinline fn u8_of(v: int64) -> uint8 { return (uint8)v; }
+@noinline fn u16_of(v: int64) -> uint16 { return (uint16)v; }
+@noinline fn u32_of(v: int64) -> uint32 { return (uint32)v; }
+@noinline fn i32_of(v: int64) -> int32 { return (int32)v; }
+
+@noinline fn i8_add(a: int8, b: int8) -> int8 { return a + b; }
+@noinline fn i16_mul(a: int16, b: int16) -> int16 { return a * b; }
+@noinline fn u8_sub(a: uint8, b: uint8) -> uint8 { return a - b; }
+@noinline fn u16_add(a: uint16, b: uint16) -> uint16 { return a + b; }
+@noinline fn u32_sub(a: uint32, b: uint32) -> uint32 { return a - b; }
+@noinline fn i32_mul(a: int32, b: int32) -> int32 { return a * b; }
+@noinline fn u32_div(a: uint32, b: uint32) -> uint32 { return a / b; }
+@noinline fn u32_shr(a: uint32, b: uint32) -> uint32 { return a >> b; }
+@noinline fn i8_shr(a: int8, b: int8) -> int8 { return a >> b; }
+@noinline fn u64_div(a: uint64, b: uint64) -> uint64 { return a / b; }
+@noinline fn u64_shr(a: uint64, b: uint64) -> uint64 { return a >> b; }
+@noinline fn u64_lt(a: uint64, b: uint64) -> bool { return a < b; }
+@noinline fn i64_lt(a: int64, b: int64) -> bool { return a < b; }
+
+export fn case_i8_overflow(z: int64) -> int64 {
+  return (int64)i8_add(i8_of(127 + z), i8_of(1));
+}
+
+export fn case_i8_underflow(z: int64) -> int64 {
+  return (int64)i8_add(i8_of((0 - 128) + z), i8_of((0 - 1)));
+}
+
+export fn case_i16_overflow(z: int64) -> int64 {
+  return (int64)i16_mul(i16_of(300 + z), i16_of(300));
+}
+
+export fn case_u8_wrap(z: int64) -> int64 {
+  return (int64)u8_sub(u8_of(z), u8_of(1));
+}
+
+export fn case_u16_wrap(z: int64) -> int64 {
+  return (int64)u16_add(u16_of(65535 + z), u16_of(2));
+}
+
+export fn case_u32_wrap(z: int64) -> int64 {
+  return (int64)u32_sub(u32_of(z), u32_of(1));
+}
+
+export fn case_i32_overflow(z: int64) -> int64 {
+  return (int64)i32_mul(i32_of(70000 + z), i32_of(70000));
+}
+
+export fn case_i8_shr_negative(z: int64) -> int64 {
+  return (int64)i8_shr(i8_of((0 - 8) - z), i8_of(2));
+}
+
+export fn case_u32_shr_high_bit(z: int64) -> int64 {
+  return (int64)u32_shr(u32_of(4294967295 + z), u32_of(1));
+}
+
+export fn case_u32_div_high(z: int64) -> int64 {
+  return (int64)u32_div(u32_of(4294967295 + z), u32_of(3));
+}
+
+export fn case_u64_div_high(z: int64) -> int64 {
+  var big: uint64 = (uint64)((0 - 1) + z);
+  return (int64)u64_div(big, (uint64)3);
+}
+
+export fn case_u64_shr_high(z: int64) -> int64 {
+  var big: uint64 = (uint64)((0 - 1) + z);
+  return (int64)u64_shr(big, (uint64)1);
+}
+
+// ---- comparison ------------------------------------------------------------
+
+export fn case_unsigned_compare_high(z: int64) -> int64 {
+  var big: uint64 = (uint64)((0 - 1) + z);
+  if (u64_lt(big, (uint64)1)) { return 1; }
+  return 0;
+}
+
+export fn case_signed_compare_low(z: int64) -> int64 {
+  if (i64_lt((0 - 9223372036854775807) - 1 + z, 1)) { return 1; }
+  return 0;
+}
+
+export fn case_nan_less_than(z: int64) -> int64 {
+  var nan: float64 = f64_from_bits(0x7FF8000000000000 + z);
+  if (nan < f64_of(z + 1)) { return 1; }
+  return 0;
+}
+
+export fn case_nan_greater_than(z: int64) -> int64 {
+  var nan: float64 = f64_from_bits(0x7FF8000000000000 + z);
+  if (nan > f64_of(z + 1)) { return 1; }
+  return 0;
+}
+
+export fn case_nan_equal_self(z: int64) -> int64 {
+  var nan: float64 = f64_from_bits(0x7FF8000000000000 + z);
+  if (nan == nan) { return 1; }
+  return 0;
+}
+
+export fn case_nan_not_equal_self(z: int64) -> int64 {
+  var nan: float64 = f64_from_bits(0x7FF8000000000000 + z);
+  if (nan != nan) { return 1; }
+  return 0;
+}
+
+export fn case_neg_zero_equals_zero(z: int64) -> int64 {
+  if (negate(f64_of(z)) == f64_of(z)) { return 1; }
+  return 0;
+}
+
+// ---- conversions -----------------------------------------------------------
+
+export fn case_f32_rounds_to_even(z: int64) -> int64 {
+  var wide: float64 = f64_from_bits(0x3FF0000000000001 + z);
+  return (int64)f32_bits((float32)wide);
+}
+
+export fn case_f64_from_f32_denormal(z: int64) -> int64 {
+  var tiny: float32 = f32_of(z) + (float32)1.0e-44;
+  return f64_bits((float64)tiny);
+}
+
+export fn case_u64_to_f64_high_bit(z: int64) -> int64 {
+  var big: uint64 = (uint64)((0 - 1) + z);
+  return f64_bits((float64)big);
+}
+
+export fn case_i64_to_f32_rounding(z: int64) -> int64 {
+  return (int64)f32_bits((float32)(16777217 + z));
+}
+
+export fn case_narrow_then_widen(z: int64) -> int64 {
+  return (int64)i32_of((int64)i8_of(200 + z));
+}
+
+export fn case_unsigned_narrow_then_widen(z: int64) -> int64 {
+  return (int64)u32_of((int64)u8_of(200 + z));
+}
+
+fn report(name: cstring, value: int64) {
+  print_cstr(name);
+  print("=");
+  println("{value}");
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  // Zero, but not a zero the compiler can see.
+  var z: int64 = (int64)(argc - argc);
+
+  report("neg_zero_f64", case_neg_zero_f64(z));
+  report("neg_zero_f32", case_neg_zero_f32(z));
+  report("neg_neg_zero", case_neg_neg_zero(z));
+  report("zero_times_minus_one", case_zero_times_minus_one(z));
+  report("zero_plus_neg_zero", case_zero_plus_neg_zero(z));
+
+  report("one_over_pos_zero", case_one_over_pos_zero(z));
+  report("one_over_neg_zero", case_one_over_neg_zero(z));
+  report("zero_over_zero", case_zero_over_zero(z));
+
+  report("nan_negated", case_nan_negated(z));
+  report("nan_payload_kept", case_nan_payload_kept(z));
+  report("neg_nan_negated", case_neg_nan_negated(z));
+
+  report("denormal_halved", case_denormal_halved(z));
+  report("denormal_negated", case_denormal_negated(z));
+  report("underflow_to_zero", case_underflow_to_zero(z));
+
+  report("intmin_div_minus_one", case_intmin_div_minus_one(z));
+  report("intmin_mod_minus_one", case_intmin_mod_minus_one(z));
+  report("negative_div_truncates", case_negative_div_truncates(z));
+  report("negative_mod_sign", case_negative_mod_sign(z));
+
+  report("shl64_at_width", case_shl64_at_width(z));
+  report("shl64_past_width", case_shl64_past_width(z));
+  report("shr64_at_width", case_shr64_at_width(z));
+  report("shl32_at_width", case_shl32_at_width(z));
+  report("shr32_negative", case_shr32_negative(z));
+  report("shl64_by_63", case_shl64_by_63(z));
+
+  report("f64_to_i32_too_big", case_f64_to_i32_too_big(z));
+  report("f64_to_i32_negative_big", case_f64_to_i32_negative_big(z));
+  report("f64_to_i64_too_big", case_f64_to_i64_too_big(z));
+  report("nan_to_i32", case_nan_to_i32(z));
+  report("inf_to_i64", case_inf_to_i64(z));
+
+  report("i8_overflow", case_i8_overflow(z));
+  report("i8_underflow", case_i8_underflow(z));
+  report("i16_overflow", case_i16_overflow(z));
+  report("u8_wrap", case_u8_wrap(z));
+  report("u16_wrap", case_u16_wrap(z));
+  report("u32_wrap", case_u32_wrap(z));
+  report("i32_overflow", case_i32_overflow(z));
+  report("i8_shr_negative", case_i8_shr_negative(z));
+  report("u32_shr_high_bit", case_u32_shr_high_bit(z));
+  report("u32_div_high", case_u32_div_high(z));
+  report("u64_div_high", case_u64_div_high(z));
+  report("u64_shr_high", case_u64_shr_high(z));
+
+  report("unsigned_compare_high", case_unsigned_compare_high(z));
+  report("signed_compare_low", case_signed_compare_low(z));
+  report("nan_less_than", case_nan_less_than(z));
+  report("nan_greater_than", case_nan_greater_than(z));
+  report("nan_equal_self", case_nan_equal_self(z));
+  report("nan_not_equal_self", case_nan_not_equal_self(z));
+  report("neg_zero_equals_zero", case_neg_zero_equals_zero(z));
+
+  report("f32_rounds_to_even", case_f32_rounds_to_even(z));
+  report("f64_from_f32_denormal", case_f64_from_f32_denormal(z));
+  report("u64_to_f64_high_bit", case_u64_to_f64_high_bit(z));
+  report("i64_to_f32_rounding", case_i64_to_f32_rounding(z));
+  report("narrow_then_widen", case_narrow_then_widen(z));
+  report("unsigned_narrow_then_widen", case_unsigned_narrow_then_widen(z));
+
+
+  return 0;
+}

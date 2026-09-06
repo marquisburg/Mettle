@@ -986,9 +986,41 @@ static int ir_licm_divisor_never_zero(const IRFunction *function,
   return ir_type_is_nonzero(declared);
 }
 
+/* Whether anything defining this operand is a volatile access.
+ *
+ * A global declared volatile is read as a plain symbol operand, and lowering
+ * marks the instruction that reads it rather than the operand, so the direct
+ * test on the candidate catches that shape. This covers the other one: a
+ * pointer to volatile is a LOAD into a temp, and arithmetic over that temp is
+ * only as movable as the load, which is not at all. */
+static int ir_licm_reads_volatile_definition(const IRFunction *function,
+                                             const IROperand *op) {
+  if (!op || !op->name ||
+      (op->kind != IR_OPERAND_TEMP && op->kind != IR_OPERAND_SYMBOL)) {
+    return 0;
+  }
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *def = &function->instructions[i];
+    if (def->is_volatile && def->dest.kind == op->kind && def->dest.name &&
+        strcmp(def->dest.name, op->name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int ir_licm_op_is_pure_arith(const IRFunction *function,
                                     const IRInstruction *ins) {
   if (!ins) {
+    return 0;
+  }
+  /* A volatile access is observable in itself, so it cannot move and neither
+   * can arithmetic that reads one. Hoisting the poll out of a spin loop turns
+   * the loop into an infinite one, which is why the whole bare-metal idiom
+   * used to refuse to build at --release. */
+  if (ins->is_volatile ||
+      ir_licm_reads_volatile_definition(function, &ins->lhs) ||
+      ir_licm_reads_volatile_definition(function, &ins->rhs)) {
     return 0;
   }
   if (ins->op == IR_OP_CAST) {

@@ -282,6 +282,11 @@ typedef enum {
   MIR_FSUB,
   MIR_FMUL,
   MIR_FDIV,
+  /* Bitwise XOR of the whole register, in the float domain. Its only caller is
+   * negation, which flips the sign bit: `0 - x` gets every float right except
+   * zero, where IEEE 754 asks for -0.0 and the subtract yields +0.0, and it
+   * cannot flip the sign of a NaN at all. */
+  MIR_FXOR,
   /* f64x2 lane ops for the pair vectorizer (vreg width 16). Three-address:
    * dst is written whole, a/b are read. FDUP broadcasts a's low lane to both
    * lanes (vmovddup); FEXTHI copies a's high lane into dst's low lane

@@ -6475,6 +6475,16 @@ int compile_file(const char *input_filename, const char *output_filename,
                  : 1;
     goto cleanup;
   }
+  if (type_checker_proof_ceiling_hit(type_checker)) {
+    fprintf(stderr,
+            "warning[P0004]: the declared-type prover stopped after %lld "
+            "steps and answered the rest as unknown\n",
+            type_checker_proof_steps(type_checker));
+    fprintf(stderr,
+            "  help: a proof that needed more than that refuses here the same "
+            "way it would if it were false; --report-proofs prints what each "
+            "one cost\n");
+  }
   if (options->proof_budget_set &&
       type_checker_proof_steps(type_checker) > options->proof_budget) {
     fprintf(stderr,

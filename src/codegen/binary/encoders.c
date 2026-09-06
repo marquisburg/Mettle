@@ -1924,6 +1924,18 @@ int binary_emit_pxor_xmm_xmm(BinaryCodeBuffer *buffer,
                                  source);
 }
 
+/* Bitwise XOR over the whole register, in the float domain. Negation is a
+ * sign-bit flip rather than `0 - x`, because IEEE 754 says -(+0.0) is -0.0
+ * while 0.0 - 0.0 is +0.0, and because a subtract cannot flip the sign of a
+ * NaN. Used at both widths: the mask for a float32 has zeros above bit 31, so
+ * the wider operation touches nothing that matters. */
+int binary_emit_xorpd_xmm_xmm(BinaryCodeBuffer *buffer,
+                                     BinaryXmmRegister destination,
+                                     BinaryXmmRegister source) {
+  return binary_emit_sse_reg_reg(buffer, 0x66, 0, 0x0F, 0x57, destination,
+                                 source);
+}
+
 int binary_emit_addsd_xmm_xmm(BinaryCodeBuffer *buffer,
                                      BinaryXmmRegister destination,
                                      BinaryXmmRegister source) {

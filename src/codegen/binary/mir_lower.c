@@ -4482,17 +4482,22 @@ static int mir_lower_unary(MirFunction *fn, CodeGenerator *g,
     MirOperand dst = mir_value_operand(fn, g, ctx, map, &in->dest);
     const char *op = in->text ? in->text : "";
     if (in->is_float) {
-      /* Float negate `-x` as `0 - x` (pxor zero; subss/subsd), matching the
-       * fallback's emit_unary exactly so 0/NaN signs agree; `+x` is a copy. The
-       * operand is coerced to the result precision first. */
+      /* Float negate `-x` as a sign-bit flip, matching the fallback's
+       * emit_unary exactly so 0 and NaN signs agree; `+x` is a copy. The
+       * operand is coerced to the result precision first.
+       *
+       * `0 - x` is right for every float except zero, where IEEE 754 asks for
+       * -0.0 and the subtract yields +0.0, and it cannot flip the sign of a
+       * NaN at all. The mask is the bit pattern of negative zero at this
+       * width, which is the sign bit and nothing else. */
       int fb = code_generator_binary_instruction_result_float_bits(g, ctx, in);
       int w = fb ? fb / 8 : 8;
       MirOperand x = coerce_float_operand(fn, g, ctx, map, &in->lhs, w);
       if (strcmp(op, "+") == 0) {
         return mir_emit_fmov(fn, dst, x, w);
       }
-      MirOperand zero = mir_float_const_operand(fn, 0.0, w);
-      return mir_emit1(fn, MIR_FSUB, dst, zero, x, w, 0, 0);
+      MirOperand mask = mir_float_const_operand(fn, -0.0, w);
+      return mir_emit1(fn, MIR_FXOR, dst, mask, x, w, 0, 0);
     }
     MirOperand a = mir_value_operand(fn, g, ctx, map, &in->lhs);
     if (strcmp(op, "-") == 0) {

@@ -1,0 +1,56 @@
+// The sign of a zero, which is the one float value negation used to lose.
+//
+// `-x` was lowered as `0 - x`. That is right for every float except zero:
+// IEEE 754 says -(+0.0) is -0.0, while 0.0 - 0.0 is +0.0. A subtract cannot
+// flip the sign of a NaN either. Both are invisible until something divides by
+// the result, and then the answer is the wrong infinity.
+//
+// Sign is read back by dividing into it, because that is what the difference
+// is actually good for. Every input comes from `argc` so nothing folds, and
+// the folding cases are checked separately as literals.
+import "std/io";
+
+@noinline fn negate(x: float64) -> float64 {
+  return -x;
+}
+
+@noinline fn negate32(x: float32) -> float32 {
+  return -x;
+}
+
+@noinline fn is_negative_zero(x: float64) -> bool {
+  return x == 0.0 && 1.0 / x < 0.0;
+}
+
+@noinline fn is_negative_zero32(x: float32) -> bool {
+  return x == (float32)0.0 && (float32)1.0 / x < (float32)0.0;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var wrong: int32 = 0;
+  var zero: float64 = (float64)(argc - argc);
+  var zero32: float32 = (float32)(argc - argc);
+
+  // A negation the compiler cannot fold.
+  if (!is_negative_zero(negate(zero))) { wrong = wrong + 1; }
+  if (!is_negative_zero32(negate32(zero32))) { wrong = wrong + 2; }
+
+  // A negation of a negative zero is a positive zero.
+  if (is_negative_zero(negate(negate(zero)))) { wrong = wrong + 4; }
+
+  // The literal, which the front end folds.
+  if (!is_negative_zero(-0.0)) { wrong = wrong + 8; }
+  if (!is_negative_zero32((float32)-0.0)) { wrong = wrong + 16; }
+
+  // A multiply by minus one, which was always right, as a control.
+  if (!is_negative_zero(zero * -1.0)) { wrong = wrong + 32; }
+
+  // A nonzero value still negates.
+  var three: float64 = (float64)(argc + 2);
+  if (negate(three) != 0.0 - three) { wrong = wrong + 64; }
+  if (negate(negate(three)) != three) { wrong = wrong + 128; }
+
+  print("signed zero wrong=");
+  println("{(int64)wrong}");
+  return wrong;
+}

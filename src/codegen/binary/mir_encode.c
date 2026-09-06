@@ -1244,6 +1244,7 @@ static int sse_arith(MirFunction *fn, MirOpcode op, int width,
     case MIR_FSUB: return binary_emit_subss_xmm_xmm(code, target, src);
     case MIR_FMUL: return binary_emit_mulss_xmm_xmm(code, target, src);
     case MIR_FDIV: return binary_emit_divss_xmm_xmm(code, target, src);
+    case MIR_FXOR: return binary_emit_xorpd_xmm_xmm(code, target, src);
     default: return 0;
     }
   }
@@ -1252,6 +1253,7 @@ static int sse_arith(MirFunction *fn, MirOpcode op, int width,
   case MIR_FSUB: return binary_emit_subsd_xmm_xmm(code, target, src);
   case MIR_FMUL: return binary_emit_mulsd_xmm_xmm(code, target, src);
   case MIR_FDIV: return binary_emit_divsd_xmm_xmm(code, target, src);
+  case MIR_FXOR: return binary_emit_xorpd_xmm_xmm(code, target, src);
   default: return 0;
   }
 }
@@ -1282,6 +1284,11 @@ static int vex_scalar_arith(MirFunction *fn, MirOpcode op, int width,
   case MIR_FSUB: opcode = 0x5C; break;
   case MIR_FMUL: opcode = 0x59; break;
   case MIR_FDIV: opcode = 0x5E; break;
+  /* There is no scalar form of a bitwise op, so this one takes the packed
+   * encoding at every width. Only the low lane is ever read back, and the
+   * mask's other lanes are zero. */
+  case MIR_FXOR:
+    return vex_xmm_3op(fn, 1, 0x57, dst, a, b);
   default: return 0;
   }
   /* pp: F3 (ss) at width 4, F2 (sd) at width 8, 66 (pd, both lanes) at 16. */
@@ -2830,6 +2837,7 @@ int mir_encode(MirFunction *fn) {
     case MIR_FSUB:
     case MIR_FMUL:
     case MIR_FDIV:
+    case MIR_FXOR:
       ok = encode_fbinop(fn, in);
       break;
     case MIR_CVTSI2F:

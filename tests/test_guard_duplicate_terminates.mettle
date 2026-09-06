@@ -1,0 +1,61 @@
+// Two guards that say the same thing, where the first one returns.
+//
+// Narrowing `v` by a guard `v > hi` asks for the range of `hi`, which narrows
+// `hi` by the same guard, which asks for the range of `v`. One guard makes
+// that a walk; two over the same pair make it a tree, and the compiler used to
+// spend billions of steps before its depth cap ended each path. No diagnostic,
+// no progress: it simply never came back.
+//
+// The variants matter because each one was reported separately. Returning
+// literals terminated and returning variables did not. `hi < v` pairs with
+// `v > hi` because the guards match on meaning rather than on spelling. A
+// third guard, and an unrelated one in between, are the shapes that grow the
+// tree fastest.
+import "std/io";
+
+fn two_guards(v: int32, hi: int32) -> int32 {
+    if (v > hi) { return hi; }
+    if (v > hi) { return v; }
+    return v;
+}
+
+fn reversed_operands(v: int32, hi: int32) -> int32 {
+    if (v > hi) { return hi; }
+    if (hi < v) { return v; }
+    return v;
+}
+
+fn three_guards(v: int32, hi: int32) -> int32 {
+    if (v > hi) { return hi; }
+    if (v > hi) { return v; }
+    if (v > hi) { return hi; }
+    return v;
+}
+
+fn unrelated_between(v: int32, hi: int32, other: int32) -> int32 {
+    if (v > hi) { return hi; }
+    if (other > 100) { return other; }
+    if (v > hi) { return v; }
+    return v;
+}
+
+fn both_directions(lo: int32, v: int32, hi: int32) -> int32 {
+    if (v < lo) { return lo; }
+    if (v > hi) { return hi; }
+    if (v < lo) { return lo; }
+    if (v > hi) { return hi; }
+    return v;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+    var v: int32 = argc * 7;
+    var total: int32 = 0;
+    total = total + two_guards(v, 3);
+    total = total + reversed_operands(v, 3);
+    total = total + three_guards(v, 3);
+    total = total + unrelated_between(v, 3, 1);
+    total = total + both_directions(0, v, 3);
+    print("guards total=");
+    println("{(int64)total}");
+    return 0;
+}

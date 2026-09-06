@@ -672,6 +672,7 @@ int binary_emit_or_reg_imm32(BinaryCodeBuffer *buffer, BinaryGpRegister reg, uin
 int binary_emit_pop_reg(BinaryCodeBuffer *buffer, BinaryGpRegister reg);
 int binary_emit_push_reg(BinaryCodeBuffer *buffer, BinaryGpRegister reg);
 int binary_emit_pxor_xmm_xmm(BinaryCodeBuffer *buffer, BinaryXmmRegister destination, BinaryXmmRegister source);
+int binary_emit_xorpd_xmm_xmm(BinaryCodeBuffer *buffer, BinaryXmmRegister destination, BinaryXmmRegister source);
 int binary_emit_ret(BinaryCodeBuffer *buffer);
 int binary_emit_rex(BinaryCodeBuffer *buffer, int w, int r, int x, int b);
 int binary_emit_rip_relative_access_ex( BinaryCodeBuffer *buffer, int operand_size_prefix, int rex_w, unsigned char opcode1, int has_opcode2, unsigned char opcode2, BinaryGpRegister reg, size_t *displacement_offset_out);

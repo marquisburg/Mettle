@@ -1160,6 +1160,7 @@ static void mir_compute_coalesce_hints(MirFunction *fn) {
      * per-op movaps -- the dominant overhead in tight scalar-float loops. */
     case MIR_FADD:
     case MIR_FMUL:
+    case MIR_FXOR:
       commutative = 1;
       break;
     case MIR_SUB:
@@ -2427,6 +2428,7 @@ static int mir_op_pure_def(MirOpcode op) {
   case MIR_FSUB:
   case MIR_FMUL:
   case MIR_FDIV:
+  case MIR_FXOR:
   case MIR_FDUP:
   case MIR_FEXTHI:
   case MIR_CVTSI2F:

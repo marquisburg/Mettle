@@ -422,6 +422,7 @@ static const char *scalar_mnemonic(const MirInst *in) {
   case MIR_CQO: return "cqo";
   case MIR_FADD: return in->width == 4 ? "addss" : "addsd";
   case MIR_FSUB: return in->width == 4 ? "subss" : "subsd";
+  case MIR_FXOR: return "xorpd";
   case MIR_FMUL: return in->width == 4 ? "mulss" : "mulsd";
   case MIR_FDIV: return in->width == 4 ? "divss" : "divsd";
   case MIR_UCOMIS: return in->width == 4 ? "ucomiss" : "ucomisd";
@@ -701,7 +702,7 @@ static void cost_model(const MirFunction *fn, const MirInst *in, int *lat,
     *kind = "other"; mask = 0; centi = 0; break;
   case MIR_STORE_OUTARG:
     *kind = "store"; *ports = "store"; mask = 0; centi = 0; store = 1; break;
-  case MIR_FADD: case MIR_FSUB:
+  case MIR_FADD: case MIR_FSUB: case MIR_FXOR:
     *kind = "float"; *ports = "p01"; mask = M_P01; centi = 50; *lat = 4; break;
   case MIR_FMUL:
     *kind = "float"; *ports = "p01"; mask = M_P01; centi = 50; *lat = 4; break;

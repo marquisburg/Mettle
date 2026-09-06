@@ -1,0 +1,30 @@
+﻿// A volatile spin loop: the central bare-metal idiom, polling a
+// memory-mapped register until a device changes it.
+//
+// Every pass has to leave a volatile access exactly where it is, exactly as
+// many times as the source asked for. Loop-invariant motion looks at the
+// arithmetic around the poll and, if it does not check, hoists the read out
+// of the loop, which turns the poll into an infinite loop.
+import "std/io";
+
+var g_tick: volatile int64 = 0;
+
+@noinline fn advance() {
+  g_tick = g_tick + 1;
+}
+
+@noinline fn spin_until(limit: int64) -> int64 {
+  var seen: int64 = 0;
+  while (g_tick < limit) {
+    seen = seen + 1;
+    advance();
+  }
+  return seen;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var ticks: int64 = spin_until((int64)argc + 2);
+  print("ticks = ");
+  println("{ticks}");
+  return 0;
+}
