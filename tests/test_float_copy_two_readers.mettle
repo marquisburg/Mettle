@@ -1,0 +1,105 @@
+// A float copy whose destination is read twice must keep its name.
+//
+// eliminate_single_use_float_symbol_copies turns `s0 <- s1` into a temp when
+// exactly one instruction reads s0 before something writes it again. It
+// counted the readers by scanning forward and stopping at the write, and one
+// instruction does both:
+//
+//   s0 = s1;
+//   s1 = s0 + 1.0;      // reader one
+//   s0 = 10.0 - s0;     // reader two, and the write that ended the scan
+//
+// The read on the right of that last line went uncounted, so a copy with two
+// readers looked like a copy with one. Its destination became a temp, the
+// second reader was still spelled `s0`, and nothing wrote `s0` in the loop any
+// more: it read the value the symbol held on entry, every iteration. Only
+// float64 goes through this pass, so the integer twin of every case below was
+// right the whole time, and only -O and --release were wrong.
+import "std/io";
+
+var f_out: float64;
+var g_out: float64;
+var i_out: int64;
+
+@noinline fn carried(n: int32) -> void {
+  var s0: float64 = 5.0;
+  var s1: float64 = 5.0;
+  for i in 0..n {
+    s0 = s1;
+    s1 = s0 + 1.0;
+    s0 = 10.0 - s0;
+  }
+  f_out = s0;
+  g_out = s1;
+}
+
+// The integer twin. It never took this path and must not start.
+@noinline fn carried_int(n: int32) -> void {
+  var s0: int64 = 5;
+  var s1: int64 = 5;
+  for i in 0..n {
+    s0 = s1;
+    s1 = s0 + 1;
+    s0 = 10 - s0;
+  }
+  i_out = s0;
+}
+
+// The second reader is the write itself, with no reader in between.
+@noinline fn self_update(n: int32) -> void {
+  var s0: float64 = 1.0;
+  var s1: float64 = 4.0;
+  for i in 0..n {
+    s0 = s1;
+    s0 = s0 * 2.0;
+    s1 = s1 + 1.0;
+  }
+  f_out = s0;
+}
+
+// Straight line, no loop: the same count is what decides it.
+@noinline fn straight() -> void {
+  var s0: float64 = 5.0;
+  var s1: float64 = 9.0;
+  s0 = s1;
+  s1 = s0 + 1.0;
+  s0 = 100.0 - s0;
+  f_out = s0;
+  g_out = s1;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var wrong: int32 = 0;
+  var n: int32 = argc + 1;
+
+  // n = 2: s0 takes 5 then 6, and ends at 10 - 6. s1 ends at 7.
+  carried(2);
+  if (f_out != 4.0) { wrong = wrong + 1; }
+  if (g_out != 7.0) { wrong = wrong + 2; }
+
+  // n = 3: s0 = 10 - 7, s1 = 8.
+  carried(3);
+  if (f_out != 3.0) { wrong = wrong + 4; }
+  if (g_out != 8.0) { wrong = wrong + 8; }
+
+  carried(n);
+  if (f_out != 4.0) { wrong = wrong + 16; }
+
+  carried_int(2);
+  if (i_out != 4) { wrong = wrong + 32; }
+
+  // s1 reaches 4 + (n - 1), and s0 is twice the last one taken.
+  self_update(3);
+  if (f_out != 12.0) { wrong = wrong + 64; }
+
+  straight();
+  if (f_out != 91.0) { wrong = wrong + 128; }
+  if (g_out != 10.0) { wrong = wrong + 256; }
+
+  print("float copy wrong=");
+  println("{(int64)wrong}");
+  if (wrong != 0) {
+    return 1;
+  }
+  return 0;
+}

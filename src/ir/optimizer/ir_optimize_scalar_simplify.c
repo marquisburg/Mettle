@@ -3326,10 +3326,12 @@ static int ir_symbol_read_count_after_until_write_or_control(
         instruction->op == IR_OP_STORE || instruction->op == IR_OP_INLINE_ASM) {
       return -1;
     }
-    if (ir_instruction_writes_symbol(instruction) &&
-        ir_operand_is_symbol_named(&instruction->dest, symbol_name)) {
-      break;
-    }
+    /* Count the read BEFORE the write ends the scan, because one instruction
+     * does both: `s0 = 10.0 - s0` reads the old value and then names it. Ended
+     * at the write, that read went uncounted, so a copy with two readers
+     * looked like a copy with one and its symbol became a temp. The second
+     * reader was still spelled `s0`, which nothing wrote any more, so it read
+     * whatever the symbol held on entry to the loop for every iteration. */
     if (ir_instruction_reads_symbol_operand(instruction, symbol_name)) {
       count++;
       if (only_read_index_out) {
@@ -3338,6 +3340,10 @@ static int ir_symbol_read_count_after_until_write_or_control(
       if (count > 1) {
         return count;
       }
+    }
+    if (ir_instruction_writes_symbol(instruction) &&
+        ir_operand_is_symbol_named(&instruction->dest, symbol_name)) {
+      break;
     }
   }
 
