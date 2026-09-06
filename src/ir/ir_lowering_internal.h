@@ -495,7 +495,7 @@ int ir_type_storage_size(Type *type);
 
 int ir_type_array_element_stride(Type *element_type);
 
-int ir_type_is_unsigned_integer(Type *type);
+int ir_type_is_unsigned_integer(const Type *type);
 const char *ir_narrow_integer_result_type(Type *type, const char *op);
 int ir_narrow_integer_shift_bits(Type *type);
 int ir_unary_constant_fits(const char *type_name, const char *op,

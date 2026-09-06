@@ -1199,7 +1199,7 @@ int code_generator_binary_instruction_result_float_bits(
         function_type->fn_return_type);
 
   case IR_OP_CAST: {
-    MtlcType *t = generator && generator->ir_program
+    const MtlcType *t = generator && generator->ir_program
                   ? code_generator_named_type(generator,
                                                   instruction->text)
                   : NULL;
@@ -1441,7 +1441,7 @@ int code_generator_binary_emit_operand_load(
         binary_symbol_alias_table_get(&context->symbol_aliases, operand->name);
     const CgSym *symbol =
         code_generator_binary_value_symbol(generator, context, operand->name);
-    MtlcType *load_type = symbol ? symbol->type
+    const MtlcType *load_type = symbol ? symbol->type
                              : code_generator_binary_get_operand_type_in_context(
                                    generator, context, operand);
     int offset = code_generator_binary_get_symbol_offset(context, operand->name);
@@ -2230,7 +2230,7 @@ int code_generator_binary_emit_destination_store(
      * defaults to 8 bytes, losing the type's truncation semantics (and
      * over-writing a 4-byte stack slot). A local that shares its name with a
      * global takes the same fallback -- the global is a different object. */
-    MtlcType *dest_type = symbol && symbol->type
+    const MtlcType *dest_type = symbol && symbol->type
                           ? symbol->type
                           : code_generator_binary_get_operand_type_in_context(
                                 generator, context, destination);
@@ -3922,7 +3922,7 @@ int code_generator_binary_emit_call(CodeGenerator *generator,
 
   /* INDIRECT-return classification. The hidden out-pointer (Win64: rcx)
    * occupies ABI slot 0 and shifts every user arg up by one. */
-  MtlcType *call_return_type = NULL;
+  const MtlcType *call_return_type = NULL;
   if (function_symbol && function_symbol->kind == CG_SYM_FUNCTION) {
     call_return_type = function_symbol->data.function.return_type
                            ? function_symbol->data.function.return_type
@@ -4485,7 +4485,7 @@ int code_generator_binary_emit_call(CodeGenerator *generator,
 
   if (function_symbol && function_symbol->kind == CG_SYM_FUNCTION &&
       instruction->dest.kind == IR_OPERAND_TEMP && instruction->dest.name) {
-    MtlcType *ret_type = function_symbol->data.function.return_type;
+    const MtlcType *ret_type = function_symbol->data.function.return_type;
     int ret_width = code_generator_binary_type_scalar_width(ret_type);
     int offset =
         code_generator_binary_get_temp_offset(context, instruction->dest.name);
@@ -6173,7 +6173,7 @@ int code_generator_binary_emit_instruction(
             code_generator_binary_type_is_cstring(assign_dest_type) ||
             binary_named_slot_table_get_offset(&context->cstring_symbols,
                                                instruction->dest.name) >= 0;
-        MtlcType *effective_dest_type =
+        const MtlcType *effective_dest_type =
             assign_dest_type ? assign_dest_type
                              : (generator->ir_program
                                     ? code_generator_named_type(generator, "cstring")
@@ -6224,7 +6224,7 @@ int code_generator_binary_emit_instruction(
          binary_named_slot_table_get_offset(&context->cstring_symbols,
                                             instruction->dest.name) >= 0);
     if (dest_is_cstring) {
-      MtlcType *effective_dest_type =
+      const MtlcType *effective_dest_type =
           assign_dest_type ? assign_dest_type
                            : (generator->ir_program
                                   ? code_generator_named_type(generator, "cstring")

@@ -1060,7 +1060,7 @@ int ir_strength_reduce_rotate_loops_pass(IRFunction *function, int *changed);
 int ir_symbol_address_taken(const IRFunction *function,
                                    const char *symbol_name);
 int ir_symbol_contains(const char *symbol, const char *needle);
-int ir_symbol_is_i32_ptr_param(IRFunction *function,
+int ir_symbol_is_i32_ptr_param(const IRFunction *function,
                                       const char *symbol_name);
 int ir_symbol_is_sum_array_base(const IRFunction *function,
                                        const char *symbol_name);

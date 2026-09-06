@@ -84,7 +84,14 @@ REM the ICE backtrace, and gcc 15.2 segfaults in the -gcodeview emitter when
 REM -fno-asynchronous-unwind-tables removes them. .pdata is inert data: it
 REM pulls in no unwinder, so the owned-runtime audit below is unaffected.
 if not defined METTLE_HOST_OPT set "METTLE_HOST_OPT=-O2"
-set CFLAGS=-Wall -Wextra -std=c99 -g %METTLE_HOST_OPT% -D_GNU_SOURCE -Isrc -Iinclude -fno-omit-frame-pointer -ffreestanding -fno-builtin -fno-stack-protector -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -include src/runtime/host_redirect.h
+REM Warnings this tree is clean of, held there. Not a blanket -Werror:
+REM another compiler version warns about different things, and a build that
+REM breaks on somebody else's new warning teaches nobody anything. These
+REM three were each hiding a real question. -Wdiscarded-qualifiers is
+REM deliberately still a warning: 44 of them remain, each needing a
+REM decision rather than a rule. See the Makefile for the whole note.
+set STRICT_WARNINGS=-Werror=incompatible-pointer-types -Werror=implicit-function-declaration -Werror=int-conversion
+set CFLAGS=-Wall -Wextra %STRICT_WARNINGS% -std=c99 -g %METTLE_HOST_OPT% -D_GNU_SOURCE -Isrc -Iinclude -fno-omit-frame-pointer -ffreestanding -fno-builtin -fno-stack-protector -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -include src/runtime/host_redirect.h
 set RUNTIME_CFLAGS=-std=c99 -O2 -D_GNU_SOURCE -Isrc -ffreestanding -fno-builtin -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -mno-stack-arg-probe -ffunction-sections -fdata-sections -fno-jump-tables
 REM This build is mingw-ABI throughout: GNU ld, ar/nm, --entry, and the
 REM __imp_-only archive audit. A stock LLVM install defaults to

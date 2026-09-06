@@ -1018,7 +1018,7 @@ int ir_emit_binary_instruction(IRLoweringContext *context,
   instruction.dest = dest;
   instruction.lhs = lhs;
   instruction.rhs = rhs;
-  instruction.text = op;
+  instruction.text = (char *)op;
   return ir_emit(context, function, &instruction);
 }
 

@@ -814,7 +814,7 @@ static int mir_struct_temp_size(CodeGenerator *g, const IRFunction *irf,
         /* defined by a struct-returning call */
         if (in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
             strcmp(in->dest.name, name) == 0) {
-          MtlcType *r = cal->data.function.return_type ? cal->data.function.return_type
+          const MtlcType *r = cal->data.function.return_type ? cal->data.function.return_type
                                                    : cal->type;
           int hb = mir_indirect_type_home_bytes(g, r);
           if (hb) {
@@ -1415,7 +1415,7 @@ static int mir_call_is_supported(CodeGenerator *g,
     mir_call_trace_named("not_known_function", in->text);
     return 0;
   }
-  MtlcType *ret = callee->data.function.return_type
+  const MtlcType *ret = callee->data.function.return_type
                   ? callee->data.function.return_type
                   : callee->type;
   /* An aggregate crossing to a foreign function on SysV has to be classified
@@ -4548,7 +4548,7 @@ static int mir_lower_cast_across_banks(MirFunction *fn, CodeGenerator *g,
     /* float -> int (truncating); width selects cvttsd2si vs cvttss2si.
      * A uint64 target needs the bias sequence: the machine's truncation is
      * signed and answers its sentinel for anything at or above 2^63. */
-    MtlcType *tt = (in->text && g->ir_program)
+    const MtlcType *tt = (in->text && g->ir_program)
                    ? code_generator_named_type(g, in->text)
                    : NULL;
     int to_u64 = tt && tt->kind == MTLC_TYPE_UINT64;
@@ -4556,7 +4556,7 @@ static int mir_lower_cast_across_banks(MirFunction *fn, CodeGenerator *g,
                      to_u64 ? 1 : 0, 0);
   }
   if (dfb && sfb) {
-    MtlcType *dt = NULL;
+    const MtlcType *dt = NULL;
     if (in->text && g && g->ir_program) {
       dt = code_generator_named_type(g, in->text);
     }
@@ -4635,7 +4635,7 @@ static int mir_lower_cast(MirFunction *fn, CodeGenerator *g,
      * always resolvable; the dest operand's type is not (a temp has no
      * resolved type at -O0, which would silently drop a narrowing cast). Prefer
      * in->text, matching the fallback emitter, and fall back to the operand. */
-    MtlcType *dt = (in->text && g->ir_program)
+    const MtlcType *dt = (in->text && g->ir_program)
                    ? code_generator_named_type(g, in->text)
                    : NULL;
     if (!dt) {
@@ -5559,7 +5559,7 @@ static int mir_call_return_classification(CodeGenerator *g,
   {
     const CgSym *rc =
         g->ir_program ? code_generator_lookup_symbol(g, in->text) : NULL;
-    MtlcType *rret = (rc && rc->kind == CG_SYM_FUNCTION)
+    const MtlcType *rret = (rc && rc->kind == CG_SYM_FUNCTION)
                      ? (rc->data.function.return_type ? rc->data.function.return_type
                                                       : rc->type)
                      : NULL;

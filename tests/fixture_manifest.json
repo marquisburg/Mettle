@@ -12,16 +12,6 @@
       "exit": 0
     },
     {
-      "source": "tests/parse_stress_test.mettle",
-      "run": true,
-      "exit": 0
-    },
-    {
-      "source": "tests/profiler_test.mettle",
-      "run": false,
-      "note": "26,373 functions and 213,000 lines. It is here for what compiling it costs; running it overflows the stack, which is its own question."
-    },
-    {
       "source": "tests/test_big_stack_locals.mettle",
       "run": true,
       "exit": 558

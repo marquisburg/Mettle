@@ -109,7 +109,7 @@ const CgSym *code_generator_binary_value_symbol(CodeGenerator *generator,
 }
 
 
-int code_generator_binary_resolved_type_is_stack_scalar(MtlcType *type) {
+int code_generator_binary_resolved_type_is_stack_scalar(const MtlcType *type) {
   if (!type) {
     return 0;
   }
@@ -125,19 +125,19 @@ int code_generator_binary_resolved_type_is_stack_scalar(MtlcType *type) {
   return type->kind == MTLC_TYPE_FLOAT64 && type->size == 8;
 }
 
-int code_generator_binary_type_is_direct_aggregate(MtlcType *type) {
+int code_generator_binary_type_is_direct_aggregate(const MtlcType *type) {
   return type && code_generator_type_is_aggregate(type) &&
          code_generator_abi_classify(type) == ABI_PASS_DIRECT &&
          type->size > 0 && type->size <= 8;
 }
 
-int code_generator_binary_resolved_type_is_float64(MtlcType *type) {
+int code_generator_binary_resolved_type_is_float64(const MtlcType *type) {
   return type && type->kind == MTLC_TYPE_FLOAT64 && type->size == 8;
 }
 
 /* IEEE-754 width of a resolved type: 32 for float32, 64 for float64, else 0
  * (not a floating type). */
-int code_generator_binary_resolved_type_float_bits(MtlcType *type) {
+int code_generator_binary_resolved_type_float_bits(const MtlcType *type) {
   if (!type) {
     return 0;
   }
@@ -374,7 +374,7 @@ int code_generator_binary_context_add_saved_xmm_register(
   return 1;
 }
 
-int code_generator_binary_type_is_gp_promotable(MtlcType *type) {
+int code_generator_binary_type_is_gp_promotable(const MtlcType *type) {
   if (!type || !code_generator_binary_resolved_type_is_supported(type, 0)) {
     return 0;
   }
@@ -1384,7 +1384,7 @@ int code_generator_binary_promote_hot_symbols(
   return 1;
 }
 
-int code_generator_binary_resolved_type_is_signed_integer(MtlcType *type) {
+int code_generator_binary_resolved_type_is_signed_integer(const MtlcType *type) {
   if (!type) {
     return 0;
   }
@@ -1400,7 +1400,7 @@ int code_generator_binary_resolved_type_is_signed_integer(MtlcType *type) {
   }
 }
 
-int code_generator_binary_resolved_type_scalar_size(MtlcType *type) {
+int code_generator_binary_resolved_type_scalar_size(const MtlcType *type) {
   if (!type) {
     return 8;
   }

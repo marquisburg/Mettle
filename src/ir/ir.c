@@ -2755,25 +2755,33 @@ static int ir_format_gpu_line(const IRInstruction *instruction,
                        ir_memory_order_name(instruction->memory_order), regions);
     break;
   }
-  case IR_OP_ASYNC_COPY:
+  case IR_OP_ASYNC_COPY: {
+    /* Its own buffers. This used to format into `dest` and `lhs`, which are
+     * the caller's read-only strings, and sized the writes with `sizeof` on a
+     * pointer: eight bytes into somebody else's constant. The dump printed the
+     * caller's operands rather than this instruction's arguments, which is why
+     * nothing looked wrong. */
+    char copy_dest[128];
+    char copy_source[128];
     ir_format_operand(instruction->argument_count > 0
                           ? &instruction->arguments[0]
-                          : NULL,
-                      dest, sizeof(dest));
+                          : (const IROperand *)NULL,
+                      copy_dest, sizeof(copy_dest));
     ir_format_operand(instruction->argument_count > 1
                           ? &instruction->arguments[1]
-                          : NULL,
-                      lhs, sizeof(lhs));
+                          : (const IROperand *)NULL,
+                      copy_source, sizeof(copy_source));
     written = snprintf(
         buffer, buffer_size,
         "async_copy.workgroup %s <- %s x%u transaction=%u cache.%s%s",
-        dest, lhs,
+        copy_dest, copy_source,
         instruction->async_copy_element_count,
         instruction->async_copy_transaction_bytes,
         instruction->async_copy_cache == MTLC_ASYNC_CACHE_GLOBAL ? "global"
                                                                  : "all",
         instruction->async_copy_generated ? " generated" : "");
     break;
+  }
   case IR_OP_ASYNC_COMMIT:
     written = snprintf(buffer, buffer_size, "async_copy.commit");
     break;

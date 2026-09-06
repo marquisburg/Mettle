@@ -4,7 +4,19 @@ PYTHON ?= python3
 #   make EXTRA_CFLAGS='-DMETTLE_VERSION_RAW=v0.13.0'
 # (bare token, stringified in main.c - avoids fragile quote escaping)
 EXTRA_CFLAGS =
-CFLAGS = -Wall -Wextra -std=c99 -g -O2 -D_GNU_SOURCE -Isrc -Iinclude -fno-omit-frame-pointer -MMD -MP $(EXTRA_CFLAGS)
+# Warnings this tree is clean of, held there. Not a blanket -Werror: another
+# compiler version warns about different things, and a build that breaks on
+# somebody else's new warning teaches nobody anything.
+#
+# -Wdiscarded-qualifiers is deliberately still a warning. The type helpers the
+# codegen layer asks about a type now take const, which took the count from 115
+# to 44 and found one real defect on the way: the async-copy dump formatted
+# into its caller's read-only strings and sized the writes with sizeof on a
+# pointer. The 44 that remain are returns, field assignments and parameters
+# that each need a decision rather than a rule, and a half-finished sweep
+# enforced is a build nobody can complete.
+STRICT_WARNINGS = -Werror=incompatible-pointer-types -Werror=implicit-function-declaration -Werror=int-conversion
+CFLAGS = -Wall -Wextra $(STRICT_WARNINGS) -std=c99 -g -O2 -D_GNU_SOURCE -Isrc -Iinclude -fno-omit-frame-pointer -MMD -MP $(EXTRA_CFLAGS)
 # Native compiler build profile for DGX Spark. GCC/Clang versions without a
 # GB10-specific scheduler use ARMv9.2-A; GCC 15 / LLVM 21 users should override
 # with `DGX_SPARK_CFLAGS=-mcpu=gb10` as recommended by NVIDIA.

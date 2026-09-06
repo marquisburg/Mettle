@@ -173,7 +173,7 @@ static const char *ir_find_ptr_step_symbol(const IRFunction *function,
   return NULL;
 }
 
-int ir_symbol_is_i32_ptr_param(IRFunction *function,
+int ir_symbol_is_i32_ptr_param(const IRFunction *function,
                                       const char *symbol_name) {
   if (!function || !symbol_name) {
     return 0;

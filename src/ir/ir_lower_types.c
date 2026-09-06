@@ -562,7 +562,7 @@ int ir_type_array_element_stride(Type *element_type) {
 /* An unsigned integer type: `/`, `%`, `>>`, and the four orderings mean
  * something different on one than the signed evaluation the optimizer's
  * constant folder performs. */
-int ir_type_is_unsigned_integer(Type *type) {
+int ir_type_is_unsigned_integer(const Type *type) {
   if (!type) {
     return 0;
   }

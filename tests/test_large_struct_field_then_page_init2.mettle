@@ -1,10 +1,23 @@
+// Opening a file through the extern C surface and closing it again.
+//
+// Reduced from a page-cache bug and kept for the call shape: a cstring result
+// tested against zero, then handed back to a second extern. It named the
+// Windows null device, so on Linux it opened nothing and reported failure,
+// which nobody saw because nothing ran it.
+//
+// It opens its own source instead. That file exists wherever the suite runs
+// from, and the test says which name it used when it cannot find it.
 import "std/io";
 
-fn main() -> int32 {
-  var fp: cstring = fopen("nul", "r");
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var path: cstring = (cstring)"tests/test_large_struct_field_then_page_init2.mettle";
+  var fp: cstring = fopen(path, "r");
   if (fp == 0) {
+    print("could not open ");
+    println("{path}");
     return 1;
   }
   fclose(fp);
+  println("page init ok");
   return 0;
 }

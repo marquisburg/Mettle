@@ -12,9 +12,9 @@ file another fixture imports, or when it is listed below with a reason.
 
 import argparse
 import io
-import os
 import pathlib
 import re
+import subprocess
 import sys
 
 
@@ -68,6 +68,19 @@ def imported_names():
     return seen
 
 
+def version_controlled():
+    """Fixture names git actually carries, or None if git cannot be asked."""
+    try:
+        listing = subprocess.run(["git", "ls-files", "tests/*.mettle"],
+                                 cwd=ROOT, capture_output=True, text=True)
+    except OSError:
+        return None
+    if listing.returncode:
+        return None
+    return {pathlib.PurePath(line.strip()).name
+            for line in listing.stdout.splitlines() if line.strip()}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true",
@@ -76,9 +89,14 @@ def main():
 
     named = referenced_names()
     imported = imported_names()
+    tracked = version_controlled()
 
     orphans = []
     for source in sorted(TESTS.glob("*.mettle")):
+        # A generated stress file is not in the repository and cannot be run
+        # anywhere it has not been generated. Only what git carries counts.
+        if tracked is not None and source.name not in tracked:
+            continue
         stem = source.stem
         if stem in named or source.name in named:
             continue
@@ -95,7 +113,8 @@ def main():
 
     for stem in orphans:
         print("tests/%s.mettle is referenced by no harness" % stem)
-    total = len(list(TESTS.glob("*.mettle")))
+    total = len([s for s in TESTS.glob("*.mettle")
+                 if tracked is None or s.name in tracked])
     print("%d fixtures, %d referenced by nothing" % (total, len(orphans)))
     return 1 if orphans else 0
 
