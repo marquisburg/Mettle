@@ -5536,18 +5536,9 @@ static int binary_emit_binary_integer(CodeGenerator *generator,
                  (immediate_on_rhs &&
                   (strcmp(op, "<") == 0 || strcmp(op, "<=") == 0 ||
                    strcmp(op, ">") == 0 || strcmp(op, ">=") == 0))) {
-        if (strcmp(op, "==") == 0) {
-          condition_opcode = 0x94;
-        } else if (strcmp(op, "!=") == 0) {
-          condition_opcode = 0x95;
-        } else if (strcmp(op, "<") == 0) {
-          condition_opcode = op_unsigned ? 0x92 : 0x9C;
-        } else if (strcmp(op, "<=") == 0) {
-          condition_opcode = op_unsigned ? 0x96 : 0x9E;
-        } else if (strcmp(op, ">") == 0) {
-          condition_opcode = op_unsigned ? 0x97 : 0x9F;
-        } else {
-          condition_opcode = op_unsigned ? 0x93 : 0x9D;
+        if (!binary_semantics_condition_code(op, op_unsigned,
+                                             &condition_opcode)) {
+          goto emit_failure;
         }
 
         if (!binary_emit_cmp_reg_imm32(&context->code, BINARY_GP_RAX,
@@ -5850,10 +5841,12 @@ int code_generator_binary_emit_unary(CodeGenerator *generator,
                : binary_emit_movq_reg_xmm(&context->code, BINARY_GP_RAX,
                                           BINARY_XMM0)) &&
           (fbits == 32
-               ? binary_emit_xor_reg_imm32(&context->code, BINARY_GP_RAX,
-                                           0x80000000u)
-               : (binary_emit_mov_reg_imm64(&context->code, BINARY_GP_R10,
-                                            0x8000000000000000ull) &&
+               ? binary_emit_xor_reg_imm32(
+                     &context->code, BINARY_GP_RAX,
+                     (uint32_t)binary_semantics_float_sign_mask(32))
+               : (binary_emit_mov_reg_imm64(
+                      &context->code, BINARY_GP_R10,
+                      binary_semantics_float_sign_mask(64)) &&
                   binary_emit_alu_reg_reg(&context->code, 0x31, BINARY_GP_RAX,
                                           BINARY_GP_R10)));
       if (!neg_ok) {

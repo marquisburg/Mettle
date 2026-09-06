@@ -458,18 +458,11 @@ static MirOperand mir_gp_value_operand(MirFunction *fn, CodeGenerator *g,
 
 /* setcc opcode (second byte) for an IR comparison operator, signed or not. */
 static int mir_setcc_opcode(const char *op, int is_unsigned, unsigned char *out) {
-  if (strcmp(op, "==") == 0) { *out = 0x94; return 1; }
-  if (strcmp(op, "!=") == 0) { *out = 0x95; return 1; }
-  if (strcmp(op, "<") == 0)  { *out = is_unsigned ? 0x92 : 0x9C; return 1; }
-  if (strcmp(op, "<=") == 0) { *out = is_unsigned ? 0x96 : 0x9E; return 1; }
-  if (strcmp(op, ">") == 0)  { *out = is_unsigned ? 0x97 : 0x9F; return 1; }
-  if (strcmp(op, ">=") == 0) { *out = is_unsigned ? 0x93 : 0x9D; return 1; }
-  return 0;
+  return binary_semantics_condition_code(op, is_unsigned, out);
 }
 
 static int mir_is_comparison(const char *op) {
-  unsigned char tmp;
-  return mir_setcc_opcode(op, 0, &tmp);
+  return binary_semantics_is_comparison(op);
 }
 
 /* jcc opcode (second byte) to take when an IR comparison is FALSE, i.e. the
@@ -4496,7 +4489,7 @@ static int mir_lower_unary(MirFunction *fn, CodeGenerator *g,
       if (strcmp(op, "+") == 0) {
         return mir_emit_fmov(fn, dst, x, w);
       }
-      MirOperand mask = mir_float_const_operand(fn, -0.0, w);
+      MirOperand mask = mir_op_fimm(binary_semantics_float_sign_mask(w * 8));
       return mir_emit1(fn, MIR_FXOR, dst, mask, x, w, 0, 0);
     }
     MirOperand a = mir_value_operand(fn, g, ctx, map, &in->lhs);

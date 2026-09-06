@@ -673,6 +673,15 @@ int binary_emit_pop_reg(BinaryCodeBuffer *buffer, BinaryGpRegister reg);
 int binary_emit_push_reg(BinaryCodeBuffer *buffer, BinaryGpRegister reg);
 int binary_emit_pxor_xmm_xmm(BinaryCodeBuffer *buffer, BinaryXmmRegister destination, BinaryXmmRegister source);
 int binary_emit_xorpd_xmm_xmm(BinaryCodeBuffer *buffer, BinaryXmmRegister destination, BinaryXmmRegister source);
+
+/* ---- shared lowering semantics (src/codegen/binary/semantics.c) ----------
+ *
+ * Decisions both backends must make the same way. What the language means
+ * lives here; how to encode it does not. See semantics.c for why. */
+uint64_t binary_semantics_float_sign_mask(int float_bits);
+int binary_semantics_condition_code(const char *op, int is_unsigned,
+                                    unsigned char *out);
+int binary_semantics_is_comparison(const char *op);
 int binary_emit_ret(BinaryCodeBuffer *buffer);
 int binary_emit_rex(BinaryCodeBuffer *buffer, int w, int r, int x, int b);
 int binary_emit_rip_relative_access_ex( BinaryCodeBuffer *buffer, int operand_size_prefix, int rex_w, unsigned char opcode1, int has_opcode2, unsigned char opcode2, BinaryGpRegister reg, size_t *displacement_offset_out);
