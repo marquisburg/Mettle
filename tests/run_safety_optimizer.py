@@ -96,6 +96,43 @@ def main():
                     f"an empty span resolution passed unchecked ({argument})\n" +
                     run.stdout + run.stderr)
 
+    # A pointer carried into a heap buffer by a bulk copy, and read back out
+    # after its object is gone. The analysis that drops an allocation's
+    # per-byte origin bookkeeping has to read a metadata copy as a way in.
+    executable, _ = build("tests/test_safe_plain_copy_stale.mettle")
+    if executable is not None:
+        run = command([executable], timeout=10)
+        if run.returncode != 1 or "after it was freed" not in run.stdout + run.stderr:
+            failures.append("a pointer copied into a buffer lost its origin\n" +
+                            run.stdout + run.stderr)
+
+    # The other half, as structure rather than as timing: a buffer filled from
+    # a string literal holds no origins, so the loop that walks it asks the
+    # runtime nothing per byte. When this regressed the answers stayed right
+    # and the kernel ran two hundred times slower.
+    sidecar = output / "crc32-plain"
+    result = command([compiler, "--build", "--release", "--safe", "--dump-ir",
+                      "--stdlib", ROOT / "stdlib", ROOT / "examples/crc32/crc32.mettle",
+                      "-o", sidecar.with_suffix(".exe")])
+    if result.returncode:
+        failures.append(f"crc32 --dump-ir failed\n{result.stdout}{result.stderr}")
+    else:
+        dumps = list(output.glob("crc32-plain.*.ir"))
+        if not dumps:
+            failures.append("crc32 --dump-ir wrote no sidecar")
+        else:
+            body = re.search(r"(?ms)^function crc32 \{.*?^\}", dumps[0].read_text())
+            if not body:
+                failures.append("the crc32 IR has no 'crc32'")
+            else:
+                asked = [name for name in ("mettle_safety_value_load",
+                                           "mettle_safety_value_store",
+                                           "mettle_safety_merge_identity")
+                         if name in body.group(0)]
+                if asked:
+                    failures.append("crc32 asks the runtime for an origin per byte again: " +
+                                    ", ".join(asked))
+
     manifest = json.loads((ROOT / "tests/safety_optimizer_corpus.json").read_text())
     if not args.skip_corpus:
         for case in manifest["cases"]:

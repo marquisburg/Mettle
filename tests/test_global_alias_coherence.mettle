@@ -1,0 +1,70 @@
+// A cached global and a pointer into it have to agree, in both directions.
+//
+// The backend loads each referenced global scalar into a register once and
+// works from that copy. When the program also takes the global's address, a
+// pointer access can reach the same memory, so the copy is written back before
+// a pointer read and refreshed after a pointer write. Getting either half
+// wrong is silent: the program reads a value that was already replaced.
+//
+// Every value here comes from argc so nothing folds, and the reads alternate
+// between the two spellings so a stale copy cannot survive a round.
+import "std/io";
+
+var g_named: int64 = 0;
+var g_aliased_only: int64 = 0;
+var g_hidden: int64 = 0;
+
+@noinline fn bump(slot: int64*, by: int64) {
+  *slot = *slot + by;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var step: int64 = (int64)argc;
+  var p: int64* = &g_named;
+  var q: int64* = &g_aliased_only;
+  var wrong: int32 = 0;
+
+  // A write by name, read back through the pointer.
+  g_named = step * 7;
+  if (*p != step * 7) { wrong = wrong + 1; }
+
+  // A write through the pointer, read back by name.
+  *p = step * 11;
+  if (g_named != step * 11) { wrong = wrong + 2; }
+
+  // The same pair inside a loop, where the copy would otherwise stay in a
+  // register across every iteration.
+  var i: int64 = 0;
+  while (i < 4) {
+    g_named = g_named + step;
+    if (*p != g_named) { wrong = wrong + 4; }
+    *p = *p + step;
+    if (g_named != *p) { wrong = wrong + 8; }
+    i = i + 1;
+  }
+  if (g_named != step * 11 + step * 8) { wrong = wrong + 16; }
+
+  // A global the program never writes by name, only through its address. The
+  // copy starts clean, so nothing has to be written back, but every write
+  // through the pointer still has to reach the name.
+  var k: int64 = 0;
+  while (k < 4) {
+    *q = *q + step;
+    if (g_aliased_only != (k + 1) * step) { wrong = wrong + 32; }
+    k = k + 1;
+  }
+
+  // The same, with the write out of sight in a callee. Nothing in this
+  // function names `g_hidden`, so its copy is clean throughout and needs no
+  // write-back, but the callee's store still has to be visible here.
+  var j: int64 = 0;
+  while (j < 4) {
+    bump(&g_hidden, step);
+    if (g_hidden != (j + 1) * step) { wrong = wrong + 64; }
+    j = j + 1;
+  }
+
+  print("alias wrong=");
+  println("{(int64)wrong}");
+  return wrong;
+}

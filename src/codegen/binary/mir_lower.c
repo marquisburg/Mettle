@@ -1,4 +1,4 @@
-#include "codegen/binary/mir.h"
+﻿#include "codegen/binary/mir.h"
 #include "ir/ir_machine.h"
 
 extern long long mir_encode_last_spills;
@@ -3153,6 +3153,43 @@ static int mir_emit_global_writebacks(MirFunction *fn, CodeGenerator *g,
     return 1;
   }
   return mir_emit_global_flush_names(fn, g, map, wb->names, wb->count);
+}
+
+/* Flush the address-taken globals a pointer access could read, before that
+ * access. Only the ones whose cache can differ from memory: a global the
+ * function never writes by name was loaded once at entry and refreshed after
+ * every aliasing store, so storing it back writes the value already there.
+ *
+ * The unconditional form put that dead store in front of every load and every
+ * store in the function, which inside a loop means several per iteration. A
+ * kernel inlined into a caller that happens to cache one address-taken global
+ * paid for it on every element it touched. */
+static int mir_emit_global_alias_flush(MirFunction *fn, CodeGenerator *g,
+                                       MirNameMap *map,
+                                       const MirGlobalWriteback *wb) {
+  if (!wb) {
+    return 1;
+  }
+  for (size_t i = 0; i < wb->at_count; i++) {
+    size_t written = wb->count;
+    for (size_t j = 0; j < wb->count; j++) {
+      if (strcmp(wb->names[j], wb->at[i]) == 0) {
+        written = j;
+        break;
+      }
+    }
+    if (written == wb->count) {
+      continue; /* never written by name: the cache holds what memory holds */
+    }
+    if (wb->dirty && fn->cur_ir_index >= 0 && written < 64 &&
+        !((wb->dirty[fn->cur_ir_index] >> written) & 1ull)) {
+      continue; /* clean on every path reaching here */
+    }
+    if (!mir_emit_global_flush_names(fn, g, map, &wb->at[i], 1)) {
+      return 0;
+    }
+  }
+  return 1;
 }
 
 /* Flow-sensitive dirty-global analysis over the IR CFG. Returns a malloc'd
@@ -10589,7 +10626,7 @@ int code_generator_binary_emit_function_via_mir(
                  ir_function->instructions[i].op == IR_OP_STORE || kernel_op;
     int store_op = ir_function->instructions[i].op == IR_OP_STORE || kernel_op;
     if (mem_op && wb.at_count > 0 &&
-        !mir_emit_global_flush_names(&fn, generator, &map, wb.at, wb.at_count)) {
+        !mir_emit_global_alias_flush(&fn, generator, &map, &wb)) {
       free(fold_skip);
       free(folds);
       goto oom;

@@ -93,9 +93,89 @@ static SafetyPlainArray *safety_plain_root(SafetyPlainStorage *state,
   return NULL;
 }
 
+/* Reading a pointer's value, rather than what it points at. A comparison and a
+ * branch on one settle a question about the address; the provenance pass gives
+ * their result no origin of its own, so neither can put one into the array. */
+static int safety_plain_reads_value_only(const IRInstruction *in) {
+  if (in->op == IR_OP_BRANCH_ZERO || in->op == IR_OP_BRANCH_EQ) return 1;
+  return in->op == IR_OP_BINARY && in->text &&
+      (!strcmp(in->text, "==") || !strcmp(in->text, "!=") ||
+       !strcmp(in->text, "<") || !strcmp(in->text, ">") ||
+       !strcmp(in->text, "<=") || !strcmp(in->text, ">=") ||
+       !strcmp(in->text, "&&") || !strcmp(in->text, "||"));
+}
+
+/* Whether this function pairs `name` with a bulk byte move into the same
+ * array. A byte move carries no origins itself: the metadata travels in the
+ * separate call the lifetime pass emits beside it, and that call is what the
+ * fixpoint below reads. Without the pair the move would take pointer bytes
+ * somewhere their origins never followed, so the array keeps its bookkeeping.
+ *
+ * Matched by destination rather than by position, so a pass that moved the two
+ * apart cannot turn this into a use the analysis waves through. */
+static int safety_plain_metadata_pairs(SafetyPlainStorage *state,
+    const IRFunction *fn, SafetyPlainArray *array, const char *name,
+    size_t arity) {
+  for (size_t i = 0; i < fn->instruction_count; i++) {
+    const IRInstruction *in = &fn->instructions[i];
+    if (in->op == IR_OP_CALL && in->text && !strcmp(in->text, name) &&
+        in->argument_count == arity && in->arguments &&
+        safety_plain_root(state, fn, &in->arguments[0], 0) == array) return 1;
+  }
+  return 0;
+}
+
+/* Whether a region a metadata copy reads from can hold an origin at all.
+ *
+ * The characters of a string literal cannot: they are a read-only image with
+ * no relocation in it, and the only pointer a literal string owns lives in its
+ * record, which is a different object from the bytes a copy reads. */
+static int safety_plain_literal_bytes(SafetyPlainStorage *state,
+    const IRFunction *fn, const IROperand *value, int depth) {
+  if (!value || depth > 32) return 0;
+  if (value->kind == IR_OPERAND_STRING) return 1;
+  const IRInstruction *in = safety_plain_definition(fn, value);
+  if (!in) return 0;
+  if (in->op == IR_OP_ASSIGN || in->op == IR_OP_CAST ||
+      (in->op == IR_OP_BINARY && in->text && !strcmp(in->text, "+")))
+    return safety_plain_literal_bytes(state, fn, &in->lhs, depth + 1);
+  /* The data pointer loaded out of a string record whose only value is a
+   * literal. A name written anywhere, here or in another function, could hold
+   * a different string by the time this runs. */
+  if (in->op != IR_OP_LOAD || in->rhs.kind != IR_OPERAND_INT ||
+      in->rhs.int_value != 8 || in->lhs.kind != IR_OPERAND_SYMBOL) return 0;
+  const IRInstruction *source = safety_plain_definition(fn, &in->lhs);
+  if (source) return source->op == IR_OP_ASSIGN &&
+      source->lhs.kind == IR_OPERAND_STRING;
+  const IRModuleSymbol *symbol =
+      ir_program_lookup_symbol(state->program, in->lhs.name);
+  if (!symbol || symbol->kind != IR_MODSYM_VARIABLE || symbol->is_extern ||
+      symbol->is_exported || symbol->is_volatile || !symbol->init_string ||
+      symbol->init_reloc_count) return 0;
+  for (size_t f = 0; f < state->program->function_count; f++) {
+    const IRFunction *other = state->program->functions[f];
+    for (size_t i = 0; i < other->instruction_count; i++) {
+      const IRInstruction *write = &other->instructions[i];
+      if (write->op != IR_OP_DECLARE_LOCAL &&
+          ir_instruction_writes_destination(write) &&
+          write->dest.kind == IR_OPERAND_SYMBOL && write->dest.name &&
+          !strcmp(write->dest.name, in->lhs.name)) return 0;
+    }
+  }
+  return 1;
+}
+
+static int safety_plain_copy_source_is_clean(SafetyPlainStorage *state,
+    const IRFunction *fn, const IROperand *value) {
+  if (safety_plain_literal_bytes(state, fn, value, 0)) return 1;
+  SafetyPlainArray *array = safety_plain_root(state, fn, value, 0);
+  return array && !array->rejected;
+}
+
 static int safety_plain_allowed_use(SafetyPlainStorage *state,
     SafetyPlainArray *array, const IRFunction *fn,
     const IRInstruction *in, int position) {
+  if (safety_plain_reads_value_only(in)) return 1;
   if (in->op == IR_OP_ADDRESS_OF) return position == 1 &&
       safety_plain_definition(fn, &in->dest) == in;
   if (in->op == IR_OP_SAFETY_CHECK) return position == 3;
@@ -113,6 +193,24 @@ static int safety_plain_allowed_use(SafetyPlainStorage *state,
     parameter.kind = IR_OPERAND_SYMBOL;
     parameter.name = callee->parameter_names[position - 3];
     return safety_plain_root(state, callee, &parameter, 0) == array;
+  }
+  /* Pure checks and metadata clears take an array without adding an origin:
+   * a check reads nothing back, and a clear can only remove one. */
+  if (!strcmp(in->text, "mettle_safety_buffer_check") ||
+      !strcmp(in->text, "mettle_safety_value_clear")) return 1;
+  /* A metadata copy reads origins out of one region and writes them into
+   * another. Reading is free; whether the write costs this array its
+   * bookkeeping depends on what the other side holds, which the fixpoint below
+   * settles once every array has a verdict. */
+  if (!strcmp(in->text, "mettle_safety_value_copy")) return 1;
+  /* A byte move, only where its metadata call moves with it. */
+  if (!strcmp(in->text, "memcpy") || !strcmp(in->text, "memmove")) {
+    return position != 3 ||
+        safety_plain_metadata_pairs(state, fn, array, "mettle_safety_value_copy", 3);
+  }
+  if (!strcmp(in->text, "memset")) {
+    return position != 3 ||
+        safety_plain_metadata_pairs(state, fn, array, "mettle_safety_value_clear", 2);
   }
   if (position != 3) return 0;
   return !strcmp(in->text, "mettle_safety_identity") ||
@@ -326,6 +424,21 @@ static int safety_simplify_plain_storage(IRProgram *program) {
         const IROperand *path[64];
         if (array && !array->rejected &&
             safety_plain_tainted(&state, fn, &in->arguments[2], path, 0)) {
+          array->rejected = 1;
+          changed = 1;
+        }
+      }
+      for (size_t i = 0; i < fn->instruction_count; i++) {
+        const IRInstruction *in = &fn->instructions[i];
+        if (in->op != IR_OP_CALL || !in->text || !in->arguments ||
+            strcmp(in->text, "mettle_safety_value_copy") || in->argument_count != 3)
+          continue;
+        SafetyPlainArray *array = safety_plain_root(&state, fn, &in->arguments[0], 0);
+        if (array && !array->rejected &&
+            !safety_plain_copy_source_is_clean(&state, fn, &in->arguments[1])) {
+          if (safety_trace_enabled())
+            fprintf(stderr, "safety: plain storage copy source in %s can hold origins\n",
+                    fn->name ? fn->name : "?");
           array->rejected = 1;
           changed = 1;
         }

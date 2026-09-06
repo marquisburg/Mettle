@@ -1,0 +1,42 @@
+// A pointer that reaches a heap buffer through a bulk copy, and is read back
+// out of it after the object it names is gone.
+//
+// The analysis that decides an allocation holds no pointer origins, and drops
+// its per-byte bookkeeping, has to read a metadata copy as a way in. A buffer
+// filled from a string literal holds no origins and keeps nothing; the same
+// buffer filled from a record that holds a pointer keeps all of it. Getting
+// that backwards costs nothing visible until a stale pointer is followed.
+import "std/io";
+import "std/mem";
+
+struct Holder {
+  pointer: int64*;
+  count: int64;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var text: string = "0123456789abcdef";
+
+  // A buffer filled from a literal: no origins ever reach it.
+  var plain: cstring = malloc(64);
+  memcpy(plain, text, 16);
+  var first: int32 = (int32)plain[0];
+  free(plain);
+
+  // The same shape, filled from a record holding a live pointer.
+  var target: int64* = malloc(8);
+  target[0] = 77;
+  var held: Holder;
+  held.pointer = target;
+  held.count = (int64)argc;
+
+  var carrier: Holder* = malloc(sizeof(Holder));
+  memcpy(carrier, &held, sizeof(Holder));
+  free(target);
+
+  var recovered: int64* = carrier->pointer;
+  print("unreached=");
+  println("{(int64)(first + (int32)recovered[0])}");
+  free(carrier);
+  return 0;
+}

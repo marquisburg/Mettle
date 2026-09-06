@@ -216,23 +216,28 @@ reassembling a pointer one byte at a time is a thing programs do, and the
 checks would be defeated by refusing to follow it.
 
 Measured on this repository's example kernels, each reporting its own inner
-loop rather than process time, `--release --safe` against `--release`:
+loop rather than process time, pinned to one core and taken as the best of
+fifteen interleaved runs, `--release --safe` against `--release`:
 
 | Kernel | Plain | Checked | Ratio |
 |--------|------:|--------:|------:|
-| heapsort | 23.8 ms | 377.9 ms | 16x |
-| base64_encode | 47.2 ms | 1.59 s | 34x |
-| sort_insertion | 9.7 ms | 830.7 ms | 85x |
-| binary_search | 7.0 ms | 2.51 s | 359x |
-| crc32 | 2.3 ms | 1.04 s | 457x |
+| aos_sum | 112.1 ms | 110.0 ms | 1.0x |
+| heapsort | 14.5 ms | 179.4 ms | 12x |
+| base64_encode | 20.1 ms | 897.3 ms | 45x |
 
-The worst of these walk a heap buffer a byte at a time, and each byte asks the
-runtime what allocation it came from. The analysis that removes those questions
-proves an allocation carries no origins only when it can see the whole graph,
-so a buffer that arrives from a library function keeps them all. Two kernels,
-`aos_sum` and `transpose`, run faster checked than plain, which is not a claim
-about the checks: `--safe` runs a scalar analysis stage that `--release` alone
-does not, and these two benefit from it.
+Read a ratio only where both sides do the same work. A benchmark that repeats
+an invariant computation is folded to one pass in an unchecked build, and the
+checks stop that fold, so the figure that comes out compares one pass against
+several hundred. `crc32`, `dot_product`, `binary_search` and `sort_insertion`
+all report unchecked times too fast to be doing the work, and their ratios
+say nothing about what a check costs.
+
+Where the two sides do agree, the cost is the per-access checks the resolution
+could not remove plus, on anything that walks bytes, the metadata read that
+keeps a pointer's origin when a program reassembles one out of them. The
+analysis that removes those reads proves an allocation carries no origins only
+when it can see every write into it, so a buffer filled from something it
+cannot follow keeps them all.
 
 Treat `--safe` as a mode for testing and for programs where the guarantee is
 worth the factor, not as a release default. Earlier timing claims for the

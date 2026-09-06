@@ -6964,6 +6964,43 @@ catch {
 }
 
 
+# A cached global and a pointer into it, in both directions. The backend keeps
+# each referenced global scalar in a register and works from that copy, so a
+# program that also takes the global's address needs the copy written back
+# before a pointer read and refreshed after a pointer write.
+#
+# Both halves are silent when wrong: the program reads a value that was already
+# replaced, with the right answer sitting in memory or in a register. Run on
+# both backends and in every mode, because the copy only survives across a loop
+# where the register allocator kept it there.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $aliasPrevMir = $env:METTLE_MIR
+  try {
+    foreach ($backend in @("mir", "baseline")) {
+      if ($backend -eq "baseline") { $env:METTLE_MIR = "0" } else { $env:METTLE_MIR = $null }
+      foreach ($mode in @(@(), @("-O"), @("--release"), @("--release", "--safe"))) {
+        $aliasExe = Join-Path $tmpDir "global_alias_coherence.exe"
+        $aliasBuild = & $CompilerPath --build @mode "tests/test_global_alias_coherence.mettle" -o $aliasExe 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+          throw "building the alias fixture ($backend $($mode -join ' ')) failed: $aliasBuild"
+        }
+        $aliasOut = & $aliasExe 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0 -or $aliasOut -notmatch "alias wrong=0") {
+          throw "a cached global and a pointer into it disagreed ($backend $($mode -join ' ')): exit $LASTEXITCODE`n$aliasOut"
+        }
+      }
+    }
+  }
+  finally { $env:METTLE_MIR = $aliasPrevMir }
+  Write-CaseResult -Name "global_alias_coherence" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "global_alias_coherence" -Passed $false -Reason $_.Exception.Message
+}
+
 # A pointer taken into a global and carried elsewhere. Indexing a global
 # directly never reaches the runtime at all, since its size is in the program;
 # this is the case that needs the globals described, and the clean fixture
