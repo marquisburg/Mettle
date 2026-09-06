@@ -86,7 +86,7 @@ static const BinaryGpRegister MIR_GP_EXTRA[] = {
 static int mir_op_is_call_barrier(MirOpcode op) {
   return op == MIR_CALL || op == MIR_CALL_INDIRECT || op == MIR_HEAP_NEW ||
          op == MIR_REP_MOVSB || op == MIR_REP_STOSB || op == MIR_SYSCALL ||
-         mir_op_is_inline_kernel(op);
+         op == MIR_INLINE_ASM || mir_op_is_inline_kernel(op);
 }
 
 static int mir_fn_has_calls(const MirFunction *fn) {
@@ -1397,6 +1397,11 @@ static int mir_clobber_index_ensure(const MirFunction *fn) {
         }
         break;
       }
+      case MIR_INLINE_ASM:
+        for (int r = 0; ok && r < 16; r++) {
+          ok = mir_clobber_list_push(&ix->explicit_fixed[r], (int)k);
+        }
+        break;
       default:
         break;
       }
@@ -1460,6 +1465,9 @@ static int mir_reg_clobbered_in_range(const MirFunction *fn,
       if (kern && (kern->gp_clobbers & (1u << (unsigned)reg))) {
         return 1;
       }
+    }
+    if (in->op == MIR_INLINE_ASM) {
+      return 1;
     }
     if (!constrained) {
       continue;
@@ -1552,6 +1560,9 @@ static uint32_t mir_color_reg_mask(const MirFunction *fn, MirVregId v,
     size_t incoming = fn->param_count + (fn->returns_indirect ? 1 : 0);
     for (size_t i = 0; i < n; i++) {
       BinaryGpRegister reg = pool[i];
+      if (fn->reserve_rbx && reg == BINARY_GP_RBX) {
+        continue;
+      }
       if (vr->entry_live) {
         int ai = mir_reg_arg_index(reg);
         if (ai >= 0 && (size_t)ai < incoming) {
@@ -2284,6 +2295,14 @@ static int mir_regalloc_report_saved(MirFunction *fn) {
    * of the body. (The fallback emitter never hit this because its promoter
    * claims R12..R15 up front, so they are always in its saved set.) */
   for (size_t i = 0; i < fn->insn_count; i++) {
+    if (fn->insns[i].op == MIR_INLINE_ASM) {
+      for (int reg = 0; reg < 16; reg++) {
+        if (mir_gp_is_nonvolatile((BinaryGpRegister)reg)) {
+          used_nonvol[reg] = 1;
+        }
+      }
+      continue;
+    }
     if (fn->insns[i].op != MIR_IR_KERNEL) {
       continue;
     }

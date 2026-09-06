@@ -245,6 +245,7 @@ const char *mir_opcode_name(MirOpcode op) {
   case MIR_STORE_OUTARG: return "store_outarg";
   case MIR_LEA_OUTARG: return "lea_outarg";
   case MIR_TRAP: return "trap";
+  case MIR_INLINE_ASM: return "inline_asm";
   case MIR_RET: return "ret";
   case MIR_FADD: return "fadd";
   case MIR_FSUB: return "fsub";

@@ -1011,6 +1011,9 @@ static int mir_call_is_runtime_trap(const IRInstruction *in) {
                       strcmp(in->text, "mettle_crash_trap") == 0);
 }
 
+static int mir_call_is_runtime_hook(const IRInstruction *in);
+static int mir_runtime_hook_is_supported(const IRInstruction *in);
+
 static const BinaryGpRegister MIR_SYSCALL_SYSV_REGISTERS[] = {
     BINARY_GP_RDI, BINARY_GP_RSI, BINARY_GP_RDX,
     BINARY_GP_R10, BINARY_GP_R8,  BINARY_GP_R9};
@@ -1377,7 +1380,27 @@ static int mir_call_is_supported(CodeGenerator *g,
   /* Runtime safety-check traps are terminal and lowered specially (MIR_TRAP),
    * so they bypass the normal known-function / argument-shape requirements. */
   if (mir_call_is_runtime_trap(in)) {
+    if (g->generate_stack_trace_support) {
+      int is_ex = strcmp(in->text, "mettle_crash_trap_ex") == 0;
+      if (is_ex) {
+        for (size_t a = 2; a < in->argument_count && a < 4; a++) {
+          int kind = in->arguments[a].kind;
+          if (kind != IR_OPERAND_INT && kind != IR_OPERAND_TEMP &&
+              kind != IR_OPERAND_SYMBOL) {
+            mir_call_trace("trap_detail_kind");
+            return 0;
+          }
+        }
+      } else if (in->argument_count < 1 ||
+                 in->arguments[0].kind != IR_OPERAND_STRING) {
+        mir_call_trace("trap_message_kind");
+        return 0;
+      }
+    }
     return 1;
+  }
+  if (mir_call_is_runtime_hook(in)) {
+    return mir_runtime_hook_is_supported(in);
   }
   if (mir_call_is_inline_zero_fill(in)) {
     return 1;
@@ -2329,12 +2352,6 @@ static int mir_gate_function_shape(CodeGenerator *generator,
    * function holding one is emitted by the baseline, which does neither. */
   if (ir_function->has_volatile_access) {
     return mir_trace_bail(ir_function, "volatile_access");
-  }
-  /* Stage 2 targets plain --release codegen only: no debug line markers,
-   * stack-trace ranges, or profiling instrumentation. */
-  if (generator->generate_debug_info || generator->generate_stack_trace_support ||
-      generator->profile_runtime) {
-    return 0;
   }
   /* A function reached from outside under SysV takes and returns aggregates by
    * eightbyte. That prologue and that return live in the baseline emitter, so
@@ -5161,21 +5178,74 @@ typedef struct {
   int hidden;
 } MirCallArgs;
 
-static int mir_lower_runtime_trap(MirFunction *fn, const IRInstruction *in) {
-
-if (mir_call_is_runtime_trap(in)) {
-  int msg_idx = strcmp(in->text, "mettle_crash_trap_ex") == 0 ? 1 : 0;
+static int mir_lower_runtime_trap(MirFunction *fn, CodeGenerator *g,
+                                  BinaryFunctionContext *ctx, MirNameMap *map,
+                                  const IRInstruction *in) {
+  int is_ex = strcmp(in->text, "mettle_crash_trap_ex") == 0;
+  int msg_idx = is_ex ? 1 : 0;
   const char *msg = "";
+  MirOperand detail = mir_op_none();
   if ((size_t)msg_idx < in->argument_count &&
       in->arguments[msg_idx].kind == IR_OPERAND_STRING &&
       in->arguments[msg_idx].name) {
     msg = in->arguments[msg_idx].name;
   }
-  /* The abort message goes in operand `a` (MIR_TRAP reads in->a.sym). */
-  return mir_emit1(fn, MIR_TRAP, mir_op_none(), mir_op_symbol(msg),
-                   mir_op_none(), 8, 0, 0);
+  if (is_ex && g->generate_stack_trace_support && in->argument_count >= 4) {
+    MirOperand second = mir_value_operand(fn, g, ctx, map, &in->arguments[3]);
+    if (!mir_emit1(fn, MIR_MOV, mir_op_phys(BINARY_GP_R10, MIR_RC_GP), second,
+                   mir_op_none(), 8, 0, 0)) {
+      return 0;
+    }
+    detail = mir_value_operand(fn, g, ctx, map, &in->arguments[2]);
+  }
+  return mir_emit1(fn, MIR_TRAP, mir_op_none(), mir_op_symbol(msg), detail, 8,
+                   0, 0);
 }
+
+static int mir_call_is_runtime_hook(const IRInstruction *in) {
+  return in->text && (strncmp(in->text, "mettle_profile_", 15) == 0 ||
+                      strncmp(in->text, "mettle_dbg_", 11) == 0);
+}
+
+static int mir_runtime_hook_is_supported(const IRInstruction *in) {
+  const BinaryAbi *abi = code_generator_binary_active_abi();
+  if (in->dest.kind != IR_OPERAND_NONE) {
+    mir_call_trace("hook_dest");
+    return 0;
+  }
+  if (in->argument_count > abi->int_param_count) {
+    mir_call_trace("hook_args>registers");
+    return 0;
+  }
+  for (size_t a = 0; a < in->argument_count; a++) {
+    int kind = in->arguments[a].kind;
+    if (kind != IR_OPERAND_INT && kind != IR_OPERAND_TEMP &&
+        kind != IR_OPERAND_SYMBOL) {
+      mir_call_trace("hook_arg_kind");
+      return 0;
+    }
+  }
   return 1;
+}
+
+static int mir_lower_runtime_hook(MirFunction *fn, CodeGenerator *g,
+                                  BinaryFunctionContext *ctx, MirNameMap *map,
+                                  const IRInstruction *in) {
+  const BinaryAbi *abi = code_generator_binary_active_abi();
+  if (!code_generator_binary_declare_external_symbol(g, in->text)) {
+    fn->has_error = 1;
+    return 0;
+  }
+  for (size_t a = 0; a < in->argument_count; a++) {
+    MirOperand value = mir_value_operand(fn, g, ctx, map, &in->arguments[a]);
+    if (!mir_emit1(fn, MIR_MOV,
+                   mir_op_phys(abi->int_param_registers[a], MIR_RC_GP), value,
+                   mir_op_none(), 8, 0, 0)) {
+      return 0;
+    }
+  }
+  return mir_emit1(fn, MIR_CALL, mir_op_symbol(in->text), mir_op_none(),
+                   mir_op_none(), 8, 0, 0);
 }
 
 static int mir_lower_syscall(MirFunction *fn, CodeGenerator *g,
@@ -5611,7 +5681,10 @@ static int mir_lower_call(MirFunction *fn, CodeGenerator *g,
      * support, so the trap degrades to puts(message)+exit(1); the remaining
      * trap arguments (kind, pc, rbp) are unused on that path. */
     if (mir_call_is_runtime_trap(in)) {
-      return mir_lower_runtime_trap(fn, in);
+      return mir_lower_runtime_trap(fn, g, ctx, map, in);
+    }
+    if (mir_call_is_runtime_hook(in)) {
+      return mir_lower_runtime_hook(fn, g, ctx, map, in);
     }
     if (mir_call_is_syscall(in)) {
       return mir_lower_syscall(fn, g, ctx, map, in);
@@ -10289,6 +10362,7 @@ int code_generator_binary_emit_function_via_mir(
   void *vr_oracle = NULL;
   mir_function_init(&fn, context);
   fn.generator = generator;
+  fn.ir_function = ir_function;
   memset(&map, 0, sizeof(map));
 
   /* Globals this function writes: register-promoted (cached at entry, written

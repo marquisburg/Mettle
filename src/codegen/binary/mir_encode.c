@@ -77,7 +77,8 @@ static void home_fwd_clear(void) { g_home_fwd.valid = 0; }
  * transfers control ends a forwarding window. */
 static void home_fwd_note_boundary(MirOpcode op) {
   if (op == MIR_LABEL || op == MIR_JMP || op == MIR_JCC || op == MIR_CMPBR ||
-      op == MIR_FCMPBR || op == MIR_CALL || op == MIR_RET) {
+      op == MIR_FCMPBR || op == MIR_CALL || op == MIR_RET ||
+      op == MIR_INLINE_ASM) {
     g_home_fwd.valid = 0;
   }
 }
@@ -1842,7 +1843,8 @@ static int mir_has_calls(const MirFunction *fn) {
     if (fn->insns[i].op == MIR_CALL ||
         fn->insns[i].op == MIR_CALL_INDIRECT ||
         fn->insns[i].op == MIR_SYSCALL ||
-        fn->insns[i].op == MIR_TRAP) {
+        fn->insns[i].op == MIR_TRAP ||
+        fn->insns[i].op == MIR_INLINE_ASM) {
       return 1;
     }
   }
@@ -2249,9 +2251,146 @@ static int mir_cmp_operand_reusable(const MirFunction *fn,
          fn->vregs[x->vreg].rclass == fn->vregs[y->vreg].rclass;
 }
 
+static int mir_encode_traced_trap(MirFunction *fn, const MirInst *in,
+                                  const IRInstruction *ir) {
+  CodeGenerator *g = fn->generator;
+  BinaryFunctionContext *ctx = fn->context;
+  BinaryCodeBuffer *code = &ctx->code;
+  const BinaryAbi *abi = code_generator_binary_active_abi();
+  int is_ex = ir->text && strcmp(ir->text, "mettle_crash_trap_ex") == 0;
+  const char *trap_symbol =
+      is_ex ? "mettle_crash_trap_ex" : "mettle_crash_trap";
+  const char *filename =
+      code_generator_runtime_filename(g, ir->location.filename);
+  size_t disp = 0;
+  char *pc_label = NULL;
+
+  if (is_ex) {
+    int vok = 1;
+    BinaryGpRegister first;
+    if (!binary_emit_push_reg(code, SCRATCH_A)) {
+      return enc_err(fn, "out of memory staging a trap detail");
+    }
+    if (in->b.kind == MIR_OPK_NONE) {
+      MirOperand zero = mir_op_imm(0);
+      first = value_reg(fn, &zero, SCRATCH_A, &vok);
+    } else {
+      first = value_reg(fn, &in->b, SCRATCH_A, &vok);
+    }
+    if (!vok) {
+      return 0;
+    }
+    if (first != SCRATCH_A &&
+        !binary_emit_mov_reg_reg(code, SCRATCH_A, first)) {
+      return enc_err(fn, "out of memory staging a trap detail");
+    }
+    if (!binary_emit_pop_reg(code, SCRATCH_B)) {
+      return enc_err(fn, "out of memory staging a trap detail");
+    }
+  }
+  pc_label = code_generator_generate_label(g, "mettledbg_trap_pc");
+  if (!pc_label) {
+    return enc_err(fn, "out of memory creating a trap label");
+  }
+  if (!binary_label_table_define(&ctx->labels, pc_label, code->size) ||
+      !code_generator_binary_record_debug_label_export(ctx, pc_label,
+                                                       code->size)) {
+    free(pc_label);
+    return enc_err(fn, "out of memory recording a trap label");
+  }
+  if (ir->location.line > 0 &&
+      !code_generator_binary_emit_runtime_location_marker(
+          g, ctx, ir->location.line, ir->location.column, filename)) {
+    free(pc_label);
+    return 0;
+  }
+  if (is_ex && ir->argument_count >= 4) {
+    uint32_t kind = ir->arguments[0].kind == IR_OPERAND_INT
+                        ? (uint32_t)ir->arguments[0].int_value
+                        : 0u;
+    const char *message = ir->arguments[1].kind == IR_OPERAND_STRING
+                              ? ir->arguments[1].name
+                              : NULL;
+    code_generator_record_runtime_trap_site(g, pc_label, kind,
+                                            ir->location.line,
+                                            ir->location.column, filename,
+                                            message, NULL);
+  }
+  if (!code_generator_binary_declare_external_symbol(g, trap_symbol)) {
+    free(pc_label);
+    return 0;
+  }
+  if (is_ex) {
+    int stacked = abi->int_param_count < 6 ? 6 - (int)abi->int_param_count : 0;
+    uint32_t frame = (uint32_t)(abi->shadow_space_size + stacked * 8);
+    if ((frame > 0 && !binary_emit_sub_rsp_imm32(code, frame)) ||
+        !binary_emit_mov_reg_imm64(
+            code, abi->int_param_registers[0],
+            ir->arguments[0].kind == IR_OPERAND_INT
+                ? (uint64_t)ir->arguments[0].int_value
+                : 0u) ||
+        !code_generator_binary_emit_cstring_literal_address(
+            g, ctx, in->a.sym ? in->a.sym : "", abi->int_param_registers[1]) ||
+        !binary_emit_lea_reg_rip_placeholder(code, abi->int_param_registers[2],
+                                             &disp) ||
+        !binary_label_fixup_table_add(&ctx->label_fixups, pc_label, disp) ||
+        !binary_emit_mov_reg_reg(code, abi->int_param_registers[3],
+                                 BINARY_GP_RBP)) {
+      free(pc_label);
+      return enc_err(fn, "out of memory emitting a traced trap");
+    }
+    if (abi->int_param_count > 4
+            ? !binary_emit_mov_reg_reg(code, abi->int_param_registers[4],
+                                       SCRATCH_A)
+            : !binary_emit_mov_mem_reg(code, BINARY_GP_RSP,
+                                       abi->shadow_space_size, SCRATCH_A)) {
+      free(pc_label);
+      return enc_err(fn, "out of memory emitting a traced trap");
+    }
+    if (abi->int_param_count > 5
+            ? !binary_emit_mov_reg_reg(code, abi->int_param_registers[5],
+                                       SCRATCH_B)
+            : !binary_emit_mov_mem_reg(code, BINARY_GP_RSP,
+                                       abi->shadow_space_size + 8,
+                                       SCRATCH_B)) {
+      free(pc_label);
+      return enc_err(fn, "out of memory emitting a traced trap");
+    }
+    if (!binary_emit_call_placeholder(code, &disp) ||
+        !binary_call_relocation_table_add(&ctx->call_relocations, trap_symbol,
+                                          disp) ||
+        (frame > 0 && !binary_emit_add_rsp_imm32(code, frame))) {
+      free(pc_label);
+      return enc_err(fn, "out of memory emitting a traced trap");
+    }
+    free(pc_label);
+    return 1;
+  }
+  if (!code_generator_binary_emit_cstring_literal_address(
+          g, ctx, in->a.sym ? in->a.sym : "", abi->int_param_registers[0]) ||
+      !binary_emit_lea_reg_rip_placeholder(code, abi->int_param_registers[1],
+                                           &disp) ||
+      !binary_label_fixup_table_add(&ctx->label_fixups, pc_label, disp) ||
+      !binary_emit_mov_reg_reg(code, abi->int_param_registers[2],
+                               BINARY_GP_RBP) ||
+      !binary_emit_call_placeholder(code, &disp) ||
+      !binary_call_relocation_table_add(&ctx->call_relocations, trap_symbol,
+                                        disp)) {
+    free(pc_label);
+    return enc_err(fn, "out of memory emitting a traced trap");
+  }
+  free(pc_label);
+  return 1;
+}
+
 static int mir_emit_prologue(MirFunction *fn) {
   BinaryFunctionContext *ctx = fn->context;
   BinaryCodeBuffer *code = &ctx->code;
+  if (fn->ir_function && fn->ir_function->is_interrupt &&
+      !code_generator_binary_emit_interrupt_entry(
+          fn->generator, (IRFunction *)fn->ir_function, ctx)) {
+    return 0;
+  }
   if (ctx->omit_frame_pointer) {
     /* No rbp frame: fold the 8 bytes the saved-rbp slot used to occupy into the
      * allocation so rsp stays 16-aligned at calls (entry rsp == 8 mod 16, and
@@ -2323,11 +2462,38 @@ static int mir_emit_epilogue(MirFunction *fn) {
       return enc_err(fn, "out of memory in epilogue");
     }
   } else if (!binary_emit_mov_reg_reg(code, BINARY_GP_RSP, BINARY_GP_RBP) ||
-             !binary_emit_pop_reg(code, BINARY_GP_RBP) ||
-             !binary_emit_ret(code)) {
+             !binary_emit_pop_reg(code, BINARY_GP_RBP)) {
+    return enc_err(fn, "out of memory in epilogue");
+  } else if (fn->ir_function && fn->ir_function->is_interrupt) {
+    if (!code_generator_binary_emit_interrupt_exit(
+            fn->generator, (IRFunction *)fn->ir_function, ctx)) {
+      return 0;
+    }
+  } else if (!binary_emit_ret(code)) {
     return enc_err(fn, "out of memory in epilogue");
   }
   return 1;
+}
+
+static int mir_encode_inline_asm(MirFunction *fn, const MirInst *in) {
+  const MirAsmAux *aux = (const MirAsmAux *)in->aux;
+  BinaryFunctionContext *ctx = fn->context;
+  if (!aux || !aux->ir) {
+    return enc_err(fn, "inline asm without its source");
+  }
+  for (int k = 0; k < aux->count; k++) {
+    const MirVreg *v = &fn->vregs[aux->vregs[k]];
+    int off = spill_off(v);
+    if (off <= 0) {
+      return enc_err(fn, "an asm operand has no frame home");
+    }
+    if (!binary_named_slot_table_add(&ctx->local_slots, aux->names[k], off) ||
+        !binary_named_slot_table_add(&ctx->address_taken_symbols,
+                                     aux->names[k], off)) {
+      return enc_err(fn, "out of memory binding an asm operand");
+    }
+  }
+  return code_generator_binary_emit_inline_asm(fn->generator, ctx, aux->ir);
 }
 
 /* MIR_LOAD_GLOBAL: dst <- value of the read-only global named by in->a (SYMBOL).
@@ -2731,6 +2897,19 @@ int mir_encode(MirFunction *fn) {
     if (!ok) {
       free(align_label);
       return 0;
+    }
+    if (fn->generator->generate_stack_trace_support && fn->ir_function &&
+        in->ir_index >= 0 &&
+        (size_t)in->ir_index < fn->ir_function->instruction_count) {
+      const IRInstruction *src = &fn->ir_function->instructions[in->ir_index];
+      if (src->location.line > 0 &&
+          !code_generator_binary_emit_runtime_location_marker(
+              fn->generator, ctx, src->location.line, src->location.column,
+              code_generator_runtime_filename(fn->generator,
+                                              src->location.filename))) {
+        free(align_label);
+        return 0;
+      }
     }
     switch (in->op) {
     case MIR_NOP:
@@ -3496,6 +3675,13 @@ int mir_encode(MirFunction *fn) {
       break;
     }
     case MIR_TRAP: {
+      if (fn->generator->generate_stack_trace_support && fn->ir_function &&
+          in->ir_index >= 0 &&
+          (size_t)in->ir_index < fn->ir_function->instruction_count) {
+        ok = mir_encode_traced_trap(
+            fn, in, &fn->ir_function->instructions[in->ir_index]);
+        break;
+      }
       /* Terminal abort for a failed safety check. MIR only runs without
        * stack-trace support, so this is the degraded path: puts(message) +
        * exit(1) (matching code_generator_binary_emit_runtime_trap_call). rsp
@@ -3701,6 +3887,9 @@ int mir_encode(MirFunction *fn) {
     }
     case MIR_RET:
       ok = mir_emit_epilogue(fn);
+      break;
+    case MIR_INLINE_ASM:
+      ok = mir_encode_inline_asm(fn, in);
       break;
     default:
       ok = enc_err(fn, "unsupported MIR opcode in encoder");

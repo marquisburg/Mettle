@@ -275,6 +275,7 @@ typedef enum {
                      never returns, so it needs no vreg operands and the
                      allocator treats it as a non-call (its volatile clobbers
                      never reach the normal path). */
+  MIR_INLINE_ASM,
   MIR_RET,        /* function return (epilogue emitted separately) */
 
   /* float scalar (Stage 3) */
@@ -640,6 +641,10 @@ typedef struct {
    * unless the annotator is enabled. */
   int cur_ir_index;
 
+  const IRFunction *ir_function;
+
+  int reserve_rbx;
+
   int has_error;
 
   /* Label name -> instruction index, built on demand by mir_label_index.
@@ -692,6 +697,15 @@ typedef struct {
    * kernel as a call barrier, so only the exceptions are listed. */
   unsigned gp_clobbers;
 } MirIrKernel;
+
+#define MIR_ASM_MAX_BINDS 16
+
+typedef struct {
+  const IRInstruction *ir;
+  int count;
+  const char *names[MIR_ASM_MAX_BINDS];
+  MirVregId vregs[MIR_ASM_MAX_BINDS];
+} MirAsmAux;
 
 /* Row for `op`, or NULL if no kernel handles it. */
 const MirIrKernel *mir_ir_kernel_for_op(IROpcode op);

@@ -698,7 +698,7 @@ static void cost_model(const MirFunction *fn, const MirInst *in, int *lat,
     *kind = "call"; *ports = "p6"; mask = M_P6; centi = 100; *lat = 3; break;
   case MIR_RET:
     *kind = "branch"; *ports = "p6"; mask = M_P6; centi = 100; break;
-  case MIR_TRAP:
+  case MIR_TRAP: case MIR_INLINE_ASM:
     *kind = "other"; mask = 0; centi = 0; break;
   case MIR_STORE_OUTARG:
     *kind = "store"; *ports = "store"; mask = 0; centi = 0; store = 1; break;
