@@ -4,6 +4,43 @@
 #include <stdlib.h>
 #include <string.h>
 
+static const char *const g_trust_modes[] = {
+    "METTLE_TRUST_REFINEMENTS",
+    "METTLE_TRUST_EFFECTS",
+    "METTLE_TRUST_DEADLINES",
+};
+
+static int mettle_trust_mode_set(const char *name) {
+  const char *value = getenv(name);
+  return value && value[0] && !(value[0] == '0' && value[1] == 0);
+}
+
+int mettle_trust_mode_active(const char **name_out) {
+  size_t i;
+  for (i = 0; i < sizeof(g_trust_modes) / sizeof(g_trust_modes[0]); i++) {
+    if (mettle_trust_mode_set(g_trust_modes[i])) {
+      if (name_out) {
+        *name_out = g_trust_modes[i];
+      }
+      return 1;
+    }
+  }
+  return 0;
+}
+
+void mettle_trust_mode_announce(void) {
+  size_t i;
+  for (i = 0; i < sizeof(g_trust_modes) / sizeof(g_trust_modes[0]); i++) {
+    if (!mettle_trust_mode_set(g_trust_modes[i])) {
+      continue;
+    }
+    fprintf(stderr,
+            "warning[V0001]: %s is set, so this build records as established "
+            "what it did not check\n",
+            g_trust_modes[i]);
+  }
+}
+
 #if defined(_WIN32)
 typedef long long MettleClockTicks;
 __declspec(dllimport) int __stdcall QueryPerformanceFrequency(MettleClockTicks *frequency);

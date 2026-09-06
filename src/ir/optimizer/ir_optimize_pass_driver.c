@@ -256,6 +256,31 @@ static int ir_pass_is_vectorizer(const char *name) {
                   strncmp(name, "outer_vectorize", 15) == 0);
 }
 
+/* NO_SLP: the pair vectorizer only.
+ *
+ * This lived inside the two passes as an early `return 0`, which is the
+ * failure code, so asking to disable the pass reported an internal compiler
+ * error instead. METTLE_NO_SIMD had the same bug before it. A pass function
+ * has one return value carrying two meanings -- did it work, and did it do
+ * anything -- and there is no third value for "I declined", so declining had
+ * to borrow one of the two and borrowed the wrong one, twice.
+ *
+ * The driver already has a place to say "not this one" and already says it for
+ * METTLE_NO_SIMD, a skip list and a quarantine list. A knob belongs there,
+ * where declining is expressible, rather than inside a pass where it is not. */
+static int ir_no_slp_enabled(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("NO_SLP");
+    v = (e && e[0] && !(e[0] == '0' && e[1] == '\0')) ? 1 : 0;
+  }
+  return v;
+}
+
+static int ir_pass_is_slp(const char *name) {
+  return name && strncmp(name, "simd_slp_", 9) == 0;
+}
+
 /* A signature over the function's volatile accesses: how many there are, in
  * what order, and at what width. A pass that drops one, invents one, or swaps
  * two of them has broken the one guarantee `volatile` makes, and the program
@@ -302,6 +327,11 @@ static int ir_run_named_pass(IRFunction *function, const IROptNamedPass *pass,
   if (ir_no_simd_enabled() && ir_pass_is_vectorizer(pass->name)) {
     ir_trace_pass_event(pass->name, "skipped", NULL, -1);
     return 1;                 /* baseline build: no vectorization, no AVX */
+  }
+
+  if (ir_no_slp_enabled() && ir_pass_is_slp(pass->name)) {
+    ir_trace_pass_event(pass->name, "skipped", NULL, -1);
+    return 1;
   }
 
   if (ir_pass_name_is_skipped(pass->name)) {

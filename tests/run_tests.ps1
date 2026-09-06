@@ -6964,6 +6964,135 @@ catch {
 }
 
 
+# Volatile accesses standing in the way of every optimization that would like
+# to move one. The pass driver signs the volatile accesses before and after
+# each pass and refuses a build that changed them, so a violation is a named
+# compiler error: building this at every level on both backends is the check.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $volPrevMir = $env:METTLE_MIR
+  try {
+    foreach ($backend in @("mir", "baseline")) {
+      if ($backend -eq "baseline") { $env:METTLE_MIR = "0" } else { $env:METTLE_MIR = $null }
+      foreach ($mode in @(@(), @("-O"), @("--release"))) {
+        $vtExe = Join-Path $tmpDir "volatile_torture.exe"
+        $vtBuild = & $CompilerPath --build @mode "tests/test_volatile_torture.mettle" -o $vtExe 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+          throw "a pass moved a volatile access ($backend $($mode -join ' ')): $vtBuild"
+        }
+        $vtOut = & $vtExe 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0 -or $vtOut -notmatch "volatile wrong=0") {
+          throw "the volatile fixture gave the wrong answer ($backend $($mode -join ' ')): $vtOut"
+        }
+      }
+    }
+  }
+  finally { $env:METTLE_MIR = $volPrevMir }
+  Write-CaseResult -Name "volatile_torture" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "volatile_torture" -Passed $false -Reason $_.Exception.Message
+}
+
+# A C string interpolated into a Mettle string. `cstring` is what the C-facing
+# surface hands back, so it is the first thing anybody interpolates after
+# calling into C, and it used to be the one thing interpolation refused. The
+# characters are copied, because the pointer belongs to whoever returned it.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  foreach ($mode in @(@(), @("--release"), @("--release", "--safe"))) {
+    $ciExe = Join-Path $tmpDir "cstring_interpolation.exe"
+    $ciBuild = & $CompilerPath --build @mode "tests/test_cstring_interpolation.mettle" -o $ciExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "interpolating a cstring failed to build ('$($mode -join ' ')'): $ciBuild"
+    }
+    $ciOut = & $ciExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $ciOut -notmatch "cstring interpolation wrong=0") {
+      throw "a cstring interpolated wrong ('$($mode -join ' ')'): exit $LASTEXITCODE`n$ciOut"
+    }
+  }
+  Write-CaseResult -Name "cstring_interpolation" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "cstring_interpolation" -Passed $false -Reason $_.Exception.Message
+}
+
+# The three modes that record a claim without establishing it. Each warns when
+# set, and --verify refuses to run beside one, because verification is the
+# headline claim and a build that quietly skipped it looks like one that
+# passed it.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $trustExe = Join-Path $tmpDir "trust_mode.exe"
+  foreach ($knob in @("METTLE_TRUST_REFINEMENTS", "METTLE_TRUST_EFFECTS", "METTLE_TRUST_DEADLINES")) {
+    $trustPrev = [Environment]::GetEnvironmentVariable($knob)
+    try {
+      [Environment]::SetEnvironmentVariable($knob, "1")
+      $trustOut = & $CompilerPath --build "tests/test_volatile_torture.mettle" -o $trustExe 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) { throw "$knob broke an ordinary build: $trustOut" }
+      if ($trustOut -notmatch "warning\[V0001\]") {
+        throw "$knob did not announce itself"
+      }
+      $verifyOut = & $CompilerPath --verify --build "tests/test_volatile_torture.mettle" -o $trustExe 2>&1 | Out-String
+      if ($LASTEXITCODE -eq 0) {
+        throw "--verify ran while $knob was set"
+      }
+      if ($verifyOut -notmatch [regex]::Escape($knob)) {
+        throw "--verify refused without naming $knob : $verifyOut"
+      }
+    }
+    finally { [Environment]::SetEnvironmentVariable($knob, $trustPrev) }
+  }
+  $cleanOut = & $CompilerPath --verify --build "tests/test_volatile_torture.mettle" -o $trustExe 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "--verify stopped working with no trust mode set: $cleanOut" }
+  Write-CaseResult -Name "trust_modes_announced" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "trust_modes_announced" -Passed $false -Reason $_.Exception.Message
+}
+
+# Every backend source reaches libmtlc. The archive step used to type out the
+# IR core while the compile step above it wildcarded the same directory, so a
+# new file landed in mettle.exe and was silently absent from the archive.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $archiveName = "libmtlc.a"
+  if ($script:OnWindows) { $archiveName = "mtlc.lib" }
+  $archive = Join-Path $script:BinDir $archiveName
+  $archivePython = Get-Command python -ErrorAction SilentlyContinue
+  if (-not $archivePython) { $archivePython = Get-Command python3 -ErrorAction SilentlyContinue }
+  if (-not $archivePython) {
+    Write-CaseResult -Name "archive_closure" -Passed $true -Reason "python not found; skipped"
+  }
+  elseif (-not (Test-Path $archive)) {
+    Write-CaseResult -Name "archive_closure" -Passed $true -Reason "no archive beside the compiler; skipped"
+  }
+  else {
+    $arTool = "ar"
+    $arCandidate = Get-Command ar -ErrorAction SilentlyContinue
+    if (-not $arCandidate -and (Test-Path "C:\msys64\mingw64\bin\ar.exe")) {
+      $arTool = "C:\msys64\mingw64\bin\ar.exe"
+    }
+    $archiveOut = & $archivePython.Source "tests/check_archive_closure.py" `
+      --archive $archive --ar $arTool 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "a backend source is missing from the archive:`n$archiveOut"
+    }
+    Write-CaseResult -Name "archive_closure" -Passed $true
+  }
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "archive_closure" -Passed $false -Reason $_.Exception.Message
+}
+
 # The sign of a zero, which is the one float value negation used to lose.
 # `-x` was lowered as `0 - x`: right for every float except zero, where IEEE
 # 754 asks for -0.0 and the subtract gives +0.0, and unable to flip the sign of

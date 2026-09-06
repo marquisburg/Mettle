@@ -540,7 +540,13 @@ static int print_help_topic(const char *program_name, const char *argv0,
     printf("  from IR that passed validation.\n\n");
     printf("  METTLE_VERIFY_BREAK=pass[:fn]  sabotage self-test (corrupts one\n");
     printf("                                 constant after the named pass; --verify\n");
-    printf("                                 must catch and heal it)\n");
+    printf("                                 must catch and heal it)\n\n");
+    printf("  Three modes record a claim without establishing it. Each warns when\n");
+    printf("  set, and --verify refuses to run beside one.\n");
+    printf("  METTLE_TRUST_REFINEMENTS=1     accept every declared-type conversion\n");
+    printf("                                 without running its proof\n");
+    printf("  METTLE_TRUST_EFFECTS=1         skip every effect obligation\n");
+    printf("  METTLE_TRUST_DEADLINES=1       price an unbounded loop at one turn\n");
     print_doc_reference(argv0, "translation-validation.md");
     return 0;
   }
@@ -3826,6 +3832,15 @@ static DriverFlagResult parse_flag_diagnostics(CompilerOptions *options,
     options->pgo = 1;
     options->optimize = 1;
   } else if (strcmp(argv[i], "--verify") == 0) {
+    const char *trusted = NULL;
+    if (mettle_trust_mode_active(&trusted)) {
+      fprintf(stderr,
+              "error: --verify cannot run while %s is set: that mode records "
+              "as established what it did not check, so validation would be "
+              "checking a claim nothing made\n",
+              trusted);
+      return DRIVER_FLAG_FAILED;
+    }
     ir_verify_set_enabled(1);
     options->optimize = 1;
   } else if (strcmp(argv[i], "--simd-report") == 0) {
@@ -6202,6 +6217,7 @@ int compile_file(const char *input_filename, const char *output_filename,
     mettle_compiler_ctx_set_options(options->debug_compiler, options->dump_ir);
   }
 
+  mettle_trust_mode_announce();
   compiler_set_phase(PROFILE_PHASE_READ_INPUT);
   phase_start = compiler_profile_begin(&profile);
   char *source = NULL;

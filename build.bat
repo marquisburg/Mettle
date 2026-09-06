@@ -326,9 +326,15 @@ echo Archiving libmtlc ^(backend: IR core, optimizer, codegen, linker^)...
 if exist obj\lib.ok del /Q obj\lib.ok
 if exist obj\link.ok del /Q obj\link.ok
 if exist bin\mtlc.lib del /Q bin\mtlc.lib
-REM Backend IR core -- explicitly listed to EXCLUDE the lowering TUs below.
+REM Backend IR core: everything in src\ir except the lowering TUs, which
+REM belong to the frontend. Wildcarded and excluded by name, matching the
+REM Makefile rule exactly, because the compile step above already wildcards
+REM the same directory. Typed out as a list, the two drifted the moment
+REM anybody added a file: it landed in mettle.exe and was silently absent
+REM from libmtlc, which surfaces as an unresolved symbol in the freestanding
+REM link, far from the change and on one OS only.
 set "AROBJS="
-for %%o in (ir ir_comptime ir_rules ir_effects ir_deadline ir_purity ir_twins ir_machine ir_trace ir_trace_record ir_debug_hooks ir_interp ir_optimize ir_pgo ir_profile ir_verify ml_gnn ml_obs ml_opt mtlc_type) do call set "AROBJS=%%AROBJS%% obj\ir\%%o.o"
+for %%o in (obj\ir\*.o) do call :ar_ir_core "%%o"
 %AR% rcs bin\mtlc.lib %AROBJS%
 if errorlevel 1 exit /b 1
 
@@ -484,6 +490,13 @@ REM ---------------------------------------------------------------------------
 REM :cc <source> <object> [flags]   -- record one compile unit. Defaults to the
 REM compiler's own CFLAGS; the runtime TUs pass their own flag set.
 REM ---------------------------------------------------------------------------
+:ar_ir_core
+REM One object for the libmtlc IR core, unless it is a lowering TU.
+set "AR_NAME=%~n1"
+for %%x in (ir_lowering ir_lower_address ir_lower_defer ir_lower_expr ir_lower_stmt ir_lower_support ir_lower_switch_match ir_lower_types) do if /I "%AR_NAME%"=="%%x" goto :eof
+call set "AROBJS=%%AROBJS%% %~1"
+goto :eof
+
 :cc
 setlocal
 set "UFLAGS=%~3"

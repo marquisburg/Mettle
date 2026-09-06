@@ -140,7 +140,11 @@ static MtlcTypeKind translate_kind(TypeKind kind) {
     return MTLC_TYPE_STRUCT;
   case TYPE_TYPE:
   case TYPE_FIELD:
-    /* Frontend-only; these have no backend representation. */
+  case TYPE_SEQUENCE:
+    /* Frontend-only; these have no backend representation. A sequence is the
+     * comptime iteration surface and never reaches a value the backend lays
+     * out. Listed rather than left to the fallthrough so -Wswitch reports the
+     * next kind somebody adds. */
     return MTLC_TYPE_VOID;
   }
   return MTLC_TYPE_VOID;

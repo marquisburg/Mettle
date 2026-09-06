@@ -1,0 +1,53 @@
+// A C string interpolated into a Mettle string.
+//
+// `cstring` is what the C-facing surface hands back, so it is the first thing
+// anybody interpolates after calling into C, and it used to be the one thing
+// interpolation refused. The characters are copied at the point of
+// interpolation, because the pointer belongs to whoever returned it and may be
+// freed or overwritten the moment the call returns.
+import "std/io";
+import "std/mem";
+
+extern fn find_char(text: cstring, ch: int32) -> cstring = "strchr";
+
+@noinline fn borrowed(text: cstring) -> string {
+  return "[{text}]";
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var wrong: int32 = 0;
+
+  // A literal, and a pointer into the middle of one.
+  var whole: string = "{(cstring)\"abcdef\"}";
+  if (whole != "abcdef") { wrong = wrong + 1; }
+
+  var tail: cstring = find_char("abcdef", 100);
+  if (borrowed(tail) != "[def]") { wrong = wrong + 2; }
+
+  // A pointer whose characters are freed before the string is read: the copy
+  // is what makes this safe rather than a use-after-free.
+  var owned: cstring = malloc(4);
+  owned[0] = (uint8)120;
+  owned[1] = (uint8)121;
+  owned[2] = (uint8)122;
+  owned[3] = (uint8)0;
+  var taken: string = "{owned}";
+  free(owned);
+  if (taken != "xyz") { wrong = wrong + 4; }
+
+  // An empty C string, and a null one.
+  var empty: cstring = find_char("abc", 0);
+  if (borrowed(empty) != "[]") { wrong = wrong + 8; }
+  var nothing: cstring = (cstring)0;
+  if (borrowed(nothing) != "[]") { wrong = wrong + 16; }
+
+  // The program's own name, which is where a real program meets this first.
+  if (argc > 0) {
+    var named: string = "{argv[0]}";
+    if (named == "") { wrong = wrong + 32; }
+  }
+
+  print("cstring interpolation wrong=");
+  println("{(int64)wrong}");
+  return wrong;
+}

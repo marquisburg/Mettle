@@ -2969,12 +2969,22 @@ static Type *type_checker_infer_named_builtin(TypeChecker *checker,
     case TYPE_BFLOAT16:
     case TYPE_STRING:
       return checker->builtin_string;
+    /* The C-facing surface hands back `cstring`, so this is the first thing
+     * anybody interpolates after calling into C. It is a pointer type with a
+     * name rather than a kind of its own, and only that one name interpolates:
+     * any other pointer has no length to read. */
+    case TYPE_POINTER:
+      if (value_type->name && strcmp(value_type->name, "cstring") == 0) {
+        return checker->builtin_string;
+      }
+      goto interpolation_unsupported;
     default:
+    interpolation_unsupported:
       type_checker_set_error_at_location(
           checker, call->arguments[0]->location,
           "Cannot interpolate a value of type '%s' into a string; "
           "interpolation takes integers, characters, booleans, floats, "
-          "and strings",
+          "strings and C strings",
           value_type->name ? value_type->name : "?");
       return NULL;
     }

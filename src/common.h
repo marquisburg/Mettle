@@ -4,6 +4,20 @@
 #include <stddef.h>
 #include <stdarg.h>
 
+/* The three modes that record something as verified without verifying it.
+ *
+ * METTLE_TRUST_REFINEMENTS sets an expression's proven refinement and returns
+ * success without running the proof. METTLE_TRUST_EFFECTS skips every effect
+ * obligation. METTLE_TRUST_DEADLINES prices an unbounded loop at one turn.
+ * Each exists so the checking's own cost can be measured, and each makes the
+ * compiler assert something it did not establish.
+ *
+ * They announce themselves rather than staying silent, and `--verify` refuses
+ * to run beside one, because verification is the headline claim and a build
+ * that quietly skipped it looks exactly like one that passed it. */
+int mettle_trust_mode_active(const char **name_out);
+void mettle_trust_mode_announce(void);
+
 /* Some Windows C compilers omit the POSIX strcasecmp declaration. */
 #if defined(_WIN32) && !defined(__MINGW32__)
 #include <string.h>

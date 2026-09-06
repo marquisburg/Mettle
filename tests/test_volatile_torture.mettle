@@ -1,0 +1,107 @@
+// Volatile accesses standing in the way of every optimization that would like
+// to move them.
+//
+// A volatile read is observable in itself: no pass may drop one, duplicate
+// one, or reorder it against another. The pass driver signs the volatile
+// accesses before and after every pass and refuses a build that changed them,
+// so a violation is a named compiler error rather than a silent miscompile.
+// That makes this file's job simple: build it at every level and run it.
+//
+// Each shape here is a pass that wants to move something. Loop-invariant
+// motion wants the poll out of the loop. Common subexpression elimination
+// wants the second read of the same register folded into the first. Dead store
+// elimination wants the overwritten write gone. Constant folding wants the
+// whole comparison settled. Branch simplification wants the arm removed.
+import "std/io";
+
+var g_reg: volatile int64 = 0;
+var g_ack: volatile int64 = 0;
+var g_count: int64 = 0;
+
+@noinline fn tick() {
+  g_reg = g_reg + 1;
+}
+
+// Loop-invariant motion: the poll is what the loop is for.
+@noinline fn spin(limit: int64) -> int64 {
+  var rounds: int64 = 0;
+  while (g_reg < limit) {
+    rounds = rounds + 1;
+    tick();
+  }
+  return rounds;
+}
+
+// Common subexpression elimination: two reads of the same register are two
+// reads, and a device may answer differently each time.
+@noinline fn read_twice() -> int64 {
+  var first: int64 = g_reg;
+  var second: int64 = g_reg;
+  return first * 1000 + second;
+}
+
+// Dead store elimination: the first write reaches the device even though the
+// second overwrites the location.
+@noinline fn write_twice(v: int64) {
+  g_ack = v;
+  g_ack = v + 1;
+}
+
+// Constant folding and branch simplification: the value is not a constant no
+// matter how the arithmetic around it looks.
+@noinline fn settled() -> int64 {
+  g_ack = 0;
+  if (g_ack == 0) { return 1; }
+  return 2;
+}
+
+// A volatile read feeding arithmetic a pass would like to hoist, inside a
+// loop, with an ordinary counter beside it so the loop is otherwise movable.
+@noinline fn mixed(n: int64) -> int64 {
+  var total: int64 = 0;
+  var i: int64 = 0;
+  while (i < n) {
+    var scaled: int64 = g_reg * 3 + 7;
+    total = total + scaled + i;
+    g_count = g_count + 1;
+    i = i + 1;
+  }
+  return total;
+}
+
+// A volatile write in one arm only: the arm cannot be merged away.
+@noinline fn branchy(flag: int64) -> int64 {
+  if (flag > 0) {
+    g_ack = flag;
+  } else {
+    g_count = g_count + 1;
+  }
+  return g_ack;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var wrong: int32 = 0;
+  var n: int64 = (int64)argc;
+
+  g_reg = 0;
+  if (spin(n + 2) != n + 2) { wrong = wrong + 1; }
+
+  g_reg = 5;
+  if (read_twice() != 5005) { wrong = wrong + 2; }
+
+  write_twice(n);
+  if (g_ack != n + 1) { wrong = wrong + 4; }
+
+  if (settled() != 1) { wrong = wrong + 8; }
+
+  g_reg = 2;
+  g_count = 0;
+  if (mixed(4) != 4 * 13 + 6) { wrong = wrong + 16; }
+  if (g_count != 4) { wrong = wrong + 32; }
+
+  if (branchy(n) != n) { wrong = wrong + 64; }
+
+  print("volatile wrong=");
+  println("{(int64)wrong}");
+  return wrong;
+}

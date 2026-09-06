@@ -140,6 +140,27 @@ export fn mettle_string_from_char(value: int64) -> string {
     return mettle_string_own(buf, 1);
 }
 
+// A C string, copied. The pointer belongs to whoever handed it over and may
+// be freed or overwritten the moment this returns, so the characters are taken
+// now rather than viewed in place. A null pointer interpolates as nothing,
+// which is what every other printer in the language does with an absent value.
+export fn mettle_string_from_cstring(text: cstring) -> string {
+    if (text == 0) {
+        return "";
+    }
+    var length: int64 = 0;
+    while (text[length] != (int8)0) {
+        length = length + 1;
+    }
+    var buf: uint8* = malloc(length + 1);
+    var i: int64 = 0;
+    while (i < length) {
+        buf[i] = (uint8)text[i];
+        i = i + 1;
+    }
+    return mettle_string_own(buf, length);
+}
+
 export fn mettle_string_from_bool(value: int64) -> string {
     if (value != 0) {
         return "true";

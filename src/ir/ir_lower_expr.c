@@ -1676,6 +1676,19 @@ static int ir_lower_interpolation(IRLoweringContext *context,
     source_is_float = 1;
     source_float_bits = 32;
     break;
+  /* Copied, not viewed: the pointer belongs to whoever handed it over, and a
+   * string that outlived its characters would be the same bug as returning
+   * the address of a local. `cstring` is a pointer type with a name, so the
+   * name is what selects this and no other pointer reaches it. */
+  case TYPE_POINTER:
+    if (!value_type->name || strcmp(value_type->name, "cstring") != 0) {
+      ir_operand_destroy(&operand);
+      ir_set_error(context, "Cannot interpolate a value of type '%s'",
+                   value_type->name ? value_type->name : "?");
+      return 0;
+    }
+    helper = "mettle_string_from_cstring";
+    break;
   default:
     ir_operand_destroy(&operand);
     ir_set_error(context, "Cannot interpolate a value of type '%s'",

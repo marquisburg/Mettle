@@ -251,6 +251,8 @@ const char *mir_opcode_name(MirOpcode op) {
   case MIR_FXOR: return "fxor";
   case MIR_FMUL: return "fmul";
   case MIR_FDIV: return "fdiv";
+  case MIR_FDUP: return "fdup";
+  case MIR_FEXTHI: return "fexthi";
   case MIR_CVTSI2F: return "cvtsi2f";
   case MIR_CVTF2SI: return "cvtf2si";
   case MIR_CVTF2F: return "cvtf2f";
