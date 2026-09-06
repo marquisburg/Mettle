@@ -1,0 +1,63 @@
+// A bool used as a bit pattern answers a number, not a yes.
+//
+// `+`, `-` and `*` on a bool reach the larger-type rule and come out as an
+// integer. The bitwise operators had no case there at all and fell through to
+// "the left operand's type", so `flag | 2` was typed bool. Two things went
+// wrong with that:
+//
+//   println("{flag | 2}")   printed "true" where the value it held was 3
+//   flag << -11             answered 0 where (int32)flag << -11 answered
+//                           2097152, because the shift lowered at 64 bits and
+//                           masked the count to 6 of them instead of 5
+//
+// so the same shift written with a cast and without gave different numbers,
+// and printing one lost the value entirely.
+import "std/io";
+
+@noinline fn h32(v: int32) -> int32 { return v; }
+@noinline fn hb(v: bool) -> bool { return v; }
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var wrong: int32 = 0;
+  var t: bool = hb(argc > 0);
+  var neg: int32 = h32(-11);
+  var one: int32 = h32(1);
+
+  if ((t | 2) != 3) { wrong = wrong + 1; }
+  if ((t & 3) != 1) { wrong = wrong + 2; }
+  if ((t ^ 6) != 7) { wrong = wrong + 4; }
+  if ((t << 3) != 8) { wrong = wrong + 8; }
+  if ((t >> 1) != 0) { wrong = wrong + 16; }
+
+  // The count masks to the operand's width, and the operand reads as int32.
+  if ((t << neg) != (one << neg)) { wrong = wrong + 32; }
+  if ((t << neg) != ((int32)t << neg)) { wrong = wrong + 64; }
+
+  // Widths past a byte, which a bool-width shift would have lost.
+  if ((t << 8) != 256) { wrong = wrong + 128; }
+  if ((t << 9) != 512) { wrong = wrong + 256; }
+
+  // Arithmetic on a bool already promoted and must not change.
+  if ((t * 3) != 3) { wrong = wrong + 512; }
+  if ((t + 0) != 1) { wrong = wrong + 1024; }
+
+  // A comparison still answers bool, and so do the logical operators.
+  var still_bool: bool = t && true;
+  if (!still_bool) { wrong = wrong + 2048; }
+  var cmp: bool = neg < one;
+  if (!cmp) { wrong = wrong + 4096; }
+
+  // char keeps its own promotion: arithmetic on one is a number, and a
+  // comparison of two is still a question about characters.
+  var c: char = 'A';
+  if ((c + 1) != 66) { wrong = wrong + 8192; }
+  if ((c | 2) != 67) { wrong = wrong + 16384; }
+  if (c != 'A') { wrong = wrong + 32768; }
+
+  print("bool bitwise wrong=");
+  println("{(int64)wrong}");
+  if (wrong != 0) {
+    return 1;
+  }
+  return 0;
+}

@@ -1783,6 +1783,25 @@ static Type *type_checker_promote_base_types(TypeChecker *checker, Type *left,
     right = checker->builtin_int32;
   }
 
+  /* A bool used as a bit pattern promotes the same way, because the answer is
+   * a number and not a yes. `{flag | 2}` printed "true" where the value it
+   * held was 3, and the shift lowered at 64 bits rather than the width it
+   * reads as, so `flag << -11` answered 0 where `(int32)flag << -11` answered
+   * 2097152. Arithmetic on a bool already promotes through the larger-type
+   * rule below; only the bitwise operators, which have no case there, fell
+   * through to "the left type" and kept it. `&&` and `||` are unaffected: they
+   * return bool of their own accord, and a comparison returned above. */
+  if (strcmp(operator, "&") == 0 || strcmp(operator, "|") == 0 ||
+      strcmp(operator, "^") == 0 || strcmp(operator, "<<") == 0 ||
+      strcmp(operator, ">>") == 0) {
+    if (left->kind == TYPE_BOOL) {
+      left = checker->builtin_int32;
+    }
+    if (right->kind == TYPE_BOOL) {
+      right = checker->builtin_int32;
+    }
+  }
+
   // For arithmetic operators, promote to larger type
   if (strcmp(operator, "+") == 0 || strcmp(operator, "-") == 0 ||
       strcmp(operator, "*") == 0 || strcmp(operator, "/") == 0 ||
