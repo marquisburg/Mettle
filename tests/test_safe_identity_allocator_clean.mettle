@@ -1,0 +1,11 @@
+import "std/mem";
+fn main() -> int32 {
+ var allocate: fn(int64) -> rawptr = &malloc;
+ var release: fn(rawptr) -> void = &free;
+ var p: int64* = allocate(64);
+ p[0] = 42;
+ var value: int32 = (int32)p[0];
+ release(p);
+ return value;
+}
+

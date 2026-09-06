@@ -1,0 +1,14 @@
+import "std/mem";
+
+var bits: int64[8];
+
+@noinline fn remember(p: int64*) { bits[0] = (int64)p; }
+
+fn main() -> int32 {
+  var p: int64* = malloc(8);
+  p[0] = 42;
+  remember(p);
+  free(p);
+  var old: int64* = (int64*)bits[0];
+  return (int32)old[0];
+}

@@ -248,9 +248,11 @@ void mettle_safety_value_clear(void *destination, uint64_t size) {
 
 void mettle_safety_free_identity(void *pointer, uint64_t identity) {
   if (!pointer) return;
+  if (!identity) {
+    safety_internal_failure("Fatal error: free has no tracked allocation identity");
+  }
   SafetyRegion region = identity ? safety_identity_snapshot(identity) :
       safety_snapshot((uintptr_t)pointer);
-  if (!identity && region.state == SAFETY_STATE_FREELIST) return;
   if (region.state != SAFETY_STATE_LIVE || !region.heap || region.start != (uintptr_t)pointer) {
     SafetyFailure failure = {region.state == SAFETY_STATE_DEAD ?
         "free of memory after it was freed" : !region.heap ?
@@ -258,6 +260,68 @@ void mettle_safety_free_identity(void *pointer, uint64_t identity) {
         0, 0, 0, region.size, 1};
     safety_report_and_trap(&failure, __builtin_return_address(0), __builtin_frame_address(0));
   }
+}
+
+void mettle_safety_region_begin(void *pointer, int64_t size) {
+  if (!pointer || size <= 0)
+    safety_internal_failure("Fatal error: a foreign memory region needs an address and a positive size");
+  SafetyRegion known = safety_snapshot((uintptr_t)pointer);
+  if (known.state == SAFETY_STATE_LIVE && (uintptr_t)pointer == known.start &&
+      (uint64_t)size == known.size) return;
+  mettle_safety_register_static(pointer, (uint64_t)size);
+}
+
+/* The process hands main its argument vector, so nothing in the program ever
+ * allocated it. Describe it here and give every string an identity of its own,
+ * which is what lets an index into either one be checked rather than waved
+ * through. Adjacent short arguments share a granule; the exact descriptor
+ * bounds settle which one an address belongs to. */
+void mettle_safety_entry_arguments(void *vector) {
+  if (!vector) return;
+  char **arguments = (char **)vector;
+  uint64_t count = 0;
+  while (arguments[count]) count++;
+  mettle_safety_register_static(vector, (count + 1) * sizeof(char *));
+  for (uint64_t i = 0; i < count; i++) {
+    uint64_t length = 0;
+    while (arguments[i][length]) length++;
+    uint64_t identity = mettle_safety_literal_identity(arguments[i], length + 1);
+    mettle_safety_value_store(&arguments[i], (uint64_t)(uintptr_t)arguments[i],
+                              identity, sizeof(char *));
+  }
+}
+
+void mettle_safety_region_end(void *pointer) {
+  mettle_safety_unregister(pointer);
+}
+
+uint64_t mettle_safety_literal_identity(const void *pointer, uint64_t size) {
+  SafetyRegion known = safety_snapshot((uintptr_t)pointer);
+  if (known.state == SAFETY_STATE_LIVE && (uintptr_t)pointer >= known.start &&
+      size <= known.size && (uintptr_t)pointer - known.start <= known.size - size)
+    return known.identity;
+  mettle_safety_register_static((void *)pointer, size);
+  return mettle_safety_identity(pointer);
+}
+
+uint64_t mettle_safety_string_identity(const void *record, uint64_t size) {
+  uint64_t identity = mettle_safety_literal_identity(record, 2 * sizeof(uint64_t));
+  const void *data = *(const void *const *)record;
+  uint64_t data_identity = mettle_safety_literal_identity(data, size);
+  mettle_safety_value_store((void *)record, (uint64_t)(uintptr_t)data, data_identity, sizeof(void *));
+  return identity;
+}
+
+/* Only the compiler calls this for a pointer relocation in a static image. */
+void mettle_safety_global_pointer(void *slot, uint64_t mode, uint64_t size) {
+  if (mode == 3) {
+    mettle_safety_string_identity(slot, size);
+    return;
+  }
+  const void *pointer = *(const void *const *)slot;
+  uint64_t identity = mode == 2 ? mettle_safety_string_identity(pointer, size) :
+      mode == 1 ? mettle_safety_literal_identity(pointer, size) : mettle_safety_identity(pointer);
+  mettle_safety_value_store(slot, (uint64_t)(uintptr_t)pointer, identity, sizeof(void *));
 }
 
 void mettle_safety_buffer_check(void *pointer, int64_t size, uint32_t kind,
@@ -273,6 +337,12 @@ void mettle_safety_buffer_check(void *pointer, int64_t size, uint32_t kind,
 /* Thread scoped call metadata preserves the native calling convention. The
  * callee must claim its own frame, so a foreign callback cannot accidentally
  * take the metadata meant for the foreign function. */
+typedef struct SafetyPacket {
+  struct SafetyPacket *next;
+  size_t size;
+  unsigned char data[];
+} SafetyPacket;
+
 typedef struct SafetyCall {
   struct SafetyCall *previous;
   void *callee;
@@ -280,12 +350,22 @@ typedef struct SafetyCall {
   uint64_t result;
   size_t bytes;
   int entered;
+  SafetyPacket *packets;
   uint64_t arguments[];
 } SafetyCall;
 typedef struct {
   SafetyCall *current;
   SafetyCall *spare;
 } SafetyCalls;
+
+static void safety_packets_clear(SafetyCall *frame) {
+  while (frame->packets) {
+    SafetyPacket *packet = frame->packets;
+    frame->packets = packet->next;
+    mettle_safety_value_clear(packet->data, packet->size);
+    safety_unmap(packet, sizeof(*packet) + packet->size);
+  }
+}
 
 #if defined(_WIN32)
 static DWORD g_safety_calls_slot = FLS_OUT_OF_INDEXES;
@@ -297,6 +377,7 @@ static void NTAPI safety_calls_destroy(void *value) {
     SafetyCall *frame = lists[i];
     while (frame) {
       SafetyCall *previous = frame->previous;
+      safety_packets_clear(frame);
       safety_unmap(frame, frame->bytes);
       frame = previous;
     }
@@ -349,6 +430,7 @@ void *mettle_safety_call_push(void *callee, uint64_t count) {
   frame->count = count;
   frame->result = 0;
   frame->entered = 0;
+  frame->packets = NULL;
   for (uint64_t i = 0; i < count; i++) frame->arguments[i] = 0;
   calls->current = frame;
   return frame;
@@ -378,12 +460,57 @@ void mettle_safety_call_return(void *call, uint64_t identity) {
   if (frame) frame->result = identity;
 }
 
+static SafetyPacket *safety_packet_capture(SafetyCall *frame, const void *source, uint64_t size) {
+  if (size > SIZE_MAX - sizeof(SafetyPacket))
+    safety_internal_failure("Fatal error: aggregate safety metadata size overflow");
+  SafetyPacket *packet = safety_map(sizeof(*packet) + (size_t)size);
+  if (!packet) safety_internal_failure("Fatal error: unable to allocate aggregate safety metadata");
+  packet->size = (size_t)size;
+  packet->next = frame->packets;
+  frame->packets = packet;
+  mettle_safety_value_copy(packet->data, source, size);
+  return packet;
+}
+
+void mettle_safety_call_arg_copy(void *call, uint64_t index, const void *source, uint64_t size) {
+  SafetyCall *frame = call;
+  if (!frame || index >= frame->count)
+    safety_internal_failure("Fatal error: invalid aggregate safety argument slot");
+  frame->arguments[index] = (uint64_t)(uintptr_t)safety_packet_capture(frame, source, size);
+}
+
+static void safety_packet_restore(SafetyCall *frame, uint64_t token, void *destination, uint64_t size) {
+  SafetyPacket *packet = frame ? frame->packets : NULL;
+  while (packet && (uint64_t)(uintptr_t)packet != token) packet = packet->next;
+  if (!packet || packet->size != size) {
+    mettle_safety_value_clear(destination, size);
+    return;
+  }
+  mettle_safety_value_copy(destination, packet->data, size);
+}
+
+void mettle_safety_call_param_copy(void *call, uint64_t index, void *destination, uint64_t size) {
+  SafetyCall *frame = call;
+  safety_packet_restore(frame, mettle_safety_call_param(call, index), destination, size);
+}
+
+void mettle_safety_call_return_copy(void *call, const void *source, uint64_t size) {
+  SafetyCall *frame = call;
+  if (frame) frame->result = (uint64_t)(uintptr_t)safety_packet_capture(frame, source, size);
+}
+
+void mettle_safety_call_result_copy(void *call, void *destination, uint64_t size) {
+  SafetyCall *frame = call;
+  safety_packet_restore(frame, frame ? frame->result : 0, destination, size);
+}
+
 uint64_t mettle_safety_call_pop(void *call) {
   SafetyCall *frame = (SafetyCall *)call;
   SafetyCalls *calls = safety_calls();
   if (!frame || calls->current != frame)
     safety_internal_failure("Fatal error: mismatched pointer safety call frame");
   uint64_t result = frame->result;
+  safety_packets_clear(frame);
   calls->current = frame->previous;
   frame->previous = calls->spare;
   calls->spare = frame;

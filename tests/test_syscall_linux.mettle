@@ -1,3 +1,5 @@
+import "std/mem";
+
 fn main() -> int32 {
     var page: int64 = syscall(9, 0, 4096, 3, 34, -1, 0)
     if (page < 0) {
@@ -5,6 +7,10 @@ fn main() -> int32 {
     }
 
     var bytes: uint8* = (uint8*)page
+    // Pages the kernel handed back through a raw system call. Nothing in this
+    // program allocated them, so --safe is told their extent before they are
+    // written, and told again when they go back.
+    memory_region(bytes, 4096)
     var i: int64 = 0
     while (i < 8) {
         bytes[i] = (uint8)(65 + i)
@@ -31,6 +37,7 @@ fn main() -> int32 {
         return 14
     }
 
+    memory_region_end(bytes)
     if (syscall(11, page, 4096) != 0) {
         return 15
     }

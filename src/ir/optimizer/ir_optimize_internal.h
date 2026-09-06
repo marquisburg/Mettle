@@ -2,6 +2,7 @@
 #define IR_OPTIMIZE_INTERNAL_H
 
 #include "../ir_optimize.h"
+#include "../ir_safety.h"
 #include "../ir_profile.h"
 #include "../../common.h"
 #include "../../compiler/compiler_context.h"
@@ -878,6 +879,7 @@ typedef enum {
   IR_SIMD_BAIL_NONE = 0,           /* no diagnosis ran / loop vectorized */
   IR_SIMD_BAIL_CALL_IN_BODY,       /* calls a program-defined fn every iteration */
   IR_SIMD_BAIL_EXTERN_CALL_IN_BODY,/* calls an extern: inlining is impossible */
+  IR_SIMD_BAIL_SAFETY_IN_BODY,     /* a retained check or origin operation */
   IR_SIMD_BAIL_INDIRECT_CALL,      /* calls through a function pointer */
   IR_SIMD_BAIL_ALLOC_IN_BODY,      /* allocates (`new`) every iteration */
   IR_SIMD_BAIL_INLINE_ASM,         /* body contains inline assembly */

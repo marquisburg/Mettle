@@ -1,8 +1,8 @@
 /* `--safe`: resolving the access marks lowering left behind.
  *
  * Every IR_OP_SAFETY_CHECK is either deleted, because the access provably
- * cannot leave its object, or rewritten into ordinary IR. Nothing downstream
- * sees the opcode. See ir_safety.h for why this runs before the optimizer. */
+ * cannot leave its object, or rewritten into comparisons and safety intrinsics.
+ * This follows scalar analysis and precedes vector recognition. */
 
 #include "ir_optimize_internal.h"
 #include "../ir_explain_safety.h"
@@ -15,6 +15,44 @@
 #define SAFETY_LABEL_PREFIX "ir_safe_ok_"
 
 static unsigned g_safety_next_id;
+
+IRSafetyIntrinsic ir_safety_intrinsic(const IRInstruction *in) {
+  if (!in) return IR_SAFETY_INTRINSIC_NONE;
+  if (in->op == IR_OP_SAFETY_CHECK) return IR_SAFETY_INTRINSIC_CHECK;
+  if (in->op != IR_OP_CALL || !in->text) return IR_SAFETY_INTRINSIC_NONE;
+  static const struct {
+    const char *name;
+    size_t arguments;
+    IRSafetyIntrinsic kind;
+  } entries[] = {
+      {"mettle_safety_check", 5, IR_SAFETY_INTRINSIC_CHECK},
+      {"mettle_safety_check_identity", 6, IR_SAFETY_INTRINSIC_CHECK},
+      {"mettle_safety_check_affine", 8, IR_SAFETY_INTRINSIC_CHECK},
+      {"mettle_safety_buffer_check", 5, IR_SAFETY_INTRINSIC_CHECK},
+      {"mettle_safety_identity", 1, IR_SAFETY_INTRINSIC_READ_ORIGIN},
+      {"mettle_safety_span", 1, IR_SAFETY_INTRINSIC_READ_ORIGIN},
+      {"mettle_safety_span_identity", 2, IR_SAFETY_INTRINSIC_READ_ORIGIN},
+      {"mettle_safety_loop_length", 5, IR_SAFETY_INTRINSIC_READ_ORIGIN},
+      {"mettle_safety_value_load", 3, IR_SAFETY_INTRINSIC_READ_ORIGIN},
+      {"mettle_safety_merge_identity", 2, IR_SAFETY_INTRINSIC_READ_ORIGIN},
+      {"mettle_safety_subtract_identity", 2, IR_SAFETY_INTRINSIC_READ_ORIGIN},
+      {"mettle_safety_value_store", 4, IR_SAFETY_INTRINSIC_WRITE_ORIGIN},
+      {"mettle_safety_value_copy", 3, IR_SAFETY_INTRINSIC_WRITE_ORIGIN},
+      {"mettle_safety_value_clear", 2, IR_SAFETY_INTRINSIC_WRITE_ORIGIN},
+      {"mettle_safety_register", 2, IR_SAFETY_INTRINSIC_LIFETIME},
+      {"mettle_safety_register_static", 2, IR_SAFETY_INTRINSIC_LIFETIME},
+      {"mettle_safety_unregister", 1, IR_SAFETY_INTRINSIC_LIFETIME},
+      {"mettle_safety_reregister", 3, IR_SAFETY_INTRINSIC_LIFETIME},
+      {"mettle_safety_free_identity", 2, IR_SAFETY_INTRINSIC_LIFETIME},
+      {"mettle_safety_region_begin", 2, IR_SAFETY_INTRINSIC_LIFETIME},
+      {"mettle_safety_region_end", 1, IR_SAFETY_INTRINSIC_LIFETIME},
+      {"mettle_safety_entry_arguments", 1, IR_SAFETY_INTRINSIC_LIFETIME},
+  };
+  for (size_t i = 0; i < IR_ARRAY_COUNT(entries); i++)
+    if (in->argument_count == entries[i].arguments &&
+        !strcmp(in->text, entries[i].name)) return entries[i].kind;
+  return IR_SAFETY_INTRINSIC_NONE;
+}
 
 static int safety_env_flag(const char *name, int *cache) {
   if (*cache < 0) {
@@ -50,6 +88,8 @@ static void safety_trace(const char *reason, size_t line) {
 typedef struct {
   const IROperand *base;
   const IROperand *offset;
+  const IROperand *identity;
+  long long diagnostic_size;
   long long size;
   long long extent; /* IR_SAFETY_EXTENT_UNKNOWN when only the runtime knows */
   long long access_kind;
@@ -61,7 +101,9 @@ typedef struct {
  * way lowering builds one, which leaves it to be copied through untouched
  * rather than silently mishandled. */
 static int safety_read(const IRInstruction *instruction, SafetyAccess *access) {
-  if (instruction->argument_count != IR_SAFETY_ARG_COUNT ||
+  if ((instruction->argument_count != IR_SAFETY_ARG_COUNT &&
+       instruction->argument_count != IR_SAFETY_TRACKED_ARG_COUNT &&
+       instruction->argument_count != IR_SAFETY_ANALYZED_ARG_COUNT) ||
       !instruction->arguments) {
     return 0;
   }
@@ -75,6 +117,10 @@ static int safety_read(const IRInstruction *instruction, SafetyAccess *access) {
 
   access->base = &instruction->arguments[IR_SAFETY_ARG_BASE];
   access->offset = &instruction->arguments[IR_SAFETY_ARG_OFFSET];
+  access->identity = instruction->argument_count >= IR_SAFETY_TRACKED_ARG_COUNT
+      ? &instruction->arguments[IR_SAFETY_ARG_IDENTITY] : NULL;
+  access->diagnostic_size = instruction->argument_count == IR_SAFETY_ANALYZED_ARG_COUNT
+      ? instruction->arguments[IR_SAFETY_ARG_DIAGNOSTIC_SIZE].int_value : 0;
   access->size = size->int_value;
   access->extent = extent->int_value;
   access->access_kind = kind->int_value;
@@ -417,28 +463,19 @@ static int safety_index_upper_bound(const IRFunction *function, size_t before,
 
 /* Read the index out of the multiply lowering emits for a subscript, and
  * report the largest value it can take. */
+static int safety_offset_scaling(const IRFunction *function, size_t check_index,
+                                 const IROperand *offset,
+                                 const IROperand **index_out,
+                                 long long *stride_out);
+
 static int safety_offset_upper_bound(const IRFunction *function,
                                      size_t check_index,
                                      const IROperand *offset,
                                      long long *stride_out,
                                      long long *upper_out) {
-  if (offset->kind != IR_OPERAND_TEMP || !offset->name) {
-    return 0;
-  }
-  const IRInstruction *producer =
-      ir_find_temp_producer_before(function, check_index, offset->name);
-  if (!producer || producer->op != IR_OP_BINARY || producer->is_float ||
-      !producer->text || strcmp(producer->text, "*") != 0 ||
-      producer->rhs.kind != IR_OPERAND_INT || producer->rhs.int_value <= 0) {
-    return 0;
-  }
-  size_t producer_index = (size_t)(producer - function->instructions);
-  if (!safety_index_upper_bound(function, producer_index, &producer->lhs, 0,
-                                upper_out)) {
-    return 0;
-  }
-  *stride_out = producer->rhs.int_value;
-  return 1;
+  const IROperand *index = NULL;
+  return safety_offset_scaling(function, check_index, offset, &index, stride_out) &&
+      safety_index_upper_bound(function, check_index, index, 0, upper_out);
 }
 
 /* Read `(iv + addend) * stride` out of the instruction that produced the
@@ -451,14 +488,15 @@ static int safety_offset_scaling(const IRFunction *function, size_t check_index,
                                  const IROperand *offset,
                                  const IROperand **index_out,
                                  long long *stride_out) {
-  if (offset->kind != IR_OPERAND_TEMP || !offset->name) {
-    return 0;
-  }
+  *index_out = offset;
+  *stride_out = 1;
+  if (offset->kind == IR_OPERAND_SYMBOL || offset->kind == IR_OPERAND_INT) return 1;
+  if (offset->kind != IR_OPERAND_TEMP || !offset->name) return 0;
   const IRInstruction *producer =
       ir_find_temp_producer_before(function, check_index, offset->name);
   if (!producer || producer->op != IR_OP_BINARY || producer->is_float ||
       !producer->text) {
-    return 0;
+    return 1;
   }
   if (strcmp(producer->text, "*") == 0 &&
       producer->rhs.kind == IR_OPERAND_INT && producer->rhs.int_value > 0) {
@@ -490,23 +528,9 @@ static int safety_offset_is_scaled_symbol(const IRFunction *function,
                                           const char **iv_out,
                                           long long *stride_out,
                                           long long *addend_out) {
-  if (offset->kind != IR_OPERAND_TEMP || !offset->name) {
-    return 0;
-  }
-  const IRInstruction *producer =
-      ir_find_temp_producer_before(function, check_index, offset->name);
-  if (!producer || producer->op != IR_OP_BINARY || producer->is_float ||
-      !producer->text || strcmp(producer->text, "*") != 0 ||
-      producer->rhs.kind != IR_OPERAND_INT || producer->rhs.int_value <= 0) {
-    return 0;
-  }
-  size_t producer_index = (size_t)(producer - function->instructions);
-  if (!safety_index_is_affine(function, producer_index, &producer->lhs, iv_out,
-                              addend_out)) {
-    return 0;
-  }
-  *stride_out = producer->rhs.int_value;
-  return 1;
+  const IROperand *index = NULL;
+  return safety_offset_scaling(function, check_index, offset, &index, stride_out) &&
+         safety_index_is_affine(function, check_index, index, iv_out, addend_out);
 }
 
 /* Whether `symbol` is written anywhere in [start, end) outside the step's own
@@ -591,7 +615,8 @@ static int safety_loop_step(const IRFunction *function,
     return 1;
   }
 
-  if (write->op != IR_OP_ASSIGN || write->lhs.kind != IR_OPERAND_TEMP ||
+  if (write->op != IR_OP_ASSIGN ||
+      write->lhs.kind != IR_OPERAND_TEMP ||
       !write->lhs.name) {
     return 0;
   }
@@ -693,6 +718,8 @@ static int safety_prove_loop_bound(IRFunction *function,
       return 0;
     }
 
+    if (highest_index > LLONG_MAX - addend || stride <= 0 ||
+        highest_index + addend > LLONG_MAX / stride) return 0;
     long long highest = (highest_index + addend) * stride;
     if (highest < 0 || access->size > access->extent) {
       return 0;
@@ -759,6 +786,7 @@ typedef struct {
    * masked index does, the range is this many bytes and none of the loop
    * fields below are read. */
   long long constant_length;
+  long long diagnostic_size;
   long long stride;        /* bytes per element */
   long long primary_step;  /* how far the tested variable moves each iteration */
   long long index_step;    /* how far the indexing variable moves */
@@ -771,6 +799,7 @@ typedef struct {
   long long access_kind;
   IROperand base;  /* owned */
   IROperand bound; /* owned */
+  const IROperand *identity; /* borrowed from the retained check */
   /* The runtime term the index is displaced by, as it was written in the loop.
    * Re-read rather than referenced, because the expression that computed it
    * often lives inside the body and has to be worked out again in front of the
@@ -1061,8 +1090,22 @@ static int safety_callee_can_release(const char *name, int depth) {
   if (!name || depth > 16) {
     return 1;
   }
+  /* Only known checking and shadow operations preserve allocation lifetime.
+   * Region end and unregister calls must invalidate a lifted check. The table
+   * is keyed by arity as well as name, so the probe covers every arity any
+   * entry uses; anything else under the prefix is call metadata, which moves
+   * no allocation and must not cost a loop its hoisted check. */
+  IRInstruction probe = {0};
+  probe.op = IR_OP_CALL;
+  probe.text = (char *)name;
+  for (size_t arity = 1; arity <= 8; arity++) {
+    probe.argument_count = arity;
+    IRSafetyIntrinsic kind = ir_safety_intrinsic(&probe);
+    if (kind != IR_SAFETY_INTRINSIC_NONE)
+      return kind == IR_SAFETY_INTRINSIC_LIFETIME;
+  }
   if (strncmp(name, "mettle_safety_", 14) == 0) {
-    return 0; /* the checking machinery itself, about to be rewritten */
+    return 0;
   }
   if (safety_name_releases_memory(name)) {
     return 1;
@@ -1572,6 +1615,12 @@ static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
   if (access->extent != IR_SAFETY_EXTENT_UNKNOWN || access->size <= 0) {
     return 0;
   }
+  const SafetyLoopForm *identity_loop = safety_enclosing_loop(loops, check_index);
+  if (access->identity && (!identity_loop ||
+      !safety_operand_invariant_in(function, identity_loop->header_index,
+          identity_loop->bounds.jump_index, access->identity))) return 0;
+  out->identity = access->identity;
+  out->diagnostic_size = access->diagnostic_size;
 
   /* An index the arithmetic already bounds, such as a masked table lookup,
    * reaches the same range on every iteration. One check for that range stands
@@ -1601,7 +1650,19 @@ static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
                    access->location.line);
       return 0;
     }
-    if (!safety_body_runs_access_every_iteration(function, &innermost->bounds,
+    long long start = 0;
+    const IROperand *start_operand = NULL;
+    if (!innermost->has_index ||
+        !safety_iv_start_at_header(function, innermost->header_index,
+            &innermost->bounds, innermost->iv, &start, &start_operand) ||
+        start_operand ||
+        (innermost->adjust < 0 && start > LLONG_MAX + innermost->adjust) ||
+        (innermost->adjust > 0 && start < LLONG_MIN + innermost->adjust) ||
+        masked_stride <= 0 || masked_upper < 0 ||
+        masked_upper > (LLONG_MAX - access->size) / masked_stride ||
+        !safety_operand_invariant_in(function, innermost->header_index,
+            innermost->bounds.jump_index, innermost->bound) ||
+        !safety_body_runs_access_every_iteration(function, &innermost->bounds,
                                                  check_index) ||
         !safety_operand_invariant_in(function, innermost->header_index,
                                      innermost->bounds.jump_index,
@@ -1609,6 +1670,9 @@ static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
       return 0;
     }
     out->header_index = innermost->header_index;
+    out->primary_start = start;
+    out->adjust = innermost->adjust;
+    if (!ir_operand_clone(innermost->bound, &out->bound)) return 0;
     out->constant_length = masked_upper * masked_stride + access->size;
     out->access_kind = access->access_kind;
     out->location = access->location;
@@ -1637,6 +1701,9 @@ static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
     if (!shape.varying || shape.coeff == 0) {
       continue; /* nothing this loop does moves it; ask the loop outside */
     }
+    /* Keep the original access when a newly exposed descending range cannot
+     * describe its first failing element with the ascending range intrinsic. */
+    if (access->diagnostic_size && shape.coeff < 0) return 0;
 
     /* The variable the loop tests, and the one this access indexes by, need
      * not be the same. A loop reading three bytes and writing four advances
@@ -1709,6 +1776,8 @@ static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
      * that does not exist yet. */
     if (!safety_operand_invariant_in(function, header, form.bounds.jump_index,
                                      access->base) ||
+        (access->identity && !safety_operand_invariant_in(function, header,
+            form.bounds.jump_index, access->identity)) ||
         !safety_operand_invariant_in(function, header, form.bounds.jump_index,
                                      form.bound)) {
       safety_trace("the pointer or the loop bound is not settled before the "
@@ -1718,6 +1787,16 @@ static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
     }
 
     out->header_index = header;
+    /* The runtime span calculation receives positive, representable steps.
+     * Reject an unrepresentable affine coefficient before host arithmetic. */
+    if (shape.coeff == LLONG_MIN || stride <= 0 || index_step <= 0 ||
+        (form.adjust < 0 && primary_start > LLONG_MAX + form.adjust) ||
+        (form.adjust > 0 && primary_start < LLONG_MIN + form.adjust)) return 0;
+    unsigned long long reach = (unsigned long long)(shape.coeff < 0 ?
+                                                    -shape.coeff : shape.coeff);
+    if (reach > (unsigned long long)LLONG_MAX / (unsigned long long)stride ||
+        reach * (unsigned long long)stride >
+            (unsigned long long)LLONG_MAX / (unsigned long long)index_step) return 0;
     out->stride = stride;
     out->primary_step = form.step;
     out->index_step = index_step;
@@ -1922,17 +2001,27 @@ static int safety_emit_hoisted(IRInstructionVector *out,
                                const SafetyHoist *hoist) {
   /* A range the arithmetic already settled needs no arithmetic of its own. */
   if (hoist->constant_length > 0) {
-    IROperand arguments[5];
-    if (!ir_operand_clone(&hoist->base, &arguments[0])) {
+    SafetyBuild build;
+    safety_build_init(&build, out, hoist->location);
+    IROperand threshold = ir_operand_int(hoist->primary_start - hoist->adjust);
+    IROperand length = ir_operand_int(hoist->constant_length);
+    const IROperand *runs = safety_build(&build, ">=", &hoist->bound, &threshold);
+    const IROperand *guarded = safety_build(&build, "*", runs, &length);
+    IROperand arguments[8];
+    if (build.failed || !ir_operand_clone(&hoist->base, &arguments[0])) {
+      safety_build_release(&build);
       return 0;
     }
     arguments[1] = ir_operand_int(0);
-    arguments[2] = ir_operand_int(hoist->constant_length);
+    arguments[2] = *guarded;
     arguments[3] = ir_operand_int(hoist->access_kind);
     arguments[4] = ir_operand_int((long long)hoist->location.line);
-    int emitted = safety_emit_call(out, hoist->location, "mettle_safety_check",
-                                   arguments, 5);
+    if (hoist->identity) arguments[5] = *hoist->identity;
+    int emitted = safety_emit_call(out, hoist->location,
+        hoist->identity ? "mettle_safety_check_identity" : "mettle_safety_check",
+        arguments, hoist->identity ? 6 : 5);
     ir_operand_destroy(&arguments[0]);
+    safety_build_release(&build);
     return emitted;
   }
 
@@ -1945,8 +2034,6 @@ static int safety_emit_hoisted(IRInstructionVector *out,
   IROperand index_step = ir_operand_int(hoist->index_step);
   IROperand stride = ir_operand_int(hoist->stride);
   IROperand size = ir_operand_int(hoist->size);
-  IROperand zero = ir_operand_int(0);
-
   /* The highest value the test allows, and how far that is from where the
    * counter began. */
   const IROperand *top =
@@ -1973,10 +2060,23 @@ static int safety_emit_hoisted(IRInstructionVector *out,
    * does where the counter started. */
   long long reach = hoist->coeff < 0 ? -hoist->coeff : hoist->coeff;
   IROperand per_step = ir_operand_int(reach * hoist->stride);
-  const IROperand *spanned = safety_build(&build, "*", travel, &per_step);
-  const IROperand *length = safety_build(&build, "+", spanned, &size);
-  const IROperand *runs = safety_build(&build, ">=", span, &zero);
-  const IROperand *guarded = safety_build(&build, "*", length, runs);
+  IROperand length_args[5] = {
+      hoist->bound, ir_operand_int(hoist->primary_start - hoist->adjust),
+      primary_step, ir_operand_int(per_step.int_value * hoist->index_step), size};
+  if (!safety_emit_call(out, hoist->location, "mettle_safety_loop_length",
+                        length_args, 5)) {
+    safety_build_release(&build);
+    return 0;
+  }
+  char length_name[64];
+  snprintf(length_name, sizeof(length_name), SAFETY_TEMP_PREFIX "length%u", g_safety_next_id++);
+  out->items[out->count - 1].dest = ir_operand_temp(length_name);
+  if (!out->items[out->count - 1].dest.name) {
+    safety_build_release(&build);
+    return 0;
+  }
+  IROperand guarded_length = ir_operand_temp(length_name);
+  const IROperand *guarded = safety_build_keep(&build, &guarded_length);
 
   /* Where the counter stands at the low end of the range. A positive
    * coefficient puts that at the first iteration; a negative one puts it at
@@ -2019,14 +2119,23 @@ static int safety_emit_hoisted(IRInstructionVector *out,
 
   int ok = 0;
   if (!build.failed) {
-    IROperand arguments[5];
+    IROperand arguments[8];
     if (ir_operand_clone(&hoist->base, &arguments[0])) {
       arguments[1] = *offset;
       arguments[2] = *guarded;
       arguments[3] = ir_operand_int(hoist->access_kind);
       arguments[4] = ir_operand_int((long long)hoist->location.line);
-      ok = safety_emit_call(out, hoist->location, "mettle_safety_check",
-                            arguments, 5);
+      if (hoist->identity) arguments[5] = *hoist->identity;
+      if (hoist->diagnostic_size && hoist->identity) {
+        arguments[6] = ir_operand_int(hoist->diagnostic_size);
+        arguments[7] = ir_operand_int(per_step.int_value * hoist->index_step);
+        ok = safety_emit_call(out, hoist->location,
+            "mettle_safety_check_affine", arguments, 8);
+      } else {
+        ok = safety_emit_call(out, hoist->location,
+            hoist->identity ? "mettle_safety_check_identity" : "mettle_safety_check",
+            arguments, hoist->identity ? 6 : 5);
+      }
       ir_operand_destroy(&arguments[0]);
     }
   }
@@ -2121,7 +2230,7 @@ static int safety_expand_extent(IRInstructionVector *out,
  * whichever one the computed address happens to land in. */
 static int safety_expand_region(IRInstructionVector *out,
                                 const SafetyAccess *access) {
-  IROperand arguments[5];
+  IROperand arguments[6];
   size_t built = 0;
   int ok = 0;
 
@@ -2138,8 +2247,10 @@ static int safety_expand_region(IRInstructionVector *out,
   arguments[4] = ir_operand_int((long long)access->location.line);
   built = 5;
 
-  ok = safety_emit_call(out, access->location, "mettle_safety_check", arguments,
-                        5);
+  if (access->identity) arguments[5] = *access->identity;
+  ok = safety_emit_call(out, access->location,
+      access->identity ? "mettle_safety_check_identity" : "mettle_safety_check",
+      arguments, access->identity ? 6 : 5);
 
 done:
   for (size_t i = 0; i < built; i++) {
@@ -2174,6 +2285,10 @@ static int safety_expand_region(IRInstructionVector *out,
 typedef struct {
   size_t header_index;
   IROperand base; /* owned */
+  /* Borrowed from an instruction inside the loop, which the straight-line
+   * search guarantees sits after the header: the resolution is written out at
+   * the header, so the instruction it points into has not been moved yet. */
+  const IROperand *identity;
   char temp[64];  /* the span this loop resolves once */
   SourceLocation location;
 } SafetySpan;
@@ -2243,14 +2358,19 @@ static int safety_emit_span_resolve(IRInstructionVector *out,
   IRInstruction call = {0};
   call.op = IR_OP_CALL;
   call.location = span->location;
-  call.text = mettle_strdup("mettle_safety_span");
+  call.text = mettle_strdup(span->identity ? "mettle_safety_span_identity" :
+                                           "mettle_safety_span");
   call.dest = ir_operand_temp(span->temp);
-  call.arguments = calloc(1, sizeof(IROperand));
+  call.arguments = calloc(span->identity ? 2 : 1, sizeof(IROperand));
   if (!call.text || !call.dest.name || !call.arguments) {
     ir_instruction_destroy_storage(&call);
     return 0;
   }
-  call.argument_count = 1;
+  call.argument_count = span->identity ? 2 : 1;
+  if (span->identity && !ir_operand_clone(span->identity, &call.arguments[1])) {
+    ir_instruction_destroy_storage(&call);
+    return 0;
+  }
   if (!ir_operand_clone(&span->base, &call.arguments[0]) ||
       !ir_instruction_vector_append_move(out, &call)) {
     ir_instruction_destroy_storage(&call);
@@ -2269,10 +2389,14 @@ static int safety_emit_span_check(IRInstructionVector *out,
   char limit[64];
   char total[64];
   char bad[64];
+  char short_span[64];
+  char both[64];
   char ok_label[64];
   snprintf(limit, sizeof(limit), SAFETY_TEMP_PREFIX "sl%u", id);
   snprintf(total, sizeof(total), SAFETY_TEMP_PREFIX "st%u", id);
   snprintf(bad, sizeof(bad), SAFETY_TEMP_PREFIX "sb%u", id);
+  snprintf(short_span, sizeof(short_span), SAFETY_TEMP_PREFIX "ss%u", id);
+  snprintf(both, sizeof(both), SAFETY_TEMP_PREFIX "sx%u", id);
   snprintf(ok_label, sizeof(ok_label), "ir_safe_in_%u", id);
 
   IROperand span_operand = ir_operand_temp(span_temp);
@@ -2304,8 +2428,33 @@ static int safety_emit_span_check(IRInstructionVector *out,
    * reads as an enormous unsigned value and fails, which sends it to the full
    * check rather than rejecting it. */
   if (!safety_emit_binary(out, access->location, ">", bad, measured,
-                          &limit_operand, 1) ||
-      !safety_emit_branch_zero(out, access->location, bad, ok_label)) {
+                          &limit_operand, 1)) {
+    goto done;
+  }
+
+  /* A resolution that came back empty means the origin named no live
+   * allocation covering the pointer. The subtraction above turns that into a
+   * limit larger than any offset, so without this the whole loop would pass
+   * unexamined. Only tracked accesses take this branch: an untracked pointer
+   * has always been allowed to run, and that is what an absent origin means. */
+  const char *condition = bad;
+  if (access->identity) {
+    IROperand bad_operand = ir_operand_temp(bad);
+    IROperand short_operand = ir_operand_temp(short_span);
+    IROperand zero = ir_operand_int(0);
+    int guarded = bad_operand.name && short_operand.name &&
+        safety_emit_binary(out, access->location, "<", short_span,
+                           &limit_operand, &zero, 0) &&
+        safety_emit_binary(out, access->location, "|", both, &bad_operand,
+                           &short_operand, 0);
+    ir_operand_destroy(&bad_operand);
+    ir_operand_destroy(&short_operand);
+    if (!guarded) {
+      goto done;
+    }
+    condition = both;
+  }
+  if (!safety_emit_branch_zero(out, access->location, condition, ok_label)) {
     goto done;
   }
   ok = safety_expand_region(out, access) &&
@@ -2316,6 +2465,74 @@ done:
   ir_operand_destroy(&limit_operand);
   ir_operand_destroy(&total_operand);
   return ok;
+}
+
+/* Where the straight-line run of instructions ending at `index` begins. A
+ * write inside that run is the one the instruction at `index` reads, whatever
+ * else in the function writes the same name, because control reached it here
+ * with no branch in between. */
+static size_t safety_block_start(const IRFunction *function, size_t index) {
+  for (size_t i = index; i-- > 0;) {
+    IROpcode op = function->instructions[i].op;
+    if (op == IR_OP_LABEL || op == IR_OP_JUMP || op == IR_OP_BRANCH_ZERO ||
+        op == IR_OP_BRANCH_EQ || op == IR_OP_RETURN) {
+      return i + 1;
+    }
+  }
+  return 0;
+}
+
+/* The origin operand at a check is usually a copy made inside the loop:
+ * pointer arithmetic gives its result an origin of its own, merged from the
+ * pointer's and the index's, and an ordinary counter carries none. Those links
+ * name the allocation the pointer named on entry, so following them back finds
+ * the value that settled outside. Without this a loop that could resolve its
+ * allocation once falls back to asking the runtime at every access, purely
+ * because the origin passed through an instruction in the body.
+ *
+ * Only a write in the same straight-line run is followed, so the write is the
+ * one this operand actually reads, and only a merge whose other side is a
+ * literal nothing, which the runtime defines as the first side unchanged. A
+ * name with no write in that run is returned as it stands, leaving the caller
+ * to decide whether the loop holds it still. */
+static const IROperand *safety_identity_root(const IRFunction *function,
+                                             const IROperand *identity,
+                                             size_t before, int depth) {
+  if (!identity || !identity->name || depth > 16 ||
+      (identity->kind != IR_OPERAND_TEMP && identity->kind != IR_OPERAND_SYMBOL)) {
+    return identity;
+  }
+  const IRInstruction *definition = NULL;
+  size_t at = 0;
+  for (size_t i = safety_block_start(function, before); i < before; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    if (in->op == IR_OP_DECLARE_LOCAL || !ir_instruction_writes_destination(in) ||
+        !safety_operand_same(&in->dest, identity)) {
+      continue;
+    }
+    definition = in;
+    at = i;
+  }
+  if (!definition) {
+    return identity;
+  }
+  if (definition->op == IR_OP_ASSIGN) {
+    return safety_identity_root(function, &definition->lhs, at, depth + 1);
+  }
+  if (definition->op == IR_OP_CALL && definition->text &&
+      definition->argument_count == 2 && definition->arguments &&
+      (strcmp(definition->text, "mettle_safety_merge_identity") == 0 ||
+       strcmp(definition->text, "mettle_safety_subtract_identity") == 0)) {
+    const IROperand *left = &definition->arguments[0];
+    const IROperand *right = &definition->arguments[1];
+    if (right->kind == IR_OPERAND_INT && right->int_value == 0) {
+      return safety_identity_root(function, left, at, depth + 1);
+    }
+    if (left->kind == IR_OPERAND_INT && left->int_value == 0) {
+      return safety_identity_root(function, right, at, depth + 1);
+    }
+  }
+  return identity;
 }
 
 /* ---- the loops, gathered once ----------------------------------------------- */
@@ -2508,6 +2725,15 @@ static int safety_resolve_function(IRFunction *function, IRSafetyStats *stats) {
                    access.location.line);
       continue;
     }
+    const IROperand *identity_root =
+        safety_identity_root(function, access.identity, i, 0);
+    if (identity_root && !safety_operand_invariant_in(function,
+        loop->header_index, loop->bounds.jump_index, identity_root)) {
+      safety_trace("the pointer origin is re-read inside the loop, so one "
+                   "resolution would not describe every iteration",
+                   access.location.line);
+      continue;
+    }
     if (!safety_body_has_no_calls(function, &loop->bounds)) {
       safety_trace("the loop calls something that could free what it walks",
                    access.location.line);
@@ -2547,7 +2773,10 @@ static int safety_resolve_function(IRFunction *function, IRSafetyStats *stats) {
     size_t found = span_count;
     for (size_t s = 0; s < span_count; s++) {
       if (spans[s].header_index == loop->header_index &&
-          safety_operand_same(&spans[s].base, root)) {
+          safety_operand_same(&spans[s].base, root) &&
+          ((!spans[s].identity && !identity_root) ||
+           (spans[s].identity && identity_root &&
+            safety_operand_same(spans[s].identity, identity_root)))) {
         found = s;
         break;
       }
@@ -2555,6 +2784,7 @@ static int safety_resolve_function(IRFunction *function, IRSafetyStats *stats) {
     if (found == span_count) {
       SafetySpan *fresh = &spans[span_count];
       fresh->header_index = loop->header_index;
+      fresh->identity = identity_root;
       fresh->location = access.location;
       snprintf(fresh->temp, sizeof(fresh->temp), SAFETY_TEMP_PREFIX "sp%u",
                g_safety_next_id++);
@@ -2721,7 +2951,9 @@ fail:
  * with the spill-everything backend": every function holding a single check
  * lost register allocation, which cost far more than the checks did. */
 static int safety_declare_runtime(IRProgram *program) {
-  const MtlcType *pointer = mtlc_type_pointer(mtlc_type_scalar(MTLC_TYPE_INT8));
+  /* Metadata APIs consume addresses, including string record addresses. A
+   * byte pointer signature would ask codegen to convert records to cstrings. */
+  const MtlcType *pointer = mtlc_type_pointer(mtlc_type_scalar(MTLC_TYPE_UINT64));
   const MtlcType *i64 = mtlc_type_scalar(MTLC_TYPE_INT64);
   const MtlcType *u32 = mtlc_type_scalar(MTLC_TYPE_UINT32);
   const MtlcType *u64 = mtlc_type_scalar(MTLC_TYPE_UINT64);
@@ -2731,16 +2963,20 @@ static int safety_declare_runtime(IRProgram *program) {
   }
 
   const MtlcType *check_params[5] = {pointer, i64, i64, u32, u32};
+  const MtlcType *loop_length_params[5] = {i64, i64, i64, i64, i64};
   const MtlcType *span_params[1] = {pointer};
   const MtlcType *register_params[2] = {pointer, u64};
   const MtlcType *unregister_params[1] = {pointer};
   const MtlcType *reregister_params[3] = {pointer, pointer, u64};
   const MtlcType *identity_check_params[6] = {pointer, i64, i64, u32, u32, u64};
+  const MtlcType *affine_check_params[8] = {pointer, i64, i64, u32, u32, u64, i64, i64};
   const MtlcType *pointer_u64[2] = {pointer, u64};
+  const MtlcType *string_u64[2] = {pointer, u64};
   const MtlcType *two_u64[2] = {u64, u64};
   const MtlcType *value_store_params[4] = {pointer, u64, u64, u64};
   const MtlcType *call_arg_params[3] = {pointer, u64, u64};
   const MtlcType *copy_params[3] = {pointer, pointer, u64};
+  const MtlcType *arg_copy_params[4] = {pointer, u64, pointer, u64};
   const MtlcType *buffer_params[5] = {pointer, i64, u32, u32, u64};
 
   const struct {
@@ -2758,7 +2994,9 @@ static int safety_declare_runtime(IRProgram *program) {
       {"mettle_safety_enter_allocator", nothing, NULL, 0},
       {"mettle_safety_leave_allocator", nothing, NULL, 0},
       {"mettle_safety_identity", u64, span_params, 1},
+      {"mettle_safety_loop_length", i64, loop_length_params, 5},
       {"mettle_safety_check_identity", nothing, identity_check_params, 6},
+      {"mettle_safety_check_affine", nothing, affine_check_params, 8},
       {"mettle_safety_span_identity", i64, pointer_u64, 2},
       {"mettle_safety_merge_identity", u64, two_u64, 2},
       {"mettle_safety_subtract_identity", u64, two_u64, 2},
@@ -2770,10 +3008,20 @@ static int safety_declare_runtime(IRProgram *program) {
       {"mettle_safety_call_param", u64, pointer_u64, 2},
       {"mettle_safety_call_return", nothing, pointer_u64, 2},
       {"mettle_safety_call_pop", u64, span_params, 1},
+      {"mettle_safety_call_arg_copy", nothing, arg_copy_params, 4},
+      {"mettle_safety_call_param_copy", nothing, arg_copy_params, 4},
+      {"mettle_safety_call_return_copy", nothing, copy_params, 3},
+      {"mettle_safety_call_result_copy", nothing, copy_params, 3},
       {"mettle_safety_value_copy", nothing, copy_params, 3},
       {"mettle_safety_value_clear", nothing, pointer_u64, 2},
       {"mettle_safety_free_identity", nothing, pointer_u64, 2},
       {"mettle_safety_buffer_check", nothing, buffer_params, 5},
+      {"mettle_safety_region_begin", nothing, pointer_u64, 2},
+      {"mettle_safety_region_end", nothing, span_params, 1},
+      {"mettle_safety_entry_arguments", nothing, span_params, 1},
+      {"mettle_safety_literal_identity", u64, pointer_u64, 2},
+      {"mettle_safety_string_identity", u64, string_u64, 2},
+      {"mettle_safety_global_pointer", nothing, call_arg_params, 3},
   };
 
   for (size_t e = 0; e < sizeof(entries) / sizeof(entries[0]); e++) {
@@ -2913,12 +3161,52 @@ static void safety_const_globals_build(const IRProgram *program) {
   free(order);
 }
 
+#include "ir_safety_plain_storage.inc"
+
+int ir_safety_analyze_origins(IRProgram *program) {
+  if (!program) return 1;
+  /* Preserve the diagnostic footprint of the input IR. A range already
+   * recognized here keeps its range message. A check widened only after
+   * scalar analysis still reports the first failing source access. */
+  g_safety_program = program;
+  g_safety_callee_cache_count = 0;
+  safety_const_globals_build(program);
+  int ok = 1;
+  for (size_t f = 0; ok && f < program->function_count; f++) {
+    IRFunction *fn = program->functions[f];
+    SafetyLoopList loops = {0};
+    if (!safety_loop_list_build(fn, &loops)) { ok = 0; break; }
+    for (size_t i = 0; i < fn->instruction_count; i++) {
+      IRInstruction *in = &fn->instructions[i];
+      if (in->op != IR_OP_SAFETY_CHECK ||
+          in->argument_count != IR_SAFETY_TRACKED_ARG_COUNT) continue;
+      SafetyAccess access = {0};
+      SafetyHoist hoist = {0};
+      if (!safety_read(in, &access)) { ok = 0; break; }
+      int ranged = safety_try_hoist(fn, &loops, i, &access, &hoist);
+      ir_operand_destroy(&hoist.base);
+      ir_operand_destroy(&hoist.bound);
+      ir_operand_destroy(&hoist.invariant);
+      ir_operand_destroy(&hoist.index_start_value);
+      IROperand *args = realloc(in->arguments,
+          IR_SAFETY_ANALYZED_ARG_COUNT * sizeof(*args));
+      if (!args) { ok = 0; break; }
+      in->arguments = args;
+      args[IR_SAFETY_ARG_DIAGNOSTIC_SIZE] = ir_operand_int(ranged ? 0 : access.size);
+      in->argument_count = IR_SAFETY_ANALYZED_ARG_COUNT;
+    }
+    safety_loop_list_destroy(&loops);
+  }
+  safety_const_globals_destroy();
+  g_safety_program = NULL;
+  return ok && safety_simplify_plain_storage(program);
+}
+
 int ir_safety_resolve_program(IRProgram *program, IRSafetyStats *stats) {
   if (!program) {
     return 1;
   }
   clock_t started = safety_time_enabled() ? clock() : 0;
-  g_safety_next_id = 0;
   if (!safety_declare_runtime(program)) {
     return 0;
   }
@@ -2950,6 +3238,7 @@ int ir_safety_resolve_program(IRProgram *program, IRSafetyStats *stats) {
   }
   safety_const_globals_destroy();
   g_safety_program = NULL;
+  if (!safety_simplify_plain_storage(program)) return 0;
   if (safety_time_enabled()) {
     /* Ticks rather than a converted figure: clock()'s units do not reliably
      * match CLOCKS_PER_SEC across the toolchains this builds with, and a
@@ -3493,6 +3782,71 @@ static int safety_describe_stack(IRProgram *program, IRFunction *function) {
  * else. Indexing one directly never reaches the map at all: the size is right
  * there in the program, so the check is a comparison against a constant, or is
  * proved away outright. */
+static int safety_seed_global_pointer(IRInstructionVector *out, SourceLocation location,
+                                       const char *name, size_t offset, int mode, size_t size) {
+  char base_name[64], slot_name[64];
+  snprintf(base_name, sizeof(base_name), ".safe_global_%u", g_safety_next_id++);
+  snprintf(slot_name, sizeof(slot_name), ".safe_global_%u", g_safety_next_id++);
+  IRInstruction take = {0};
+  take.op = IR_OP_ADDRESS_OF;
+  take.location = location;
+  take.dest = ir_operand_temp(base_name);
+  take.lhs = ir_operand_symbol(name);
+  if (!take.dest.name || !take.lhs.name || !ir_instruction_vector_append_move(out, &take)) {
+    ir_instruction_destroy_storage(&take);
+    return 0;
+  }
+  IRInstruction add = {0};
+  add.op = IR_OP_BINARY;
+  add.location = location;
+  add.text = mettle_strdup("+");
+  add.dest = ir_operand_temp(slot_name);
+  add.lhs = ir_operand_temp(base_name);
+  add.rhs = ir_operand_int((long long)offset);
+  if (!add.text || !add.dest.name || !add.lhs.name || !ir_instruction_vector_append_move(out, &add)) {
+    ir_instruction_destroy_storage(&add);
+    return 0;
+  }
+  IROperand args[3] = {ir_operand_temp(slot_name), ir_operand_int(mode), ir_operand_int((long long)size)};
+  int ok = args[0].name && safety_emit_call(out, location, "mettle_safety_global_pointer", args, 3);
+  ir_operand_destroy(&args[0]);
+  return ok;
+}
+
+/* main's parameters arrive from the process rather than from a compiled
+ * caller, so the frame that normally carries a parameter's origin was never
+ * pushed and the argument vector reads as an unknown pointer. Describe it at
+ * entry instead, which is the only such parameter a program indexes. */
+static int safety_describe_entry_arguments(IRProgram *program, IRFunction *entry) {
+  if (entry->parameter_count < 2 || !entry->parameter_names ||
+      !entry->parameter_names[1] || !entry->parameter_types) {
+    return 1;
+  }
+  const MtlcType *type = ir_program_lookup_type(program, entry->parameter_types[1]);
+  if (!type || type->kind != MTLC_TYPE_POINTER) {
+    return 1;
+  }
+
+  IRInstructionVector out = {0};
+  if (!ir_instruction_vector_reserve(&out, entry->instruction_count + 1)) {
+    return 0;
+  }
+  IROperand vector = ir_operand_symbol(entry->parameter_names[1]);
+  int ok = vector.name != NULL &&
+           safety_emit_call(&out, entry->location, "mettle_safety_entry_arguments",
+                            &vector, 1);
+  ir_operand_destroy(&vector);
+  for (size_t i = 0; ok && i < entry->instruction_count; i++) {
+    ok = ir_instruction_vector_append_move(&out, &entry->instructions[i]);
+  }
+  if (!ok || !ir_function_replace_instructions(entry, &out)) {
+    ir_instruction_vector_destroy(&out);
+    return 0;
+  }
+  ir_function_clear_cfg(entry);
+  return 1;
+}
+
 static int safety_describe_globals(IRProgram *program, IRFunction *entry) {
   size_t described = 0;
   for (size_t i = 0; i < program->module_symbol_count; i++) {
@@ -3554,6 +3908,29 @@ static int safety_describe_globals(IRProgram *program, IRFunction *entry) {
     }
   }
 
+  /* All target regions must exist before seeding relocations, including a
+   * pointer whose target appears later in the module's symbol table. */
+  for (size_t i = 0; i < program->module_symbol_count; i++) {
+    const IRModuleSymbol *symbol = &program->module_symbols[i];
+    if (symbol->kind != IR_MODSYM_VARIABLE || symbol->is_extern || !symbol->type) continue;
+    if (symbol->init_symbol_ref || symbol->init_string) {
+      int mode = symbol->init_string ? (symbol->type->kind == MTLC_TYPE_STRING ? 3 : 1) : 0;
+      if (!safety_seed_global_pointer(&out, entry->location, symbol->name, 0, mode,
+                                      symbol->init_string_length + 1)) {
+        ir_instruction_vector_destroy(&out);
+        return 0;
+      }
+    }
+    for (size_t r = 0; r < symbol->init_reloc_count; r++) {
+      const IRInitReloc *reloc = &symbol->init_relocs[r];
+      int mode = reloc->string ? (reloc->string_wants_record ? 2 : 1) : 0;
+      if (!safety_seed_global_pointer(&out, entry->location, symbol->name, reloc->offset,
+                                      mode, reloc->string_length + 1)) {
+        ir_instruction_vector_destroy(&out);
+        return 0;
+      }
+    }
+  }
   for (size_t i = 0; i < entry->instruction_count; i++) {
     if (!ir_instruction_vector_append_move(&out, &entry->instructions[i])) {
       ir_instruction_vector_destroy(&out);
@@ -3658,6 +4035,10 @@ int ir_safety_register_allocations(IRProgram *program) {
   if (!program) {
     return 1;
   }
+  g_safety_next_id = 0;
+  if (!safety_declare_runtime(program)) return 0;
+  if (!safety_normalize_external_calls(program) || !safety_wrap_allocator_addresses(program) ||
+      !safety_normalize_external_calls(program)) return 0;
   const char *allocator_source = safety_allocator_source(program);
   IRFunction *entry = NULL;
   for (size_t i = 0; i < program->function_count; i++) {
@@ -3679,7 +4060,8 @@ int ir_safety_register_allocations(IRProgram *program) {
       return 0;
     }
   }
-  if (entry && !safety_describe_globals(program, entry)) {
+  if (entry && (!safety_describe_globals(program, entry) ||
+                !safety_describe_entry_arguments(program, entry))) {
     return 0;
   }
   for (size_t i = 0; i < program->function_count; i++) {

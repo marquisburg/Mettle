@@ -1,0 +1,10 @@
+import "std/mem";
+extern fn find_char(text: cstring, ch: int32) -> cstring = "strchr";
+
+fn main() -> int32 {
+  var p: cstring = find_char("abc", 98);
+  memory_region(p, 2);
+  var result: int32 = (int32)p[0];
+  memory_region_end(p);
+  return result;
+}

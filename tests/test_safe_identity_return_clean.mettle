@@ -1,0 +1,17 @@
+import "std/mem";
+struct Holder { pointer: int64*; count: int64; }
+fn touch(h: Holder*) { h->count = 8; }
+fn make(p: int64*) -> Holder {
+ var h: Holder;
+ h.pointer = p;
+ touch(&h);
+ return h;
+}
+fn main() -> int32 {
+ var p: int64* = malloc(64);
+ p[0] = 42;
+ var h: Holder = make(p);
+ var value: int32 = (int32)h.pointer[0];
+ free(p);
+ return value;
+}

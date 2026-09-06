@@ -385,6 +385,12 @@ typedef enum {
 #define IR_SAFETY_ARG_EXTENT 3u
 #define IR_SAFETY_ARG_ACCESS 4u
 #define IR_SAFETY_ARG_COUNT 5u
+/* Identity tracking appends the origin before scalar optimization. */
+#define IR_SAFETY_ARG_IDENTITY 5u
+#define IR_SAFETY_TRACKED_ARG_COUNT 6u
+/* Retain the diagnostic width when scalar analysis exposes a new range. */
+#define IR_SAFETY_ARG_DIAGNOSTIC_SIZE 6u
+#define IR_SAFETY_ANALYZED_ARG_COUNT 7u
 
 #define IR_GPU_LAUNCH_CONTROL_ARGS 8u
 

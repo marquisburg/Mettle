@@ -111,62 +111,161 @@ the `while` loop they desugar to. The check needs a constant start, a constant
 bound, one `i = i + 1`, and no way out of the loop early, so anything it cannot
 prove it leaves alone.
 
-## Run-time checks with --safe
-
-`--safe` keeps bounds checks under `--release` and checks instrumented pointer
-accesses against registered heap, stack, and global storage. It also detects
-null access and use of a freed region while that region still has a record.
-It does not provide a complete memory safety guarantee.
+## Runtime checks with `--safe`
 
 ```bash
-mettle --safe --build program.mettle
+mettle --safe --release --build program.mettle
 ```
 
-A failed check stops the program and names the access:
+`--safe` keeps bounds checks in release builds. Each tracked allocation has an
+identity that includes a generation. The compiler carries that identity beside
+values, leaving source syntax, native pointer width, struct layout and calling
+conventions intact. Checks use the original allocation's bounds and lifetime.
+Reusing an address does not make a stale identity valid again.
 
-```text
-Fatal error: `a[]` is outside its bounds
+The compiler carries identities through scalar copies, pointer arithmetic,
+integer conversions, fields, byte copy loops, `memcpy`, `memmove`, compiled
+calls, recursion and function pointers. Aggregate arguments and results carry
+byte metadata through a separate call frame. Return metadata is saved before
+stack records are retired. Static pointer initializers and string literals
+receive metadata too.
+
+Known allocator calls register new regions and retire freed regions. Taking a
+known allocator's address selects a checked wrapper with the same signature.
+The checks reject double free, interior free and free of stack or global memory.
+Successful `realloc` creates a new identity even if the address stays the same.
+A failed resize with a nonzero size keeps the old identity live. A zero size
+retires it, matching the owned allocators.
+
+Checks reject null access, an unknown identity, a dead identity and an access
+outside the original allocation. Exact bounds also apply when two live objects
+share a registry granule. Metadata allocation failure and unsupported address
+ranges stop the program rather than silently skipping protection. A failed
+check reports the access and exits with status 1.
+
+### What survives, and what it costs
+
+A check that cannot fail is deleted. What is left is resolved into one of
+three shapes, cheapest first.
+
+- A comparison against an extent the program already states.
+- One check in front of a loop, covering the whole range the loop walks.
+  The counted span saturates rather than wrapping, so a trip count that
+  cannot be bounded reaches the check as an oversized range and not as an
+  empty one. The failure still names the first element that left the
+  allocation, not the offset the loop started from.
+- One resolution in front of a loop the analysis cannot settle, and a
+  comparison at each access against what it resolved. A resolution comes
+  back empty when the origin names nothing live, and that case is sent to
+  the full check: reading it as a limit would let every access in the loop
+  through, which is where an escape costs the most.
+
+Everything else asks the runtime which allocation the pointer came from.
+`--explain` reports the split for a build, and names the reason each
+survivor survived.
+
+The `main` a program declares takes its arguments from the process rather
+than from a compiled caller, so no call frame carries their origins. The
+argument vector and each of its strings are described at entry instead,
+which is what makes indexing either one a checked access.
+
+## Foreign memory
+
+An unknown C pointer has no bounds or lifetime that the compiler can verify.
+Dereferencing it under `--safe` traps. A caller that knows the foreign owner's
+contract can describe a borrowed region through `std/mem`:
+
+```mettle
+memory_region(pointer, byte_count);
+// Use pointer while the foreign owner keeps these bytes live.
+memory_region_end(pointer);
 ```
 
-The process exits with status 1.
+`memory_region` asserts that the whole range exists and stays live. It does not
+validate the foreign allocation. `memory_region_end` retires the record and
+leaves the actual release to its owner. Keep the original address for ending
+the region. Describe the region before making aliases that need its identity.
+Declaring the exact same live range keeps its identity. A different range gets
+its own record. Replacing a record at the same start address retires its old
+identity, so use this API for foreign memory whose contract you control.
 
-Some checks cost nothing, because the compiler removes the ones it can settle
-statically. It recognizes an index written as a multiple of a loop counter plus
-an invariant plus a constant, and proves that shape in bounds against the
-array's length. A loop over `0..n` indexing an array of `n` elements gets no
-checks at all.
+This API is a trust boundary. A false extent or a foreign owner that frees the
+memory too soon can defeat the checks. Foreign code and assembly still control
+their own memory operations. Rebuild Mettle dependencies with `--safe` to carry
+identities through their calls; an unchecked library does not supply metadata.
 
-What is left is the accesses that genuinely depend on run-time values.
-Remaining pointer checks copy the allocation record under the registry lock.
-That prevents checks from reading fields while another thread reuses a record.
-It adds work and may cause contention; earlier timing results for the runtime
-without that lock do not measure this version.
+## Scope and remaining limits
 
-The runtime stops if it cannot allocate safety metadata or describe the
-requested address range. It does not silently omit the record. A failed
-`realloc` with a nonzero size leaves the old record live. A zero size retires
-it, matching the owned allocators. Allocator check suppression belongs to the
-current thread, including on Windows builds that lack a native TLS directory.
+These checks do not yet establish complete memory safety for every program.
 
-## What is not covered
+| Case | Current limit |
+|------|---------------|
+| Concurrent access and free | Locks protect the registry and byte metadata. They do not hold the allocation live between the check and the machine access. The program must synchronize its accesses and lifetimes. |
+| Concurrent value and metadata writes | The machine store and its metadata update are separate operations. Data races can make them disagree. |
+| Foreign code, assembly and callbacks | Their accesses and lifetime changes need a trusted contract. A callback entered from unchecked code has no argument identities unless it establishes valid regions. |
+| Foreign pointer reconstruction | C can transform or copy a pointer without supplying its origin. A later checked dereference rejects the unknown result. |
+| Allocation size arithmetic | Arithmetic still follows the core language. A size expression can wrap before it reaches the allocator. Checks use the resulting allocation extent. |
+| Other targets | The regression matrix covers native Windows and Linux on x64. It does not establish equivalent coverage for other backends. |
 
-The compiler proves what it can see. The runtime has these limits:
+### What it costs
 
-| Case | Limit |
-|------|-------|
-| Unregistered memory from C or a custom allocator | Unknown addresses pass through the registry check. Pointer type alone does not supply an extent. |
-| Address reuse | An old pointer can match a new allocation at the same address. This includes stack frame reuse and realloc that keeps its address. |
-| Lost base address | A derived pointer that reaches unregistered storage can lose the original bounds. A machine pointer carries no separate allocation identity. |
-| Objects sharing a registry granule | Conflicting live records leave that granule unchecked. The compiler aligns registered stack and global objects to avoid this case. |
-| Concurrent free and access | The registry lock protects metadata, not the program's access after the check. Program data races remain unsafe. |
-| C code and assembly | The compiler cannot insert checks into their memory operations. |
-| Integer overflow | Language arithmetic still wraps. Allocation size expressions can overflow before registration. |
+The compiler still removes checks it can prove unnecessary. What is left is not
+cheap. Carrying an origin beside a value means a metadata read for every load
+that could be part of a pointer, and a byte loaded from the heap qualifies:
+reassembling a pointer one byte at a time is a thing programs do, and the
+checks would be defeated by refusing to follow it.
 
-Complete protection needs bounds and lifetime identity to follow pointers
-through copies, fields, calls, and conversions, plus a defined policy for
-foreign memory and concurrent access. The current address registry does not
-carry that identity. `--safe` adds useful checks without changing syntax,
-pointer layout, or the C ABI; it does not prove arbitrary pointer use safe.
+Measured on this repository's example kernels, each reporting its own inner
+loop rather than process time, `--release --safe` against `--release`:
+
+| Kernel | Plain | Checked | Ratio |
+|--------|------:|--------:|------:|
+| heapsort | 23.8 ms | 377.9 ms | 16x |
+| base64_encode | 47.2 ms | 1.59 s | 34x |
+| sort_insertion | 9.7 ms | 830.7 ms | 85x |
+| binary_search | 7.0 ms | 2.51 s | 359x |
+| crc32 | 2.3 ms | 1.04 s | 457x |
+
+The worst of these walk a heap buffer a byte at a time, and each byte asks the
+runtime what allocation it came from. The analysis that removes those questions
+proves an allocation carries no origins only when it can see the whole graph,
+so a buffer that arrives from a library function keeps them all. Two kernels,
+`aos_sum` and `transpose`, run faster checked than plain, which is not a claim
+about the checks: `--safe` runs a scalar analysis stage that `--release` alone
+does not, and these two benefit from it.
+
+Treat `--safe` as a mode for testing and for programs where the guarantee is
+worth the factor, not as a release default. Earlier timing claims for the
+address registry alone do not measure this implementation.
+
+## Tests
+
+Run the focused compiler matrix from the repository root:
+
+```bash
+python tests/run_safety_identity.py --compiler bin/mettle.exe
+```
+
+On Linux, pass the Linux compiler path. The matrix checks valid results and the
+expected trap messages in debug and release builds with both allocators.
+
+```bash
+python tests/run_safety_optimizer.py --compiler bin/mettle.exe
+```
+
+This one holds the resolution to what it resolved before. It checks that the
+two vectorized fixtures still vectorize under `--safe --release`, that the
+targeted regressions still trap, and that every source in a fixed corpus
+reports the same diagnostic, character for character, that it reported when the
+corpus was recorded. A resolution that quietly stops proving what it used to
+prove costs speed; one that quietly stops checking what it used to check looks
+identical from outside, which is what the corpus is for.
+
+`tests/safety_runtime_test.c` separately checks registry bounds, generations,
+metadata copies, allocation failure, call frames and the counted-span helper.
+The Windows harness also checks thread isolation and concurrent registry
+replacement. Both runners are cases in `tests/run_tests.ps1`, so a full suite
+run covers them.
 
 ## See also
 

@@ -1,0 +1,24 @@
+@noinline fn masked(table: cstring, n: int64) -> int64 {
+  var sum: int64 = 0;
+  var i: int64 = 0;
+  while (i < n) {
+    sum = sum + (int64)table[i & 63];
+    i = i + 1;
+  }
+  return sum;
+}
+
+@noinline fn affine(data: int32*, n: int64) -> int64 {
+  var sum: int64 = 0;
+  var i: int64 = 0;
+  while (i < n) {
+    sum = sum + (int64)data[i];
+    i = i + 1;
+  }
+  return sum;
+}
+
+fn main() -> int32 {
+  return (int32)(masked((cstring)0, 0) + masked((cstring)0, -1) +
+                 affine((int32*)0, 0) + affine((int32*)0, -1));
+}

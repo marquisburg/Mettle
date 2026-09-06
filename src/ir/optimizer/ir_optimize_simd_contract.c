@@ -799,6 +799,7 @@ const char *ir_simd_bail_id_name(int id) {
   case IR_SIMD_BAIL_NONE:                return "none";
   case IR_SIMD_BAIL_CALL_IN_BODY:        return "call-in-body";
   case IR_SIMD_BAIL_EXTERN_CALL_IN_BODY: return "extern-call-in-body";
+  case IR_SIMD_BAIL_SAFETY_IN_BODY: return "memory-safety-in-body";
   case IR_SIMD_BAIL_INDIRECT_CALL:       return "indirect-call";
   case IR_SIMD_BAIL_ALLOC_IN_BODY:       return "alloc-in-body";
   case IR_SIMD_BAIL_INLINE_ASM:          return "inline-asm";
@@ -1220,6 +1221,20 @@ static void ir_simd_explain_bail(const IRFunction *function, size_t begin,
   }
 
   if (callee) {
+    for (size_t i = 0; i < function->instruction_count; i++) {
+      const IRInstruction *in = &function->instructions[i];
+      if (!in->text || strcmp(in->text, callee) ||
+          ir_safety_intrinsic(in) == IR_SAFETY_INTRINSIC_NONE) continue;
+      snprintf(reason, reason_cap,
+               "each iteration retains a memory safety operation; its bounds "
+               "or pointer origin could not be proved independent of the iteration");
+      snprintf(fix, fix_cap,
+               "keep the checked scalar loop, or expose a fixed array extent "
+               "and an affine index so the compiler can prove the range");
+      IR_SIMD_MARK_ADVISORY();
+      IR_SIMD_SET_DIAG(IR_SIMD_BAIL_SAFETY_IN_BODY);
+      return;
+    }
     /* Advice differs fundamentally by what the callee IS: a program-defined
      * function can be inlined (and that fix can be simulated); an extern has
      * no body, so "mark it @inline" would be advice that cannot work. */

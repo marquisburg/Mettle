@@ -1,0 +1,6 @@
+extern fn find_char(text: cstring, ch: int32) -> cstring = "strchr";
+
+fn main() -> int32 {
+  var p: cstring = find_char("abc", 98);
+  return (int32)p[0];
+}

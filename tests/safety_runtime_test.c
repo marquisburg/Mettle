@@ -428,7 +428,8 @@ int main(void) {
   });
   CASE("identity follows byte copies", 1, {
     char *block = (char *)aligned_block(64);
-    uint64_t source = (uint64_t)(uintptr_t)block, destination = 0;
+    uint64_t source = (uint64_t)(uintptr_t)block;
+    uint64_t destination = 0;
     mettle_safety_register(block, 64);
     uint64_t identity = mettle_safety_identity(block);
     mettle_safety_value_store(&source, source, identity, 8);
@@ -474,6 +475,147 @@ int main(void) {
     if (mettle_safety_call_pop(inner) != 99) g_failures++;
     mettle_safety_call_return(entry, mettle_safety_call_param(entry, 1));
     if (mettle_safety_call_pop(outer) != 77) g_failures++;
+  });
+
+  CASE("aggregate call metadata survives source retirement", 0, {
+    uint64_t source[2] = {0};
+    uint64_t parameter[2] = {0};
+    uint64_t result[2] = {0};
+    mettle_safety_register_static(source, sizeof(source));
+    mettle_safety_value_store(source, 0, 77, 8);
+    mettle_safety_value_store(source + 1, 0, 99, 8);
+    void *frame = mettle_safety_call_push((void *)(uintptr_t)0x12340, 1);
+    mettle_safety_call_arg_copy(frame, 0, source, sizeof(source));
+    mettle_safety_unregister(source);
+    mettle_safety_call_param_copy(frame, 0, parameter, sizeof(parameter));
+    if (mettle_safety_value_load(parameter, 0, 8) != 77 ||
+        mettle_safety_value_load(parameter + 1, 0, 8) != 99) g_failures++;
+    mettle_safety_call_return_copy(frame, parameter, sizeof(parameter));
+    mettle_safety_value_clear(parameter, sizeof(parameter));
+    mettle_safety_call_result_copy(frame, result, sizeof(result));
+    mettle_safety_call_pop(frame);
+    if (mettle_safety_value_load(result, 0, 8) != 77 ||
+        mettle_safety_value_load(result + 1, 0, 8) != 99) g_failures++;
+    mettle_safety_value_clear(result, sizeof(result));
+  });
+
+  /* The whole-loop check answers for a walk the per-access checks no longer
+   * cover, so the offset it reports has to be the first access that actually
+   * failed rather than the one the loop started from. Getting that wrong is
+   * silent: the trap still fires, and it accuses the wrong element. */
+  CASE("an affine walk that stays inside passes once", 0, {
+    char *block = (char *)aligned_block(64);
+    mettle_safety_register(block, 64);
+    uint64_t identity = mettle_safety_identity(block);
+    mettle_safety_check_affine(block, 0, 64, READ, 20, identity, 4, 4);
+    mettle_safety_check_affine(block, 8, 56, READ, 21, identity, 4, 4);
+    mettle_safety_check_affine(block, 0, 0, READ, 22, identity, 4, 4);
+    mettle_safety_check_affine(block, 0, -8, READ, 23, identity, 4, 4);
+    mettle_safety_unregister(block);
+    free_block(block);
+  });
+
+  CASE("an affine walk names the first offset outside", 1, {
+    char *block = (char *)aligned_block(64);
+    mettle_safety_register(block, 64);
+    uint64_t identity = mettle_safety_identity(block);
+    mettle_safety_check_affine(block, 0, 68, READ, 24, identity, 4, 4);
+    mettle_safety_unregister(block);
+    free_block(block);
+  });
+  if (!strstr(g_message, "4 bytes at offset 64 of a 64 byte allocation")) {
+    g_failures++;
+    printf("  FAIL affine walk reported the wrong offset: %s\n", g_message);
+  }
+
+  CASE("a displaced affine walk names its own first offset", 1, {
+    char *block = (char *)aligned_block(64);
+    mettle_safety_register(block, 64);
+    uint64_t identity = mettle_safety_identity(block);
+    mettle_safety_check_affine(block, 12, 64, READ, 25, identity, 4, 4);
+    mettle_safety_unregister(block);
+    free_block(block);
+  });
+  if (!strstr(g_message, "4 bytes at offset 64 of a 64 byte allocation")) {
+    g_failures++;
+    printf("  FAIL displaced affine walk reported the wrong offset: %s\n", g_message);
+  }
+
+  /* A saturated span is what an unbounded trip count turns into. It must reach
+   * the check as an oversized range, and still report the element the walk
+   * would have failed on rather than the saturated length itself. */
+  CASE("a saturated span still names the first offset outside", 1, {
+    char *block = (char *)aligned_block(64);
+    mettle_safety_register(block, 64);
+    uint64_t identity = mettle_safety_identity(block);
+    int64_t length = mettle_safety_loop_length(INT64_MAX, 0, 1, 4, 4);
+    mettle_safety_check_affine(block, 0, length, READ, 26, identity, 4, 4);
+    mettle_safety_unregister(block);
+    free_block(block);
+  });
+  if (!strstr(g_message, "4 bytes at offset 64 of a 64 byte allocation")) {
+    g_failures++;
+    printf("  FAIL saturated affine walk reported the wrong offset: %s\n", g_message);
+  }
+
+  CASE("an affine walk that wraps the address space traps", 1, {
+    char *block = (char *)aligned_block(64);
+    mettle_safety_register(block, 64);
+    uint64_t identity = mettle_safety_identity(block);
+    mettle_safety_check_affine(block, INT64_MAX, 8, READ, 27, identity, 4, 4);
+    mettle_safety_unregister(block);
+    free_block(block);
+  });
+
+  CASE("an affine walk over freed memory traps", 1, {
+    char *block = (char *)aligned_block(64);
+    mettle_safety_register(block, 64);
+    uint64_t identity = mettle_safety_identity(block);
+    mettle_safety_unregister(block);
+    mettle_safety_check_affine(block, 0, 64, READ, 28, identity, 4, 4);
+    free_block(block);
+  });
+  if (!strstr(g_message, "after it was freed")) {
+    g_failures++;
+    printf("  FAIL affine walk over freed memory: %s\n", g_message);
+  }
+
+  /* Shapes the whole-loop form cannot describe fall back to the single access
+   * it was given, so a walk it cannot reason about is never waved through. */
+  CASE("an unusable affine shape falls back to the access", 1, {
+    char *block = (char *)aligned_block(64);
+    mettle_safety_register(block, 64);
+    uint64_t identity = mettle_safety_identity(block);
+    mettle_safety_check_affine(block, 62, 64, READ, 29, identity, 4, 0);
+    mettle_safety_unregister(block);
+    free_block(block);
+  });
+  if (!strstr(g_message, "4 bytes at offset 62 of a 64 byte allocation")) {
+    g_failures++;
+    printf("  FAIL unusable affine shape reported the wrong access: %s\n", g_message);
+  }
+
+  CASE("an affine walk without an identity is refused", 1, {
+    char *block = (char *)aligned_block(64);
+    mettle_safety_register(block, 64);
+    mettle_safety_check_affine(block, 0, 64, READ, 30, 0, 4, 4);
+    mettle_safety_unregister(block);
+    free_block(block);
+  });
+  if (!strstr(g_message, "no tracked allocation identity")) {
+    g_failures++;
+    printf("  FAIL affine walk without an identity: %s\n", g_message);
+  }
+
+  CASE("loop spans cannot wrap into an empty check", 0, {
+    if (mettle_safety_loop_length(64, 1, 1, 4, 4) != 256 ||
+        mettle_safety_loop_length(0, 1, 1, 4, 4) != 0 ||
+        mettle_safety_loop_length(INT64_MIN, 1, 1, 4, 4) != 0 ||
+        mettle_safety_loop_length(INT64_MAX, 1, 1, 4, 4) != INT64_MAX ||
+        mettle_safety_loop_length(INT64_C(4611686018427387904), 1, 1, 4, 4) != INT64_MAX ||
+        mettle_safety_loop_length(64, 2, 3, 8, 4) != 164 ||
+        mettle_safety_loop_length(INT64_MAX, INT64_MIN, 1, 1, 1) != INT64_MAX)
+      g_failures++;
   });
 
 #ifdef METTLE_SAFETY_TESTING

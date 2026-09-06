@@ -1,0 +1,9 @@
+import "std/mem";
+extern fn find_char(value: cstring, character: int32) -> cstring = "strchr";
+fn main() -> int32 {
+ var p: cstring = find_char("abc", 98);
+ memory_region(p, 2);
+ var alias: cstring = p;
+ memory_region_end(p);
+ return (int32)alias[0];
+}

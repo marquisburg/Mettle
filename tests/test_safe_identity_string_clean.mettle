@@ -1,0 +1,12 @@
+import "std/mem";
+var alphabet: string = "abcdef";
+fn main() -> int32 {
+ var text: string = "xyz";
+ var copy: string = text;
+ var p: cstring = malloc(8);
+ memcpy(p, copy, 3);
+ var a: cstring = alphabet;
+ var value: int32 = (int32)p[0] + (int32)a[0];
+ free(p);
+ return value;
+}

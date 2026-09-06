@@ -1,0 +1,23 @@
+import "std/io";
+
+var src: int32[64];
+var dst: int32[64];
+
+@noinline fn scale() {
+  for i in 0..64 { dst[i] = src[i] * 3; }
+}
+
+@noinline fn total() -> int64 {
+  var sum: int64 = 0;
+  for i in 0..64 { sum = sum + (int64)dst[i]; }
+  return sum;
+}
+
+fn main() -> int32 {
+  for i in 0..64 { src[i] = 2; }
+  scale();
+  var result: int64 = total();
+  println("total={result}");
+  if (result != 384) { return 1; }
+  return 0;
+}

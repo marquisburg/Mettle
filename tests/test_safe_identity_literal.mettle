@@ -1,0 +1,6 @@
+fn read(p: cstring) -> int32 { return (int32)p[0]; }
+
+fn main() -> int32 {
+  var p: cstring = "abc";
+  return read(p) + read("abc");
+}

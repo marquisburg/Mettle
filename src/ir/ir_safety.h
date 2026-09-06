@@ -3,19 +3,12 @@
 
 /* `--safe`: turning unproven accesses into either nothing or a check.
  *
- * Lowering marks every memory access with an IR_OP_SAFETY_CHECK. This step
- * runs immediately afterwards, before the optimizer, and leaves none of them
- * behind: a check it can prove cannot fail is deleted, and one it cannot is
- * rewritten into ordinary IR, either a comparison against a constant extent or
- * a call into the runtime shadow map.
- *
- * Running before the optimizer is deliberate. Loops still have the canonical
- * shape the bound proofs read most easily, and every later pass, recognizer,
- * code generator and the interpreter see only ordinary IR. The cost is that a
- * check which would become provable after inlining stays; that is a smaller
- * loss than it sounds, because the proofs that matter (a constant index, an
- * induction variable the loop already bounds, a repeat of an access proved
- * earlier) are all available at this point.
+ * Lowering marks accesses with IR_OP_SAFETY_CHECK. Lifetime instrumentation
+ * appends their pointer origins before scalar rewrites or inlining. The
+ * optimizer propagates constants and recognizes induction variables with
+ * these marks still present. Resolution then proves or widens each check
+ * before vector recognition. Residual checks retain known intrinsic effects
+ * and use the runtime call ABI when emitted by the backend.
  */
 
 #include "ir.h"
@@ -31,8 +24,23 @@ typedef struct {
   size_t region_calls; /* survivors that have to ask the runtime */
 } IRSafetyStats;
 
-/* Resolve every check in the program. Returns zero only on allocation
- * failure, having left the program unchanged. `stats` may be NULL. */
+/* Safety intrinsics keep the call ABI at the backend boundary. Optimizers
+ * must use their effects rather than treat them as unknown external code. */
+typedef enum {
+  IR_SAFETY_INTRINSIC_NONE,
+  IR_SAFETY_INTRINSIC_CHECK,
+  IR_SAFETY_INTRINSIC_READ_ORIGIN,
+  IR_SAFETY_INTRINSIC_WRITE_ORIGIN,
+  IR_SAFETY_INTRINSIC_LIFETIME
+} IRSafetyIntrinsic;
+IRSafetyIntrinsic ir_safety_intrinsic(const IRInstruction *instruction);
+
+/* Prove which private storage cannot contain pointer origins. */
+int ir_safety_analyze_origins(IRProgram *program);
+
+/* Resolve every check in the program. Returns zero on failure. A caller must
+ * discard a failed compilation; resolution can have rewritten earlier
+ * functions. `stats` may be NULL. */
 int ir_safety_resolve_program(IRProgram *program, IRSafetyStats *stats);
 
 /* Tell the runtime where the heap is: register what each allocation call

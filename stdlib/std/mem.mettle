@@ -24,6 +24,12 @@ export extern fn memcpy(dest: rawptr, src: rawptr, size: int64) -> rawptr = "mem
 export extern fn memmove(dest: rawptr, src: rawptr, size: int64) -> rawptr = "memmove";
 export extern fn memcmp(a: rawptr, b: rawptr, size: int64) -> int32 = "memcmp";
 
+// Describe a borrowed region from foreign code before Mettle dereferences it
+// under --safe. The caller must know that the whole region is live. Ending
+// the region retires its identity; the foreign owner still releases the bytes.
+export extern fn memory_region(ptr: rawptr, size: int64) = "mettle_safety_region_begin";
+export extern fn memory_region_end(ptr: rawptr) = "mettle_safety_region_end";
+
 // ─── Native memory operations ───────────────────────────────────────────────
 //
 // Pure Mettle byte operations. They move 8 bytes

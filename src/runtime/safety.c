@@ -334,6 +334,18 @@ static int safety_claim_granules(uintptr_t start, uint64_t size, uint32_t id) {
 
 /* ---- registration --------------------------------------------------------- */
 
+int64_t mettle_safety_loop_length(int64_t bound, int64_t first_bound,
+                                 int64_t counter_step, int64_t byte_step,
+                                 int64_t access_size) {
+  if (bound < first_bound) return 0;
+  if (counter_step <= 0 || byte_step < 0 || access_size <= 0) return INT64_MAX;
+  uint64_t rounds = ((uint64_t)bound - (uint64_t)first_bound) /
+                    (uint64_t)counter_step;
+  uint64_t room = (uint64_t)INT64_MAX - (uint64_t)access_size;
+  if (byte_step && rounds > room / (uint64_t)byte_step) return INT64_MAX;
+  return (int64_t)(rounds * (uint64_t)byte_step + (uint64_t)access_size);
+}
+
 static void safety_register_region(void *pointer, uint64_t size, uint32_t heap) {
   if (!pointer || size == 0) {
     return;
@@ -685,6 +697,36 @@ int64_t mettle_safety_span(const void *base) {
 }
 
 #include "safety_provenance.inc"
+
+/* One allocation lookup covers an ascending affine walk. Keep the source
+ * access width on failure, even when scalar analysis exposed the whole range. */
+void mettle_safety_check_affine(const void *base, int64_t offset, int64_t length,
+    uint32_t kind, uint32_t line, uint64_t identity, int64_t width, int64_t step) {
+  if (length <= 0) return;
+  if (!identity || width <= 0 || step <= 0) {
+    mettle_safety_check_identity(base, offset, width, kind, line, identity);
+    return;
+  }
+  SafetyRegion region = safety_identity_snapshot(identity);
+  uintptr_t start = (uintptr_t)base;
+  uintptr_t address = start + (uintptr_t)offset;
+  int wrapped = offset >= 0 ? address < start : address > start;
+  if (base && !wrapped && region.state == SAFETY_STATE_LIVE &&
+      address >= region.start && (uint64_t)length <= region.size &&
+      address - region.start <= region.size - (uint64_t)length) return;
+
+  if (base && !wrapped && region.state == SAFETY_STATE_LIVE &&
+      address >= region.start && (uint64_t)width <= region.size &&
+      address - region.start <= region.size - (uint64_t)width) {
+    uint64_t room = region.size - (uint64_t)width - (address - region.start);
+    uint64_t rounds = room / (uint64_t)step + 1;
+    uint64_t limit = (uint64_t)INT64_MAX - (uint64_t)offset;
+    offset = rounds <= limit / (uint64_t)step
+        ? (int64_t)((uint64_t)offset + rounds * (uint64_t)step) : INT64_MAX;
+  }
+  safety_check_failed(base, offset, width, line, &region,
+                      __builtin_return_address(0), __builtin_frame_address(0));
+}
 
 uint64_t mettle_safety_live_region_count(void) {
   return __atomic_load_n(&g_safety_live_regions, __ATOMIC_RELAXED);

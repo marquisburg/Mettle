@@ -2659,8 +2659,14 @@ static int mettle_link_object_file(const char *object_filename,
   }
 
   if (linker_mode == LINKER_MODE_INTERNAL || linker_mode == LINKER_MODE_AUTO) {
+    /* Startup, the freestanding runtime, the program, and one slot each for
+     * the crash, atomics, profile, debug, safety, trace, swap and string
+     * runtime objects, plus one of slack: the default marker for an entry is
+     * written at the index after it. A short list overruns both arrays, and
+     * what that does depends on the heap, so it shows up as a crash whose
+     * cause looks like whatever was allocated next. */
     size_t object_capacity =
-        8u + (use_tracy ? 2u : (needs_tracy_helpers ? 1u : 0u)) +
+        12u + (use_tracy ? 2u : (needs_tracy_helpers ? 1u : 0u)) +
         (options ? options->link_argument_count : 0u);
     const char **object_paths = calloc(object_capacity, sizeof(const char *));
     /* Parallel to object_paths: 1 marks a bundled runtime object, whose
@@ -6665,26 +6671,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     }
   }
 
-  /* Resolve the access marks before anything else looks at the IR: prove away
-   * what cannot fail, compile the rest into ordinary instructions. Every later
-   * stage, the interpreter included, sees IR with no safety opcodes in it. */
-  if (emit_safety_checks) {
-    /* Collection has to be armed before the pass, which runs well before the
-     * optimizer's own --explain state comes up. */
-    ir_explain_safety_set_collect(options->explain && options->optimize,
-                                  input_filename);
-    IRSafetyStats safety_stats = {0};
-    if (!ir_safety_resolve_program(ir_program, &safety_stats)) {
-      mettle_compiler_ice_report("Safety check resolution failed", NULL);
-      result = 1;
-      goto cleanup;
-    }
-    ir_explain_safety_totals(safety_stats.emitted, safety_stats.proved,
-                             safety_stats.hoisted, safety_stats.spanned,
-                             safety_stats.exempt, safety_stats.extent_tests,
-                             safety_stats.region_calls);
-  }
-
   if (ir_program_has_twins(ir_program) || options->report_twins) {
     IRTwinStats twin_stats;
     if (!ir_twins_check(ir_program, error_reporter,
@@ -6802,41 +6788,6 @@ int compile_file(const char *input_filename, const char *output_filename,
     goto cleanup;
   }
 
-  /* A deadline is a claim about the code that ships. `mettle test` ships none:
-   * it interprets an image carrying every belief re-check the mode adds, and
-   * costing that image would report a miss against a binary nobody built. The
-   * Machine rules sit out the same mode for the same reason. */
-  if (!options->test_mode) {
-    IRDeadlineStats deadline_stats;
-    IRDeadlineCosts deadline_costs;
-    const MtlcTargetDescription *machine = mtlc_target_current_description();
-    memset(&deadline_costs, 0, sizeof(deadline_costs));
-    deadline_costs.op = machine ? machine->cost_op : 1;
-    deadline_costs.load = machine ? machine->cost_load : 4;
-    deadline_costs.store = machine ? machine->cost_store : 1;
-    deadline_costs.branch = machine ? machine->cost_branch : 1;
-    deadline_costs.multiply = machine ? machine->cost_multiply : 3;
-    deadline_costs.multiply_float = machine ? machine->cost_multiply_float : 4;
-    deadline_costs.divide = machine ? machine->cost_divide : 26;
-    deadline_costs.divide_float = machine ? machine->cost_divide_float : 14;
-    deadline_costs.call = machine ? machine->cost_call : 4;
-    deadline_costs.allocate = machine ? machine->cost_allocate : 120;
-    deadline_costs.described = options->target_desc_path != NULL;
-    int deadline_instrumented =
-        options->record_trace || options->check_overflow ||
-        options->check_tasks || options->check_effects ||
-        options->check_proofs || options->safe || ir_verify_enabled();
-    if (!ir_deadline_run(ir_program, error_reporter, &deadline_costs,
-                         options->check_deadlines, deadline_instrumented,
-                         options->report_deadlines ? stdout : NULL,
-                         &deadline_stats)) {
-      if (error_reporter_has_errors(error_reporter)) {
-        error_reporter_print_errors(error_reporter);
-      }
-      result = 1;
-      goto cleanup;
-    }
-  }
 
 
   if (options->check_trace_path) {
@@ -6877,6 +6828,88 @@ int compile_file(const char *input_filename, const char *output_filename,
     goto cleanup;
   }
 
+  /* Record object lifetimes and pointer origins before scalar rewrites can
+   * merge copies or inline stack storage into a longer lived frame. */
+  if (options->native_heap && !ir_program_route_to_native_heap(ir_program)) {
+    fprintf(stderr, "Error: Failed to route allocation to the native heap\n");
+    result = 1;
+    goto cleanup;
+  }
+  if (emit_safety_checks && !ir_safety_register_allocations(ir_program)) {
+    fprintf(stderr, "Error: Failed to instrument allocations for --safe\n");
+    result = 1;
+    goto cleanup;
+  }
+  if (emit_safety_checks && options->optimize &&
+      (!ir_safety_analyze_origins(ir_program) ||
+       !ir_optimize_safety_analysis(ir_program,
+          compiler_options_use_profile_runtime(options)))) {
+    mettle_compiler_ice_report("Safety analysis failed", NULL);
+    result = 1;
+    goto cleanup;
+  }
+
+  /* Resolve the access marks after scalar analysis: prove away
+   * what cannot fail and lower the rest to comparisons and safety intrinsics.
+   * Vector recognition runs after this resolution. */
+  if (emit_safety_checks) {
+    /* Collection has to be armed before the pass, which runs well before the
+     * optimizer's own --explain state comes up. */
+    ir_explain_safety_set_collect(options->explain && options->optimize,
+                                  input_filename);
+    IRSafetyStats safety_stats = {0};
+    if (!ir_safety_resolve_program(ir_program, &safety_stats)) {
+      mettle_compiler_ice_report("Safety check resolution failed", NULL);
+      result = 1;
+      goto cleanup;
+    }
+    ir_explain_safety_totals(safety_stats.emitted, safety_stats.proved,
+                             safety_stats.hoisted, safety_stats.spanned,
+                             safety_stats.exempt, safety_stats.extent_tests,
+                             safety_stats.region_calls);
+  }
+
+  /* A deadline is a claim about the code that ships. `mettle test` ships none:
+   * it interprets an image carrying every belief re-check the mode adds, and
+   * costing that image would report a miss against a binary nobody built. The
+   * Machine rules sit out the same mode for the same reason.
+   *
+   * Costed after the checks are in, because they are on the paths being
+   * costed. A checked build read before its checks exist reports a figure for
+   * a binary nobody built, and reports it as lower than the same program
+   * without them, which is the one answer that cannot be right. */
+  if (!options->test_mode) {
+    IRDeadlineStats deadline_stats;
+    IRDeadlineCosts deadline_costs;
+    const MtlcTargetDescription *machine = mtlc_target_current_description();
+    memset(&deadline_costs, 0, sizeof(deadline_costs));
+    deadline_costs.op = machine ? machine->cost_op : 1;
+    deadline_costs.load = machine ? machine->cost_load : 4;
+    deadline_costs.store = machine ? machine->cost_store : 1;
+    deadline_costs.branch = machine ? machine->cost_branch : 1;
+    deadline_costs.multiply = machine ? machine->cost_multiply : 3;
+    deadline_costs.multiply_float = machine ? machine->cost_multiply_float : 4;
+    deadline_costs.divide = machine ? machine->cost_divide : 26;
+    deadline_costs.divide_float = machine ? machine->cost_divide_float : 14;
+    deadline_costs.call = machine ? machine->cost_call : 4;
+    deadline_costs.allocate = machine ? machine->cost_allocate : 120;
+    deadline_costs.described = options->target_desc_path != NULL;
+    int deadline_instrumented =
+        options->record_trace || options->check_overflow ||
+        options->check_tasks || options->check_effects ||
+        options->check_proofs || options->safe || ir_verify_enabled();
+    if (!ir_deadline_run(ir_program, error_reporter, &deadline_costs,
+                         options->check_deadlines, deadline_instrumented,
+                         options->report_deadlines ? stdout : NULL,
+                         &deadline_stats)) {
+      if (error_reporter_has_errors(error_reporter)) {
+        error_reporter_print_errors(error_reporter);
+      }
+      result = 1;
+      goto cleanup;
+    }
+  }
+
   if (options->emit_ptx) {
     result = compile_emit_ptx(ir_program, program, code_generator, options,
                               input_filename, output_filename, &profile);
@@ -6900,25 +6933,6 @@ int compile_file(const char *input_filename, const char *output_filename,
 
   if (options->emit_arm64) {
     result = compile_emit_arm64(ir_program, program, options, output_filename);
-    goto cleanup;
-  }
-
-  /* --native-heap: retarget new/malloc/calloc/realloc/free onto the std/alloc
-   * Mettle allocator at the IR level (before optimization, so the rewritten
-   * calls inline/optimize like any other). std/alloc is auto-injected above. */
-  if (options->native_heap && !ir_program_route_to_native_heap(ir_program)) {
-    fprintf(stderr, "Error: Failed to route allocation to the native heap\n");
-    result = 1;
-    goto cleanup;
-  }
-
-  /* --safe: describe each allocation to the runtime once the allocator is
-   * settled, so a pointer check has something to resolve against. Before
-   * optimization for the same reason the routing above is: the bookkeeping
-   * calls should inline and move like any others. */
-  if (emit_safety_checks && !ir_safety_register_allocations(ir_program)) {
-    fprintf(stderr, "Error: Failed to instrument allocations for --safe\n");
-    result = 1;
     goto cleanup;
   }
 

@@ -48,6 +48,9 @@ typedef struct {
 // - Integer constant/algebraic folding and strength reduction
 // - CSE, dead temp elimination, branch/jump CFG cleanup
 // Returns 1 on success, 0 on error.
+/* Scalar analysis keeps safety marks and loop shapes until resolution. */
+int ir_optimize_safety_analysis(IRProgram *program, int preserve_boundaries);
+
 int ir_optimize_program(IRProgram *program,
                         const IROptimizeOptions *options);
 

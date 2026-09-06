@@ -1,0 +1,4 @@
+var target: int64 = 42;
+var pointer: int64* = &target;
+fn read(p: int64*) -> int32 { return (int32)p[0]; }
+fn main() -> int32 { return read(pointer); }

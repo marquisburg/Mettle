@@ -170,6 +170,7 @@ int ir_range_has_safety_call(const IRFunction *function, size_t start,
   }
   for (size_t i = start; i < end && i < function->instruction_count; i++) {
     const IRInstruction *ins = &function->instructions[i];
+    if (ir_safety_intrinsic(ins) != IR_SAFETY_INTRINSIC_NONE) return 1;
     if (ins->op == IR_OP_CALL && ins->text &&
         strncmp(ins->text, "mettle_safety_", 14) == 0) {
       return 1;

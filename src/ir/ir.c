@@ -1080,7 +1080,11 @@ int ir_type_is_nonzero(const char *type_name) {
 }
 
 IRFunction *ir_function_create(const char *name) {
-  IRFunction *function = malloc(sizeof(IRFunction));
+  /* Zeroed first, then filled in. A field added to IRFunction and not listed
+   * below would otherwise start as whatever was on the heap, and a synthesized
+   * function would carry it: a declared deadline of a few trillion cycles is
+   * what that looks like from the outside. */
+  IRFunction *function = calloc(1, sizeof(IRFunction));
   if (!function) {
     return NULL;
   }

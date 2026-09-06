@@ -759,6 +759,14 @@ static const DecisionDoc DECISIONS[] = {
      "Fix: move the extern call out of the loop. Where the loop computes the\n"
      "values and the extern call only consumes them, split it in two: a\n"
      "vectorizable loop that fills a buffer, then one call.\n"},
+    {"memory-safety-in-body", DECISION_VECTOR_REFUSAL,
+     "The loop retains a memory safety operation",
+     "The compiler recognizes the check or pointer origin operation, but\n"
+     "cannot prove that it can move out of this loop or be removed.\n"
+     "A vector kernel must preserve that operation and the failing access.\n"
+     "\n"
+     "A fixed array extent and an affine index can expose a proof. If the\n"
+     "index or the allocation lifetime varies, keep the checked scalar loop.\n"},
     {"indirect-call", DECISION_VECTOR_REFUSAL,
      "The loop body calls through a function pointer",
      "The callee is not known until the loop runs, so there is nothing to\n"

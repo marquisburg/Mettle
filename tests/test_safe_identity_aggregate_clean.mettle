@@ -1,0 +1,15 @@
+import "std/mem";
+struct Holder { pointer: int64*; count: int64; }
+fn keep(h: Holder) -> Holder { return h; }
+fn read(h: Holder) -> int32 { return (int32)h.pointer[0]; }
+fn main() -> int32 {
+ var p: int64* = malloc(64);
+ p[0] = 42;
+ var h: Holder;
+ h.pointer = p;
+ h.count = 8;
+ var copy: Holder = keep(h);
+ var value: int32 = read(copy);
+ free(p);
+ return value;
+}

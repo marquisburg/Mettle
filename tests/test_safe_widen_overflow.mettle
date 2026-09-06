@@ -1,0 +1,16 @@
+@noinline fn total(data: int32*, n: int64) -> int64 {
+  var result: int64 = 0;
+  var i: int64 = 0;
+  while (i < n) {
+    result = result + (int64)data[i];
+    i = i + 1;
+  }
+  return result;
+}
+
+fn main() -> int32 {
+  var data: int32[1];
+  data[0] = 1;
+  // The byte count wraps to zero if widening multiplies without a guard.
+  return (int32)total(&data[0], (int64)4611686018427387904);
+}

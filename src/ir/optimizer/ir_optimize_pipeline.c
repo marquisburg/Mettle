@@ -855,6 +855,38 @@ static int ir_optimize_portable_program_pipeline(
   return ok;
 }
 
+static int ir_safety_analysis_function(IRFunction *function) {
+  static const IROptNamedPass passes[] = {
+      {"safety_narrowing", ir_drop_dead_narrowing_pass, {0, 0}},
+      {"safety_copy_constants", ir_copy_and_constant_propagation_pass, {0, 0}},
+      {"safety_coalesce", ir_coalesce_single_use_temp_assign_pass, {0, 0}},
+      {"safety_branches", ir_constant_and_branch_simplify_pass, {0, 0}},
+      {"safety_dead_temps", ir_eliminate_dead_temp_writes_pass, {0, 0}},
+  };
+  return ir_run_named_stage_fixpoint(function, passes, IR_ARRAY_COUNT(passes),
+      IR_OPT_FIXPOINT_MAX_ITERATIONS, "safety scalar analysis",
+      "Safety scalar analysis failed", 0);
+}
+
+int ir_optimize_safety_analysis(IRProgram *program, int preserve_boundaries) {
+  if (!program) return 0;
+  ir_optimize_set_program(program);
+  ir_function_index_reset();
+  ir_verify_begin_program(program);
+  int ok = ir_run_program_stage_for_each_function(program,
+                                                  ir_safety_analysis_function);
+  if (ok && !preserve_boundaries &&
+      !ir_pass_name_is_skipped("inline_small_functions")) {
+    int changed = 0;
+    ok = ir_inline_small_functions_pass(program, &changed);
+  }
+  if (ok) ok = ir_run_program_stage_for_each_function(program,
+                                                      ir_safety_analysis_function);
+  ir_verify_end_program();
+  ir_function_index_reset();
+  return ok;
+}
+
 int ir_optimize_program_pipeline(IRProgram *program,
                                  const IROptimizeOptions *options) {
   if (!program) {

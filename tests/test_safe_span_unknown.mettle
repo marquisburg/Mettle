@@ -1,0 +1,52 @@
+// A loop whose index the analysis cannot settle keeps a per-access check, but
+// resolves the allocation once at the top and compares against that extent.
+//
+// The resolution comes back empty for a pointer with no origin and for one
+// whose allocation is gone. Both have to reach the full check: an extent of
+// zero compared the wrong way lets every access in the loop through, and a
+// loop is exactly where that costs the most.
+//
+// Argument 2 walks a foreign pointer, argument 3 walks a freed one.
+import "std/io";
+import "std/mem";
+extern fn find_char(text: cstring, ch: int32) -> cstring = "strchr";
+
+@noinline fn walk(p: cstring, index: int32*, n: int64) -> int64 {
+  var total: int64 = 0;
+  var i: int64 = 0;
+  while (i < n) {
+    total = total + (int64)p[index[i]];
+    i = i + 1;
+  }
+  return total;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var index: int32* = malloc(3 * 4);
+  index[0] = 0;
+  index[1] = 1;
+  index[2] = 2;
+
+  var stale: cstring = malloc(8);
+  stale[0] = 1;
+  stale[1] = 2;
+  stale[2] = 3;
+
+  var picked: int32 = 0;
+  if (argc > 1) {
+    picked = (int32)argv[1][0];
+  }
+  var got: int64 = 0;
+  if (picked == 51) {
+    free(stale);
+    got = walk(stale, index, 3);
+  } else {
+    got = walk(find_char("abcdef", 98), index, 3);
+  }
+
+  print("unreached=");
+  println("{got}");
+  free(index);
+  free(stale);
+  return 0;
+}

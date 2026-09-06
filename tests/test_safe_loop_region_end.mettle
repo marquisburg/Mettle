@@ -1,0 +1,19 @@
+import "std/mem";
+
+@noinline fn read_and_end(p: cstring, n: int64) -> int64 {
+  var result: int64 = 0;
+  var i: int64 = 0;
+  while (i < n) {
+    result = result + (int64)p[i];
+    memory_region_end(p);
+    i = i + 1;
+  }
+  return result;
+}
+
+fn main() -> int32 {
+  var p: cstring = malloc(16);
+  p[0] = 1;
+  p[1] = 2;
+  return (int32)read_and_end(p, 2);
+}

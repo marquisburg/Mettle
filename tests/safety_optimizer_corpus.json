@@ -1,0 +1,1235 @@
+{
+  "schema": 1,
+  "flags": [
+    "--release",
+    "--safe"
+  ],
+  "baseline_compiler_sha256": "961b58739bc3e0af13db1a7c43b415fef2a081e4776ce4e17e3c7083de68576d",
+  "cases": [
+    {
+      "source": "tests/test_safe_affine_clean.mettle",
+      "sha256": "3243015d0084821d2296491b6804f36ce9078e0d80b49c74107b194be6468573",
+      "baseline": {
+        "accesses": 41,
+        "proved": 0,
+        "hoisted": 2,
+        "spanned": 32,
+        "extentTests": 0,
+        "regionCalls": 7
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 0,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_affine_short.mettle",
+      "sha256": "dfa7a7cdf99b5df8c89448d0c394c0b2a8feb83ac07208f7c1390b903d912f3e",
+      "baseline": {
+        "accesses": 43,
+        "proved": 0,
+        "hoisted": 2,
+        "spanned": 32,
+        "extentTests": 0,
+        "regionCalls": 9
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 4 bytes at offset 256 of a 256 byte allocation (line 18)"
+        },
+        {
+          "args": [
+            "2"
+          ],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 4 bytes at offset 256 of a 256 byte allocation (line 28)"
+        },
+        {
+          "args": [
+            "3"
+          ],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 4 bytes at offset 256 of a 256 byte allocation (line 38)"
+        },
+        {
+          "args": [
+            "4"
+          ],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 4 bytes at offset 284 of a 256 byte allocation (line 48)"
+        },
+        {
+          "args": [
+            "5"
+          ],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 4 bytes at offset 256 of a 256 byte allocation (line 59)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_bounds_negative.mettle",
+      "sha256": "b65de08561934e59d6e1f6d5367c9a5b49440c8003eef27f1807525f7c71b141",
+      "baseline": {
+        "accesses": 1,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 0,
+        "extentTests": 1,
+        "regionCalls": 0
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: `arr[]` is outside its bounds"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_bounds_overflow.mettle",
+      "sha256": "4cc4f040c2f52fc1a1f94f70439525d1d00ffc4362543793df1111030feb0507",
+      "baseline": {
+        "accesses": 1,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 0,
+        "extentTests": 1,
+        "regionCalls": 0
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: `arr[]` is outside its bounds"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_call_clean.mettle",
+      "sha256": "55b2ad006cfec8420c677b68b126c9c278a20d24bc3c9cb37787dde0013f5779",
+      "baseline": {
+        "accesses": 35,
+        "proved": 0,
+        "hoisted": 4,
+        "spanned": 29,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 0,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_call_frees.mettle",
+      "sha256": "0135fa3bd3c35b77f5db630e87ab0a7646b8b7013e6f3067cd74aa41784a9b86",
+      "baseline": {
+        "accesses": 32,
+        "proved": 0,
+        "hoisted": 2,
+        "spanned": 27,
+        "extentTests": 0,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: use of memory after it was freed: 4 bytes at offset 16 of a 128 byte allocation (line 28)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_call_short.mettle",
+      "sha256": "ece09bfea727f78c3d3b11177dab4f48a0f11364f0a17b8b9729a1af044a9464",
+      "baseline": {
+        "accesses": 32,
+        "proved": 0,
+        "hoisted": 2,
+        "spanned": 28,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 4 bytes at offset 64 of a 64 byte allocation (line 18)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_clean.mettle",
+      "sha256": "295301415de057c8c90c2e54309b8a3b5fc2d817793112a30e6a5a83aca61c0d",
+      "baseline": {
+        "accesses": 29,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 2,
+        "regionCalls": 4
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 98,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_dead_ctor_local.mettle",
+      "sha256": "e173cad47b50e45160b7492b2cbcd5e4d50fc1612691c6f0564cca139cdaedca",
+      "baseline": {
+        "accesses": 0,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 0,
+        "extentTests": 0,
+        "regionCalls": 0
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 0,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_global_clean.mettle",
+      "sha256": "a08e5a44e3978f11518ff47b78ace3412df24748380a8cce926f1c532eea2c5c",
+      "baseline": {
+        "accesses": 12,
+        "proved": 3,
+        "hoisted": 2,
+        "spanned": 3,
+        "extentTests": 1,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 9,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_global_pointer.mettle",
+      "sha256": "237c4a71381021a1b347b580111ae17fe2e85534981b6d3d699e0764fe372aa7",
+      "baseline": {
+        "accesses": 10,
+        "proved": 2,
+        "hoisted": 2,
+        "spanned": 3,
+        "extentTests": 0,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 4 bytes at offset 256 of a 16 byte allocation (line 9)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_heap_clean.mettle",
+      "sha256": "095b1ac501f5851a9b01c6fba63ed65a30c4baf982e144b66794db3795ad8189",
+      "baseline": {
+        "accesses": 29,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 25,
+        "extentTests": 0,
+        "regionCalls": 4
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 18,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_heap_overflow.mettle",
+      "sha256": "3e35955e7a44cd334fcce066491c9bc9049e3cfc3d8cd07b57a7c8d229038124",
+      "baseline": {
+        "accesses": 25,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 1 bytes at offset 16 of a 16 byte allocation (line 14)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_hoist_branchy.mettle",
+      "sha256": "922592e49941b8a99eafe06cdad18f84611fa695b882ecb1f080be6d0c3fa685",
+      "baseline": {
+        "accesses": 10,
+        "proved": 1,
+        "hoisted": 2,
+        "spanned": 4,
+        "extentTests": 1,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 4 bytes at offset 32 of a 32 byte allocation (line 11)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_hoist_break_clean.mettle",
+      "sha256": "02051c300b028e8e16dded7906c082035a27a86da52b8588b03046b7d31d0ef7",
+      "baseline": {
+        "accesses": 10,
+        "proved": 1,
+        "hoisted": 2,
+        "spanned": 4,
+        "extentTests": 1,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 0,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_hoist_clean.mettle",
+      "sha256": "92622289a9cc45ec150f8643ab8eea3b4110332ca4123a67a2e9c8a5fdb0df8f",
+      "baseline": {
+        "accesses": 32,
+        "proved": 0,
+        "hoisted": 4,
+        "spanned": 26,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 17,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_hoist_conditional_clean.mettle",
+      "sha256": "45af1df573c360052d7469a6221583f9e3f09cd38bf5a35d8654630f7d78ba86",
+      "baseline": {
+        "accesses": 10,
+        "proved": 1,
+        "hoisted": 2,
+        "spanned": 4,
+        "extentTests": 1,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 0,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_hoist_counters.mettle",
+      "sha256": "c75b60e9cf2a4f22cf5aeb180f53e5fff960b7af030d0f791d92c5bdc6fcdaa8",
+      "baseline": {
+        "accesses": 39,
+        "proved": 0,
+        "hoisted": 10,
+        "spanned": 26,
+        "extentTests": 0,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 61,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_hoist_counters_short.mettle",
+      "sha256": "2ac50bef8604f7178dd1e934a60d741895ee136e4b413ae0233fbc8673b47493",
+      "baseline": {
+        "accesses": 38,
+        "proved": 0,
+        "hoisted": 10,
+        "spanned": 26,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 77 bytes at offset 3 of a 79 byte allocation (line 15)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_aggregate_clean.mettle",
+      "sha256": "ab2003be19676a3d72f5fd67de4db73eab58a19b15122ceca8984e86fc61d9e4",
+      "baseline": {
+        "accesses": 25,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 42,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_aggregate_stale.mettle",
+      "sha256": "99c862771253f159e33cd25187f89c4ab0ad674226fe82608955a3598cc48f57",
+      "baseline": {
+        "accesses": 25,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: use of memory after it was freed: 8 bytes at offset 0 of a 64 byte allocation (line 4)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_allocator_clean.mettle",
+      "sha256": "81c95abcf24822d81128666c821e9d0892f2149855aab395429d2da3bc4abe38",
+      "baseline": {
+        "accesses": 25,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 42,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_allocator_stale.mettle",
+      "sha256": "194c9c906b39f4dd17189228e8620af5e74c34ee8efd3679e00062f322ff9343",
+      "baseline": {
+        "accesses": 25,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: use of memory after it was freed: 8 bytes at offset 0 of a 64 byte allocation (line 8)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_byte_copy.mettle",
+      "sha256": "8a5bfae3978905cf46d0d20d01245137ead6e8c979598b0871ac6e0fe4d034ec",
+      "baseline": {
+        "accesses": 27,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 25,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: use of memory after it was freed: 8 bytes at offset 0 of a 64 byte allocation (line 17)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_call.mettle",
+      "sha256": "200525c65cc237a90fc63e14114066539df1442de3508a629968d63dd1b23598",
+      "baseline": {
+        "accesses": 26,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: use of memory after it was freed: 8 bytes at offset 0 of a 64 byte allocation (line 4)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_clean.mettle",
+      "sha256": "8264c03f0965eec4d8a97fd99b8a1f933ebf2eb0bfc06f441d48800a67f91aa3",
+      "baseline": {
+        "accesses": 27,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 4
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 42,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_copy.mettle",
+      "sha256": "3792fd873d3dad3f15c16171f24394580bccc97808908ce56d5f35de2c2ea3a0",
+      "baseline": {
+        "accesses": 27,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 4
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: use of memory after it was freed: 8 bytes at offset 0 of a 64 byte allocation (line 4)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_derived.mettle",
+      "sha256": "29cd06f29720074dbf184024470a1f2c95924dacb2f62bf1985da6d49cc983de",
+      "baseline": {
+        "accesses": 24,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 1
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 8 bytes at offset 0 of a 32 byte allocation (line 3)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_double_free.mettle",
+      "sha256": "c78de3fc6b2574d742818f679adafbd1b1040a9a4238c064c5f7a60dee5a4d58",
+      "baseline": {
+        "accesses": 23,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 0
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: free of memory after it was freed: 0 bytes at offset 0 of a 64 byte allocation"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_field.mettle",
+      "sha256": "0cb7a976933037b4e540c47d81d07d493ae5c65698e8641fe9bb6d8312c0d2a6",
+      "baseline": {
+        "accesses": 27,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 4
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: use of memory after it was freed: 8 bytes at offset 0 of a 64 byte allocation (line 4)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_foreign.mettle",
+      "sha256": "d19cec02bb632c6e5d8ce965ad1a53fa71832ea17cf7cbb514f78bfc47369b2f",
+      "baseline": {
+        "accesses": 24,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 1
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 98,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_foreign_overflow.mettle",
+      "sha256": "7eee690ff9d03df4c8b608e652049213083d3f7a5a350da80fa4fd5733626be5",
+      "baseline": {
+        "accesses": 24,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 1
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 1 bytes at offset 2 of a 2 byte allocation (line 6)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_foreign_stale.mettle",
+      "sha256": "13430c5a0260453aeeaf5b093652d4f95fd5802511505590c956affa64f583f6",
+      "baseline": {
+        "accesses": 24,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 1
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: use of memory after it was freed: 1 bytes at offset 0 of a 0 byte allocation (line 8)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_global_clean.mettle",
+      "sha256": "12187ceb262ab2527508bf648e765802c70ae24238338a1e613e38e084a97b4d",
+      "baseline": {
+        "accesses": 1,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 0,
+        "extentTests": 0,
+        "regionCalls": 1
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 42,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_indirect.mettle",
+      "sha256": "536477ea025b0cbbd40654f7eddeaf8bce6276025bbcc1b56b60e46347bc4781",
+      "baseline": {
+        "accesses": 26,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: use of memory after it was freed: 8 bytes at offset 0 of a 64 byte allocation (line 12)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_literal.mettle",
+      "sha256": "13217e2b51767f930cb67006b94878849b531379ef80a87137451bef4ffa3984",
+      "baseline": {
+        "accesses": 1,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 0,
+        "extentTests": 0,
+        "regionCalls": 1
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 194,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_memcpy.mettle",
+      "sha256": "34abffc56b3abd0883b3e05f768d140431161c04e7357dd67bb1fdb730c3c336",
+      "baseline": {
+        "accesses": 27,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 4
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: use of memory after it was freed: 8 bytes at offset 0 of a 64 byte allocation (line 4)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_memcpy_overflow.mettle",
+      "sha256": "bd1944e4ff4bb8ece5c074525c9cc11fb010bbbfce419d1dfc91c3c76ef567a2",
+      "baseline": {
+        "accesses": 23,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 0
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 32 bytes at offset 0 of a 16 byte allocation (line 4)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_realloc.mettle",
+      "sha256": "8d907a9c456a78bf88aef7d15c562f7fea3e3e8a58943a394f16f2ce31b7d43d",
+      "baseline": {
+        "accesses": 26,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: use of memory after it was freed: 8 bytes at offset 0 of a 64 byte allocation (line 10)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_return_clean.mettle",
+      "sha256": "b4e572e3b9dc5134cb0105c8c048e360718c64704c3f0cf42e0ea83332b61880",
+      "baseline": {
+        "accesses": 26,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 42,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_stack_reuse.mettle",
+      "sha256": "352c2d2c334a0b10b4c7ad1031ee84befbea2c754005d968ea1a26571ebbd0f4",
+      "baseline": {
+        "accesses": 3,
+        "proved": 2,
+        "hoisted": 0,
+        "spanned": 0,
+        "extentTests": 0,
+        "regionCalls": 1
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: use of memory after it was freed: 8 bytes at offset 0 of a 0 byte allocation (line 7)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_static_free.mettle",
+      "sha256": "6b7a75e5c8258b89a15e9e9a6e9f204257e79fcbd13d1aae876dd99482437323",
+      "baseline": {
+        "accesses": 24,
+        "proved": 1,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 0
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: free of stack or global memory: 0 bytes at offset 0 of a 32 byte allocation"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_string_clean.mettle",
+      "sha256": "e0b6ca9085fbed53695453c460539ce98b48f7fbefa1e75ffbf00b77254e10e4",
+      "baseline": {
+        "accesses": 25,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 217,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_identity_unknown.mettle",
+      "sha256": "66f99a331baff1ca31cae276aec9f7ab9016deff3e8611b3bd3c60d60fc0093a",
+      "baseline": {
+        "accesses": 1,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 0,
+        "extentTests": 0,
+        "regionCalls": 1
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access has no tracked allocation identity: 1 bytes at offset 0 (line 5)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_masked_index.mettle",
+      "sha256": "146e89f66ebb15015e0c0b6a61d3150b109f19fe80e0566b135deb4118568622",
+      "baseline": {
+        "accesses": 36,
+        "proved": 0,
+        "hoisted": 7,
+        "spanned": 26,
+        "extentTests": 0,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 41,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_masked_index_short.mettle",
+      "sha256": "fe8ae0554abee002cdf9ec61e875211300ac6e7ad6639fac4c3f9a7320de1918",
+      "baseline": {
+        "accesses": 36,
+        "proved": 0,
+        "hoisted": 7,
+        "spanned": 26,
+        "extentTests": 0,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 64 bytes at offset 0 of a 63 byte allocation (line 10)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_realloc_stale.mettle",
+      "sha256": "336f280f0fb8355e943b9d8121b89317763e37f897d226d18b5590aa0f14fb41",
+      "baseline": {
+        "accesses": 26,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: use of memory after it was freed: 1 bytes at offset 0 of a 16 byte allocation (line 13)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_stack_clean.mettle",
+      "sha256": "d770e82a71232077c3c7f5dbcf556d8fef9fc38b493f45b15ae48fab5e59e307",
+      "baseline": {
+        "accesses": 18,
+        "proved": 9,
+        "hoisted": 2,
+        "spanned": 3,
+        "extentTests": 1,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1021,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_stack_neighbours.mettle",
+      "sha256": "da179aeffb1b8e4c7c843c1fd052f803600ff11f3a1276eacfe5b62c9120cb27",
+      "baseline": {
+        "accesses": 14,
+        "proved": 6,
+        "hoisted": 2,
+        "spanned": 3,
+        "extentTests": 0,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 4 bytes at offset 8 of a 8 byte allocation (line 13)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_stack_pointer.mettle",
+      "sha256": "c60f574aa0f7d0e43527a3deece7ef167407442e7b3f7eada1d49c254a1e5583",
+      "baseline": {
+        "accesses": 10,
+        "proved": 2,
+        "hoisted": 2,
+        "spanned": 3,
+        "extentTests": 0,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 4 bytes at offset 256 of a 16 byte allocation (line 8)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_use_after_free.mettle",
+      "sha256": "6b6767bf5ae8768dbe5bcfc7b09edf35224197ded60221aa4eece2ccf7d910c0",
+      "baseline": {
+        "accesses": 25,
+        "proved": 0,
+        "hoisted": 0,
+        "spanned": 23,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: use of memory after it was freed: 1 bytes at offset 0 of a 16 byte allocation (line 10)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_vec_dot.mettle",
+      "sha256": "bd583cf227479cc552d9ea210c2ba281bad9e9760dc84a8cf7971c880edd0773",
+      "baseline": {
+        "accesses": 34,
+        "proved": 0,
+        "hoisted": 6,
+        "spanned": 26,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 512 bytes at offset 0 of a 256 byte allocation (line 18)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_vec_fill.mettle",
+      "sha256": "cfc207c8ea4dbddedc77b62a2d62682ccdaffd1a0b82e90b7db1bae074393f51",
+      "baseline": {
+        "accesses": 33,
+        "proved": 0,
+        "hoisted": 3,
+        "spanned": 26,
+        "extentTests": 0,
+        "regionCalls": 4
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 512 bytes at offset 0 of a 256 byte allocation (line 9)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_vec_map.mettle",
+      "sha256": "1f859f40e96bd52e1ca2bd97530488731d5295fdadd6e865acfe8851a2d645e6",
+      "baseline": {
+        "accesses": 35,
+        "proved": 0,
+        "hoisted": 5,
+        "spanned": 26,
+        "extentTests": 0,
+        "regionCalls": 4
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 512 bytes at offset 0 of a 256 byte allocation (line 10)"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_safe_vec_sum.mettle",
+      "sha256": "49e97398e62866607b2302eed182b464d9d4a16d65fbf7f548c672f2e1cc29ca",
+      "baseline": {
+        "accesses": 32,
+        "proved": 0,
+        "hoisted": 4,
+        "spanned": 26,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 1,
+          "fatal": "Fatal error: memory access outside its allocation: 512 bytes at offset 0 of a 256 byte allocation (line 10)"
+        }
+      ]
+    },
+    {
+      "source": "examples/dot_product/dot_product.mettle",
+      "sha256": "cd0a238c8e61b2d5e25dd71f39ebc225807885cee142fdd4bc3030a7963968bc",
+      "baseline": {
+        "accesses": 34,
+        "proved": 0,
+        "hoisted": 6,
+        "spanned": 26,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 0,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "examples/base64_encode/base64_encode.mettle",
+      "sha256": "e82c4e91c3107ded46748d3832674aa17c3344b6cffc50b02a47375b9a32214c",
+      "baseline": {
+        "accesses": 57,
+        "proved": 0,
+        "hoisted": 13,
+        "spanned": 26,
+        "extentTests": 0,
+        "regionCalls": 18
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 0,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "examples/heapsort/heapsort.mettle",
+      "sha256": "f39e65d6f07c0d99a9138916640628c92e24363e2a5e7f2d3d2c3809e8d1b580",
+      "baseline": {
+        "accesses": 54,
+        "proved": 9,
+        "hoisted": 4,
+        "spanned": 39,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 0,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "examples/crc32/crc32.mettle",
+      "sha256": "39384e2465e4247b89b6f5d6dde97592427ffed50cedbb27920634d8d9d27873",
+      "baseline": {
+        "accesses": 31,
+        "proved": 0,
+        "hoisted": 3,
+        "spanned": 26,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 0,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "examples/binary_search/binary_search.mettle",
+      "sha256": "48877c7e21302499bb7f094683a81fe862041396ee87e9868bdce09d269c0edf",
+      "baseline": {
+        "accesses": 33,
+        "proved": 0,
+        "hoisted": 3,
+        "spanned": 27,
+        "extentTests": 0,
+        "regionCalls": 3
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 0,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "examples/sort_insertion/sort_insertion.mettle",
+      "sha256": "f2a507cc325277fad16c63ae14501f1c16bde467f62d09d1af3dcede2fa7fd7e",
+      "baseline": {
+        "accesses": 45,
+        "proved": 9,
+        "hoisted": 2,
+        "spanned": 28,
+        "extentTests": 0,
+        "regionCalls": 6
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 0,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "examples/transpose/transpose.mettle",
+      "sha256": "0e38f2f66727ac17ed5cab0d28dfd0036fe24d6d6056451b14de2ccbfac02d31",
+      "baseline": {
+        "accesses": 35,
+        "proved": 0,
+        "hoisted": 2,
+        "spanned": 31,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 0,
+          "fatal": null
+        }
+      ]
+    },
+    {
+      "source": "examples/aos_sum/aos_sum.mettle",
+      "sha256": "387d1147b0315152cc05cd3368597d9fd81831dca4217b30a2031ee48f5b64c6",
+      "baseline": {
+        "accesses": 42,
+        "proved": 0,
+        "hoisted": 2,
+        "spanned": 38,
+        "extentTests": 0,
+        "regionCalls": 2
+      },
+      "runs": [
+        {
+          "args": [],
+          "exit": 0,
+          "fatal": null
+        }
+      ]
+    }
+  ]
+}

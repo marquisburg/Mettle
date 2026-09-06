@@ -4969,7 +4969,10 @@ try {
   $rec = Join-Path $tmpDir "desk_recorded.exe"
   $trace = Join-Path $tmpDir "desk.trace"
   $out = & $CompilerPath --build "examples/desk/desk.mettle" -o $rec --record-trace 2>&1 | Out-String
-  if ($LASTEXITCODE -ne 0) { throw "the recording build failed: $out" }
+  $recExit = $LASTEXITCODE
+  if ($recExit -ne 0 -or -not (Test-Path $rec)) {
+    throw "the recording build failed (exit $recExit, built $(Test-Path $rec)): $out"
+  }
   $env:METTLE_TRACE = $trace
   & $rec offline | Out-Null
   Remove-Item Env:METTLE_TRACE
@@ -6850,6 +6853,31 @@ try {
       "test_safe_identity_static_free" = "free of stack or global memory"
       "test_safe_identity_derived" = "outside its allocation"
       "test_safe_identity_memcpy_overflow" = "outside its allocation"
+      "test_safe_identity_byte_copy" = "after it was freed"
+      "test_safe_identity_aggregate_stale" = "after it was freed"
+      "test_safe_identity_allocator_stale" = "after it was freed"
+      "test_safe_identity_unknown" = "no tracked allocation identity"
+      "test_safe_identity_foreign_stale" = "after it was freed"
+      "test_safe_identity_foreign_overflow" = "outside its allocation"
+    }
+    $validIdentity = @{
+      "test_safe_identity_clean" = 42
+      "test_safe_identity_aggregate_clean" = 42
+      "test_safe_identity_return_clean" = 42
+      "test_safe_identity_allocator_clean" = 42
+      "test_safe_identity_global_clean" = 42
+      "test_safe_identity_literal" = 194
+      "test_safe_identity_foreign" = 98
+      "test_safe_identity_string_clean" = 217
+    }
+    foreach ($case in $validIdentity.Keys) {
+      $exe = Join-Path $tmpDir "$case.$allocator.exe"
+      $build = & $CompilerPath --build --safe --release @extra "tests/$case.mettle" -o $exe 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) { throw "--safe build of $case failed: $build" }
+      $output = & $exe 2>&1 | Out-String
+      if ($LASTEXITCODE -ne $validIdentity[$case]) {
+        throw "$case failed on ${allocator}: expected $($validIdentity[$case]), got $LASTEXITCODE`n$output"
+      }
     }
     foreach ($case in $bad.Keys) {
       $exe = Join-Path $tmpDir "$case.$allocator.exe"
@@ -6871,6 +6899,68 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "safe_mode_heap" -Passed $false -Reason $_.Exception.Message
+}
+
+
+# The optimizer half of --safe, measured rather than described. The runner
+# checks that the two vectorized fixtures still vectorize, that the targeted
+# regressions still trap, and that every source in the fixed audit corpus
+# reports the same diagnostic it reported when the corpus was recorded.
+#
+# The corpus is the part worth having: a resolution that quietly stops proving
+# what it used to prove costs speed and nothing else, but one that quietly
+# stops checking what it used to check looks exactly the same from outside.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $safetyOptPython = Get-Command python -ErrorAction SilentlyContinue
+  if (-not $safetyOptPython) {
+    $safetyOptPython = Get-Command python3 -ErrorAction SilentlyContinue
+  }
+  if (-not $safetyOptPython) {
+    Write-CaseResult -Name "safe_mode_optimizer_corpus" -Passed $true `
+      -Reason "python not found; skipped"
+  }
+  else {
+    $safetyOptOut = & $safetyOptPython.Source "tests/run_safety_optimizer.py" `
+      --compiler $CompilerPath --output (Join-Path $tmpDir "safety-optimizer") 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "the --safe optimizer corpus changed:`n$safetyOptOut"
+    }
+    Write-CaseResult -Name "safe_mode_optimizer_corpus" -Passed $true
+  }
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "safe_mode_optimizer_corpus" -Passed $false -Reason $_.Exception.Message
+}
+
+# Every valid and invalid pointer flow, in both build modes and on both
+# allocators. The compiled cases above cover the release path on each
+# allocator; this covers the other two corners of the same grid.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $safetyIdPython = Get-Command python -ErrorAction SilentlyContinue
+  if (-not $safetyIdPython) {
+    $safetyIdPython = Get-Command python3 -ErrorAction SilentlyContinue
+  }
+  if (-not $safetyIdPython) {
+    Write-CaseResult -Name "safe_mode_pointer_identity" -Passed $true `
+      -Reason "python not found; skipped"
+  }
+  else {
+    $safetyIdOut = & $safetyIdPython.Source "tests/run_safety_identity.py" `
+      --compiler $CompilerPath --output (Join-Path $tmpDir "safety-identity") 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "a pointer identity case changed:`n$safetyIdOut"
+    }
+    Write-CaseResult -Name "safe_mode_pointer_identity" -Passed $true
+  }
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "safe_mode_pointer_identity" -Passed $false -Reason $_.Exception.Message
 }
 
 
