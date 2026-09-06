@@ -40,6 +40,77 @@ static void type_checker_constant_from_float(TypeCheckerConstant *value,
   value->float_value = float_value;
 }
 
+/* The width and signedness a cast to this type converts to, or 0 when the type
+ * is not one an integer constant can land in. */
+static int type_checker_integer_type_shape(const Type *type, int *bits_out,
+                                           int *is_signed_out) {
+  int bits = 0;
+  int is_signed = 0;
+
+  if (!type) {
+    return 0;
+  }
+  switch (type->kind) {
+  case TYPE_INT8: bits = 8; is_signed = 1; break;
+  case TYPE_INT16: bits = 16; is_signed = 1; break;
+  case TYPE_INT32: bits = 32; is_signed = 1; break;
+  case TYPE_INT64: bits = 64; is_signed = 1; break;
+  case TYPE_UINT8: bits = 8; break;
+  case TYPE_UINT16: bits = 16; break;
+  case TYPE_UINT32: bits = 32; break;
+  case TYPE_UINT64: bits = 64; break;
+  case TYPE_BOOL: bits = 8; break;
+  case TYPE_CHAR: bits = 8; break;
+  default:
+    return 0;
+  }
+  *bits_out = bits;
+  *is_signed_out = is_signed;
+  return 1;
+}
+
+/* Fold the result of `expression` the way the machine would leave it.
+ *
+ * Arithmetic wraps at the expression's own type, and the constant evaluator
+ * worked in 64 bits and never cut back, so a `const` and the same expression
+ * written at run time gave different answers: `(uint8)2 - (uint8)249` is 9 on
+ * the machine and folded to -247, `(int8)100 + (int8)100` is -56 and folded to
+ * 200, and an untyped `2147483647 + 1`, which is int32 like every untyped
+ * integer literal, folded to 2147483648. */
+static void type_checker_wrap_constant_to_expression_type(
+    TypeChecker *checker, ASTNode *expression, TypeCheckerConstant *value);
+
+static long long type_checker_wrap_integer(long long value, int bits,
+                                           int is_signed) {
+  unsigned long long mask = bits >= 64
+                                ? ~0ULL
+                                : ((1ULL << bits) - 1ULL);
+  unsigned long long bits_value = (unsigned long long)value & mask;
+
+  if (is_signed && bits < 64 &&
+      (bits_value & (1ULL << (bits - 1))) != 0ULL) {
+    return (long long)(bits_value | ~mask);
+  }
+  return (long long)bits_value;
+}
+
+static void type_checker_wrap_constant_to_expression_type(
+    TypeChecker *checker, ASTNode *expression, TypeCheckerConstant *value) {
+  Type *type = NULL;
+  int bits = 0;
+  int is_signed = 0;
+
+  if (!checker || !expression || !value || value->is_float) {
+    return;
+  }
+  type = type_checker_infer_type(checker, expression);
+  if (!type || !type_checker_integer_type_shape(type, &bits, &is_signed)) {
+    return;
+  }
+  type_checker_constant_from_int(
+      value, type_checker_wrap_integer(value->int_value, bits, is_signed));
+}
+
 static int type_checker_eval_numeric_constant(TypeChecker *checker,
                                               ASTNode *expression,
                                               TypeCheckerConstant *out_value) {
@@ -48,6 +119,50 @@ static int type_checker_eval_numeric_constant(TypeChecker *checker,
   }
 
   switch (expression->type) {
+  /* `(int8)(-51)` is as constant as `-51`, and writing the type is how a
+   * program says which one it means. Without this case every constant context
+   * -- a `const` initializer, an array size, a `case` label, static_assert --
+   * rejected a cast with "must be a compile-time integer constant
+   * expression", which is exactly what it is. */
+  case AST_CAST_EXPRESSION: {
+    CastExpression *cast = (CastExpression *)expression->data;
+    TypeCheckerConstant operand = {0};
+    Type *target = NULL;
+    int bits = 0;
+    int is_signed = 0;
+
+    if (!cast || !cast->type_name || !cast->operand || !checker ||
+        !type_checker_eval_numeric_constant(checker, cast->operand,
+                                            &operand)) {
+      return 0;
+    }
+    target = type_checker_get_type_by_name(checker, cast->type_name);
+    if (!target) {
+      return 0;
+    }
+    if (type_checker_is_floating_type(target)) {
+      double value = operand.is_float ? operand.float_value
+                                      : (double)operand.int_value;
+      if (target->kind == TYPE_FLOAT32) {
+        value = (double)(float)value;
+      }
+      type_checker_constant_from_float(out_value, value);
+      return 1;
+    }
+    if (!type_checker_integer_type_shape(target, &bits, &is_signed)) {
+      return 0;
+    }
+    {
+      /* A float to an integer rounds toward zero, the same direction the
+       * generated cast takes. */
+      long long value = operand.is_float ? (long long)operand.float_value
+                                         : operand.int_value;
+      type_checker_constant_from_int(
+          out_value, type_checker_wrap_integer(value, bits, is_signed));
+    }
+    return 1;
+  }
+
   case AST_NUMBER_LITERAL: {
     NumberLiteral *literal = (NumberLiteral *)expression->data;
     if (!literal || literal->is_float) {
@@ -165,6 +280,8 @@ static int type_checker_eval_numeric_constant(TypeChecker *checker,
         type_checker_constant_from_float(out_value, -operand.float_value);
       } else {
         type_checker_constant_from_int(out_value, -operand.int_value);
+        type_checker_wrap_constant_to_expression_type(checker, expression,
+                                                      out_value);
       }
       return 1;
     }
@@ -176,6 +293,8 @@ static int type_checker_eval_numeric_constant(TypeChecker *checker,
     }
     if (strcmp(unary_expr->operator, "~") == 0 && !operand.is_float) {
       type_checker_constant_from_int(out_value, ~operand.int_value);
+      type_checker_wrap_constant_to_expression_type(checker, expression,
+                                                    out_value);
       return 1;
     }
     return 0;
@@ -289,62 +408,115 @@ static int type_checker_eval_numeric_constant(TypeChecker *checker,
 
     long long left_value = left.int_value;
     long long right_value = right.int_value;
-    if (strcmp(binary_expr->operator, "+") == 0) {
-      type_checker_constant_from_int(out_value, left_value + right_value);
+    unsigned long long left_bits = (unsigned long long)left_value;
+    unsigned long long right_bits = (unsigned long long)right_value;
+    const char *operator = binary_expr->operator;
+    /* The width this expression's result lives in, when it can be worked out.
+     * Every arithmetic fold below wraps to it, because that is what the
+     * machine leaves behind and a `const` that says otherwise is a different
+     * program from the same expression written at run time. Without a shape
+     * the folds keep the guards they had, which decline rather than guess. */
+    int bits = 0;
+    int is_signed = 0;
+    Type *result_type = checker ? type_checker_infer_type(checker, expression)
+                                : NULL;
+    int shaped =
+        type_checker_integer_type_shape(result_type, &bits, &is_signed);
+
+    if (strcmp(operator, "+") == 0 || strcmp(operator, "-") == 0 ||
+        strcmp(operator, "*") == 0) {
+      unsigned long long folded = operator[0] == '+' ? left_bits + right_bits
+                                 : operator[0] == '-' ? left_bits - right_bits
+                                                      : left_bits * right_bits;
+      type_checker_constant_from_int(out_value, (long long)folded);
+      if (shaped) {
+        type_checker_constant_from_int(
+            out_value, type_checker_wrap_integer((long long)folded, bits,
+                                                 is_signed));
+      }
       return 1;
     }
-    if (strcmp(binary_expr->operator, "-") == 0) {
-      type_checker_constant_from_int(out_value, left_value - right_value);
-      return 1;
-    }
-    if (strcmp(binary_expr->operator, "*") == 0) {
-      type_checker_constant_from_int(out_value, left_value * right_value);
-      return 1;
-    }
-    if (strcmp(binary_expr->operator, "/") == 0) {
+    if (strcmp(operator, "/") == 0 || strcmp(operator, "%") == 0) {
+      long long quotient = 0;
       if (right_value == 0) {
         return 0;
       }
-      type_checker_constant_from_int(out_value, left_value / right_value);
-      return 1;
-    }
-    if (strcmp(binary_expr->operator, "%") == 0) {
-      if (right_value == 0) {
-        return 0;
+      if (shaped && !is_signed) {
+        unsigned long long l = (unsigned long long)type_checker_wrap_integer(
+            left_value, bits, 0);
+        unsigned long long r = (unsigned long long)type_checker_wrap_integer(
+            right_value, bits, 0);
+        if (r == 0) {
+          return 0;
+        }
+        quotient = (long long)(operator[0] == '/' ? l / r : l % r);
+      } else {
+        /* The signed minimum over -1 has no result to fold; the machine
+         * faults on it. */
+        if (left_value == LLONG_MIN && right_value == -1) {
+          return 0;
+        }
+        quotient = operator[0] == '/' ? left_value / right_value
+                                      : left_value % right_value;
       }
-      type_checker_constant_from_int(out_value, left_value % right_value);
+      type_checker_constant_from_int(out_value, quotient);
+      if (shaped) {
+        type_checker_constant_from_int(
+            out_value, type_checker_wrap_integer(quotient, bits, is_signed));
+      }
       return 1;
     }
     /* Bitwise and shift folding. These are how a byte constant is usually
      * written -- `1 << 7`, `0xF0 | 0x0F` -- so leaving them unfolded would
-     * make the range check refuse constants that plainly fit. A shift count
-     * at or past the width has no defined value to fold, so it is declined
-     * (the caller then treats the expression as non-constant). */
-    if (strcmp(binary_expr->operator, "&") == 0) {
-      type_checker_constant_from_int(out_value, left_value & right_value);
+     * make the range check refuse constants that plainly fit. */
+    if (strcmp(operator, "&") == 0 || strcmp(operator, "|") == 0 ||
+        strcmp(operator, "^") == 0) {
+      unsigned long long folded = operator[0] == '&' ? left_bits & right_bits
+                                 : operator[0] == '|' ? left_bits | right_bits
+                                                      : left_bits ^ right_bits;
+      type_checker_constant_from_int(out_value, (long long)folded);
+      if (shaped) {
+        type_checker_constant_from_int(
+            out_value, type_checker_wrap_integer((long long)folded, bits,
+                                                 is_signed));
+      }
       return 1;
     }
-    if (strcmp(binary_expr->operator, "|") == 0) {
-      type_checker_constant_from_int(out_value, left_value | right_value);
-      return 1;
-    }
-    if (strcmp(binary_expr->operator, "^") == 0) {
-      type_checker_constant_from_int(out_value, left_value ^ right_value);
-      return 1;
-    }
-    if (strcmp(binary_expr->operator, "<<") == 0) {
-      if (right_value < 0 || right_value > 62 || left_value < 0) {
+    if (strcmp(operator, "<<") == 0 || strcmp(operator, ">>") == 0) {
+      int shift_left = operator[0] == '<';
+      if (shaped) {
+        /* The hardware masks the count to the operand's width, and the
+         * language says so. `(uint8)1 << (uint8)9` is 2, not 0. */
+        unsigned long long count =
+            (unsigned long long)type_checker_wrap_integer(right_value, bits, 0)
+            % (unsigned long long)bits;
+        long long value =
+            type_checker_wrap_integer(left_value, bits, is_signed);
+        long long folded;
+        if (shift_left) {
+          folded = (long long)((unsigned long long)value << count);
+        } else if (is_signed) {
+          folded = value >> count;
+        } else {
+          folded = (long long)((unsigned long long)type_checker_wrap_integer(
+                                   value, bits, 0) >>
+                               count);
+        }
+        type_checker_constant_from_int(
+            out_value, type_checker_wrap_integer(folded, bits, is_signed));
+        return 1;
+      }
+      /* No shape to mask against: a count at or past the width has no value
+       * to fold, so decline and let the caller treat this as non-constant. */
+      if (right_value < 0 || right_value > (shift_left ? 62 : 63)) {
         return 0;
       }
-      if (left_value > (LLONG_MAX >> right_value)) {
-        return 0;
-      }
-      type_checker_constant_from_int(out_value, left_value << right_value);
-      return 1;
-    }
-    if (strcmp(binary_expr->operator, ">>") == 0) {
-      if (right_value < 0 || right_value > 63) {
-        return 0;
+      if (shift_left) {
+        if (left_value < 0 || left_value > (LLONG_MAX >> right_value)) {
+          return 0;
+        }
+        type_checker_constant_from_int(out_value, left_value << right_value);
+        return 1;
       }
       type_checker_constant_from_int(out_value, left_value >> right_value);
       return 1;

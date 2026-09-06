@@ -1,0 +1,115 @@
+// A `const` and the same expression at run time are the same program.
+//
+// The compile-time evaluator worked in 64 bits and never cut the result back
+// to the expression's own type, so every wrapping case folded to a different
+// number than the machine produces:
+//
+//   (uint8)2 - (uint8)249   is 9,     folded to -247
+//   (int8)100 + (int8)100   is -56,   folded to 200
+//   (int8)100 * (int8)3     is 44,    folded to 300
+//   2147483647 + 1          is        -2147483648 (an untyped integer literal
+//                                     is int32), folded to 2147483648
+//   (uint8)1 << (uint8)9    is 2      (the count masks to the operand's
+//                                     width), folded to 512 then cut to 0
+//
+// It also had no case for a cast at all, so `const B: uint8 = (uint8)(3);`
+// failed with "must be a compile-time integer constant expression", which is
+// exactly what it is. Casts fold now, and every fold wraps.
+import "std/io";
+
+@noinline fn u8(v: uint8) -> uint8 { return v; }
+@noinline fn i8v(v: int8) -> int8 { return v; }
+@noinline fn i32v(v: int32) -> int32 { return v; }
+
+// Wrapping.
+const SUB: int64 = (int64)((uint8)(2) - (uint8)(249));
+const ADD: int64 = (int64)((int8)(100) + (int8)(100));
+const MUL: int64 = (int64)((int8)(100) * (int8)(3));
+const OVF: int64 = (int64)((int32)(2147483647) + (int32)(1));
+const LIT: int64 = 2147483647 + 1;
+const NEG: int64 = (int64)(-((int8)(-128)));
+const NOT: int64 = (int64)(~((uint8)(3)));
+
+// The const's own declared type, which is where a wrong fold showed up as a
+// number nothing in the program could have produced.
+const NARROW: uint8 = (uint8)(2) - (uint8)(249);
+
+// Shifts mask their count to the operand's width, and a signed right shift is
+// arithmetic while an unsigned one is logical.
+const SHL_WRAP: int64 = (int64)((uint8)(1) << (uint8)(9));
+const SHL_SIGN: int64 = (int64)((int8)(1) << (int8)(7));
+const SHR_LOGICAL: int64 = (int64)((uint8)(200) >> (uint8)(3));
+const SHR_ARITH: int64 = (int64)((int8)(-8) >> (int8)(1));
+const SHL_PLAIN: int32 = 1 << 7;
+
+// Casts fold, including into a float and back out of one.
+const CAST_U8: uint8 = (uint8)(3);
+const CAST_WRAP: int8 = (int8)(200);
+const CAST_NEG: uint8 = (uint8)(-1);
+const CAST_F64: float64 = (float64)(3);
+const CAST_F32: float32 = (float32)(0.5);
+const TRUNC_POS: int32 = (int32)(2.9);
+const TRUNC_NEG: int32 = (int32)(-2.9);
+
+// A folded cast reaches every constant context, an array size included.
+const SIZE: int32 = (int32)(4);
+var table: int32[SIZE];
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var wrong: int32 = 0;
+
+  if (SUB != (int64)(9)) { wrong = wrong + 1; }
+  if (ADD != (int64)(-56)) { wrong = wrong + 2; }
+  if (MUL != (int64)(44)) { wrong = wrong + 4; }
+  if (OVF != (int64)(-2147483648)) { wrong = wrong + 8; }
+  if (LIT != (int64)(-2147483648)) { wrong = wrong + 16; }
+  if (NEG != (int64)(-128)) { wrong = wrong + 32; }
+  if (NOT != (int64)(252)) { wrong = wrong + 64; }
+  if (NARROW != (uint8)(9)) { wrong = wrong + 128; }
+
+  if (SHL_WRAP != (int64)(2)) { wrong = wrong + 256; }
+  if (SHL_SIGN != (int64)(-128)) { wrong = wrong + 512; }
+  if (SHR_LOGICAL != (int64)(25)) { wrong = wrong + 1024; }
+  if (SHR_ARITH != (int64)(-4)) { wrong = wrong + 2048; }
+  if (SHL_PLAIN != 128) { wrong = wrong + 4096; }
+
+  if (CAST_U8 != (uint8)(3)) { wrong = wrong + 8192; }
+  if (CAST_WRAP != (int8)(-56)) { wrong = wrong + 16384; }
+  if (CAST_NEG != (uint8)(255)) { wrong = wrong + 32768; }
+  if (CAST_F64 != 3.0) { wrong = wrong + 65536; }
+  if (CAST_F32 != 0.5) { wrong = wrong + 131072; }
+  if (TRUNC_POS != 2) { wrong = wrong + 262144; }
+  if (TRUNC_NEG != -2) { wrong = wrong + 524288; }
+
+  table[3] = 9;
+  if (table[3] != 9) { wrong = wrong + 1048576; }
+
+  // The same expressions at run time, through a call the folder cannot see
+  // into, must give the folded answers back.
+  var n: uint8 = (uint8)(argc - argc);
+  if ((int64)(u8((uint8)(2) + n) - u8((uint8)(249))) != SUB) {
+    wrong = wrong + 2097152;
+  }
+  if ((int64)(i8v((int8)(100)) + i8v((int8)(100))) != ADD) {
+    wrong = wrong + 4194304;
+  }
+  if ((int64)(i32v(2147483647) + i32v(1)) != OVF) {
+    wrong = wrong + 8388608;
+  }
+  if ((int64)(u8((uint8)(1)) << u8((uint8)(9))) != SHL_WRAP) {
+    wrong = wrong + 16777216;
+  }
+  if ((int64)(u8((uint8)(200)) >> u8((uint8)(3))) != SHR_LOGICAL) {
+    wrong = wrong + 33554432;
+  }
+  if ((int64)(i8v((int8)(-8)) >> i8v((int8)(1))) != SHR_ARITH) {
+    wrong = wrong + 67108864;
+  }
+
+  print("const fold wrong=");
+  println("{(int64)wrong}");
+  if (wrong != 0) {
+    return 1;
+  }
+  return 0;
+}

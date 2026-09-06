@@ -7044,7 +7044,8 @@ try {
       foreach ($mode in @(@(), @("-O"), @("--release"))) {
         foreach ($fixture in @("test_loop_counter_written_in_body",
                                "test_float_copy_two_readers",
-                               "test_cast_versus_grouping")) {
+                               "test_cast_versus_grouping",
+                               "test_const_folds_like_the_machine")) {
           $fixExe = Join-Path $tmpDir "$fixture.exe"
           $fixBuild = & $CompilerPath --build @mode "tests/$fixture.mettle" -o $fixExe 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) {
