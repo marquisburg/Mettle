@@ -552,6 +552,36 @@ $cases = @(
     IrMustMatch   = @("dot_i8\(")
   },
   @{
+    Name          = "err_const_array_nonconst"
+    Path          = "tests/err_const_array_nonconst.mettle"
+    ShouldSucceed = $false
+    Pattern       = "Undefined type 'int32\[COUNT\]'"
+  },
+  @{
+    Name          = "err_const_float_nonconst"
+    Path          = "tests/err_const_float_nonconst.mettle"
+    ShouldSucceed = $false
+    Pattern       = "initializer must be a compile-time constant expression"
+  },
+  @{
+    Name          = "err_multiple_returns_count"
+    Path          = "tests/err_multiple_returns_count.mettle"
+    ShouldSucceed = $false
+    Pattern       = "returns 2 values but this return has 1"
+  },
+  @{
+    Name          = "err_multiple_returns_empty"
+    Path          = "tests/err_multiple_returns_empty.mettle"
+    ShouldSucceed = $false
+    Pattern       = "must return 2 values"
+  },
+  @{
+    Name          = "err_shadow_parameter"
+    Path          = "tests/err_shadow_parameter.mettle"
+    ShouldSucceed = $false
+    Pattern       = "shadows parameter 'side'"
+  },
+  @{
     Name          = "err_simd_contract"
     Path          = "tests/err_simd_contract.mettle"
     ShouldSucceed = $false
@@ -6963,6 +6993,70 @@ catch {
   Write-CaseResult -Name "safe_mode_pointer_identity" -Passed $false -Reason $_.Exception.Message
 }
 
+
+# What a deferred statement may and may not change about a return value, and
+# the field-through-a-pointer spellings agreeing. Both fixtures replace dead
+# ones: the defer case was failing with nobody looking, and the pointer case
+# was two negative fixtures expecting an error the compiler stopped raising.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $deferPrevMir = $env:METTLE_MIR
+  try {
+    foreach ($backend in @("mir", "baseline")) {
+      if ($backend -eq "baseline") { $env:METTLE_MIR = "0" } else { $env:METTLE_MIR = $null }
+      foreach ($mode in @(@(), @("--release"))) {
+        foreach ($fixture in @("test_defer_return_value", "test_member_on_pointer",
+                               "test_direct_object_string_conditional_assign")) {
+          $fixExe = Join-Path $tmpDir "$fixture.exe"
+          $fixBuild = & $CompilerPath --build @mode "tests/$fixture.mettle" -o $fixExe 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            throw "$fixture did not build ($backend $($mode -join ' ')): $fixBuild"
+          }
+          $fixOut = & $fixExe 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0 -or $fixOut -notmatch "wrong=0") {
+            throw "$fixture failed ($backend $($mode -join ' ')): exit $LASTEXITCODE`n$fixOut"
+          }
+        }
+      }
+    }
+  }
+  finally { $env:METTLE_MIR = $deferPrevMir }
+  Write-CaseResult -Name "defer_and_pointer_members" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "defer_and_pointer_members" -Passed $false -Reason $_.Exception.Message
+}
+
+# Every tests/*.mettle is named by some harness, and the ones no other harness
+# names are named by a manifest. A fixture nothing runs is not a test: 45 of
+# them had accumulated, and one had been failing the whole time.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $orphanPython = Get-Command python -ErrorAction SilentlyContinue
+  if (-not $orphanPython) { $orphanPython = Get-Command python3 -ErrorAction SilentlyContinue }
+  if (-not $orphanPython) {
+    Write-CaseResult -Name "fixture_manifest" -Passed $true -Reason "python not found; skipped"
+  }
+  else {
+    $manifestOut = & $orphanPython.Source "tests/run_fixture_manifest.py" `
+      --compiler $CompilerPath --output (Join-Path $tmpDir "fixtures") 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "a manifest fixture changed its answer:`n$manifestOut"
+    }
+    $orphanOut = & $orphanPython.Source "tests/check_test_orphans.py" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "a fixture is referenced by no harness:`n$orphanOut"
+    }
+    Write-CaseResult -Name "fixture_manifest" -Passed $true
+  }
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "fixture_manifest" -Passed $false -Reason $_.Exception.Message
+}
 
 # What a crash report says, and how many times it says the innermost frame.
 #

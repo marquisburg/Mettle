@@ -1,16 +1,28 @@
+// A string conditionally reassigned, then used.
+//
+// The direct-object path used to lose the second assignment, so the label read
+// back as the one the declaration set rather than the one the branch chose.
+// The fixture asserts the answer now; it used to print it and leave the
+// checking to whoever was looking.
 import "std/io";
 
-fn emit_label(flag: int32) {
+@noinline fn label_for(flag: int32) -> string {
   var label: string = "[-] ";
   if (flag != 0) {
     label = "[+] ";
   }
-  print(label.chars);
+  return label;
 }
 
-fn main() -> int32 {
-  emit_label(0);
-  emit_label(1);
-  print("\n");
-  return 0;
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var wrong: int32 = 0;
+  var on: int32 = argc;
+
+  if (label_for(0) != "[-] ") { wrong = wrong + 1; }
+  if (label_for(on) != "[+] ") { wrong = wrong + 2; }
+  if (label_for(0 - on) != "[+] ") { wrong = wrong + 4; }
+
+  print("conditional string wrong=");
+  println("{(int64)wrong}");
+  return wrong;
 }

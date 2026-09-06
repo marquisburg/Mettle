@@ -1,0 +1,77 @@
+// What a deferred statement may and may not change about a return value.
+//
+// `return x` reads x, then the deferred statements run, then the function
+// returns. A deferred write to x therefore has to be invisible to the caller:
+// the value was already taken. It was not. A named operand still named its
+// storage when the return read it, so the cleanup's write reached the caller
+// and the function reported what the cleanup left rather than what it
+// computed. Silent, and exactly the shape `defer` exists for.
+import "std/io";
+
+var g_flag: int32 = 0;
+var g_count: int32 = 0;
+
+@noinline fn global_reset() -> int32 {
+  g_flag = 7;
+  defer g_flag = 0;
+  return g_flag;
+}
+
+@noinline fn local_reset(seed: int32) -> int32 {
+  var held: int32 = seed + 5;
+  defer held = 0;
+  return held;
+}
+
+@noinline fn parameter_reset(seed: int32) -> int32 {
+  defer seed = 0;
+  return seed;
+}
+
+@noinline fn two_defers() -> int32 {
+  g_count = 3;
+  defer g_count = g_count + 10;
+  defer g_count = g_count * 2;
+  return g_count;
+}
+
+@noinline fn defer_still_runs() -> int32 {
+  g_count = 0;
+  defer g_count = 99;
+  return 1;
+}
+
+@noinline fn early_return(pick: int32) -> int32 {
+  g_flag = 4;
+  defer g_flag = 0;
+  if (pick > 0) {
+    return g_flag;
+  }
+  return g_flag + 100;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var wrong: int32 = 0;
+  var n: int32 = argc;
+
+  if (global_reset() != 7) { wrong = wrong + 1; }
+  if (g_flag != 0) { wrong = wrong + 2; }
+
+  if (local_reset(n) != n + 5) { wrong = wrong + 4; }
+  if (parameter_reset(n + 3) != n + 3) { wrong = wrong + 8; }
+
+  // Deferred statements run in reverse order, after the value is taken.
+  if (two_defers() != 3) { wrong = wrong + 16; }
+  if (g_count != 3 * 2 + 10) { wrong = wrong + 32; }
+
+  if (defer_still_runs() != 1) { wrong = wrong + 64; }
+  if (g_count != 99) { wrong = wrong + 128; }
+
+  if (early_return(n) != 4) { wrong = wrong + 256; }
+  if (g_flag != 0) { wrong = wrong + 512; }
+  if (early_return(0 - n) != 104) { wrong = wrong + 1024; }
+
+  print("defer wrong=");
+  println("{(int64)wrong}");
+  return wrong;
+}

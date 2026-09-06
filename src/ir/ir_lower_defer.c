@@ -400,12 +400,78 @@ static int ir_emit_errdefer_condition(IRLoweringContext *context,
   return 1;
 }
 
+/* Whether the value this function returns is one a plain ASSIGN can carry.
+ *
+ * An aggregate goes back by address or in a shape the return path builds for
+ * it, so copying its name into a temp changes what the RETURN is looking at:
+ * `errdefer` then reads the address of a tagged enum instead of its tag, and
+ * `--safe` loses the origin the value was carrying. Only a scalar needs the
+ * copy anyway, because only a scalar's storage is what the RETURN reads. */
+static int ir_return_type_is_plain_scalar(IRLoweringContext *context) {
+  Type *type = NULL;
+  if (!context || !context->type_checker ||
+      !context->current_return_type_name) {
+    return 0;
+  }
+  type = type_checker_get_type_by_name(context->type_checker,
+                                       context->current_return_type_name);
+  if (!type) {
+    return 0;
+  }
+  switch (type->kind) {
+  case TYPE_INT8:
+  case TYPE_INT16:
+  case TYPE_INT32:
+  case TYPE_INT64:
+  case TYPE_UINT8:
+  case TYPE_UINT16:
+  case TYPE_UINT32:
+  case TYPE_UINT64:
+  case TYPE_BOOL:
+  case TYPE_CHAR:
+  case TYPE_FLOAT32:
+  case TYPE_FLOAT64:
+  case TYPE_FLOAT16:
+  case TYPE_BFLOAT16:
+    return 1;
+  default:
+    return 0;
+  }
+}
+
 int ir_emit_return_with_defers(IRLoweringContext *context,
                                       IRFunction *function,
                                       IRDeferScope *defers, IROperand *value,
                                       SourceLocation location) {
+  IROperand snapshot = ir_operand_none();
   if (!context || !function || !value) {
     return 0;
+  }
+
+  /* `return x` reads x before the deferred statements run, and a deferred
+   * statement is allowed to write x: `defer done = 0` after `return done` is
+   * the shape this exists for. A named operand still names its storage when
+   * the RETURN reads it, so the cleanup's write reached the returned value and
+   * the caller saw what the cleanup left rather than what the function
+   * computed.
+   *
+   * Take a copy first and return the copy. Only a name needs it: a temp
+   * already holds a value nothing else writes, and a literal is a literal. */
+  if (defers && value->kind == IR_OPERAND_SYMBOL &&
+      ir_return_type_is_plain_scalar(context)) {
+    IRInstruction take = {0};
+    if (!ir_make_temp_operand(context, &snapshot)) {
+      return 0;
+    }
+    take.op = IR_OP_ASSIGN;
+    take.location = location;
+    take.dest = snapshot;
+    take.lhs = *value;
+    if (!ir_emit(context, function, &take)) {
+      ir_operand_destroy(&snapshot);
+      return 0;
+    }
+    value = &snapshot;
   }
 
   if (defers) {
@@ -485,9 +551,11 @@ int ir_emit_return_with_defers(IRLoweringContext *context,
     }
   }
   if (!ir_emit(context, function, &instruction)) {
+    ir_operand_destroy(&snapshot);
     return 0;
   }
 
+  ir_operand_destroy(&snapshot);
   *value = ir_operand_none();
   return 1;
 }

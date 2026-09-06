@@ -1,9 +1,0 @@
-struct Point {
-  x: int32;
-  y: int32;
-}
-
-fn main() -> int32 {
-  var p: Point* = 0;
-  return p.x;
-}

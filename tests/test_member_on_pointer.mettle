@@ -1,0 +1,54 @@
+// A field reached through a pointer, spelled both ways.
+//
+// The docs write `->` for a pointer and `.` for a value, and two negative
+// fixtures expected `.` on a pointer to be an error. It has not been one for a
+// long time, and nothing ran the fixtures to say so. A pointer has no fields of
+// its own, so the two spellings can only mean the same thing; what matters is
+// that they agree, and that they agree everywhere, which is what this pins.
+import "std/io";
+
+struct Point {
+  x: int32;
+  y: int32;
+}
+
+struct Line {
+  from: Point;
+  to: Point;
+}
+
+@noinline fn read_dot(p: Point*) -> int32 { return p.x + p.y; }
+@noinline fn read_arrow(p: Point*) -> int32 { return p->x + p->y; }
+
+@noinline fn write_dot(p: Point*, v: int32) { p.x = v; }
+@noinline fn write_arrow(p: Point*, v: int32) { p->y = v; }
+
+@noinline fn nested(l: Line*) -> int32 {
+  return l.from.x + l->to.y;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var wrong: int32 = 0;
+  var n: int32 = argc;
+
+  var p: Point;
+  p.x = n + 3;
+  p.y = n + 4;
+
+  if (read_dot(&p) != read_arrow(&p)) { wrong = wrong + 1; }
+  if (read_dot(&p) != n + n + 7) { wrong = wrong + 2; }
+
+  write_dot(&p, 11);
+  if (p.x != 11) { wrong = wrong + 4; }
+  write_arrow(&p, 12);
+  if (p.y != 12) { wrong = wrong + 8; }
+
+  var l: Line;
+  l.from.x = n;
+  l.to.y = n * 2;
+  if (nested(&l) != n * 3) { wrong = wrong + 16; }
+
+  print("member on pointer wrong=");
+  println("{(int64)wrong}");
+  return wrong;
+}

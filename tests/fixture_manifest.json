@@ -1,0 +1,145 @@
+{
+  "note": "Fixtures no other harness names. Each one asserts its answer by returning it, so the exit code is the check; they were simply never registered anywhere, which is why one of them had been failing unnoticed. A file listed here is accounted for; a file in tests/ that is listed nowhere is reported by tests/check_test_orphans.py.",
+  "cases": [
+    {
+      "source": "tests/_mid.mettle",
+      "run": true,
+      "exit": 87
+    },
+    {
+      "source": "tests/cs_funcs.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/parse_stress_test.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/profiler_test.mettle",
+      "run": false,
+      "note": "26,373 functions and 213,000 lines. It is here for what compiling it costs; running it overflows the stack, which is its own question."
+    },
+    {
+      "source": "tests/test_big_stack_locals.mettle",
+      "run": true,
+      "exit": 558
+    },
+    {
+      "source": "tests/test_call_stack_args.mettle",
+      "run": true,
+      "exit": 1
+    },
+    {
+      "source": "tests/test_const_array_float.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_crash_null_context.mettle",
+      "run": true,
+      "exit": 1
+    },
+    {
+      "source": "tests/test_defer_global_assignment.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_defer_return_value.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_direct_object_cstring_append.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_direct_object_string_conditional_assign.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_errdefer_non_call_expression.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_float_temp_call_arg.mettle",
+      "run": true,
+      "exit": 1
+    },
+    {
+      "source": "tests/test_import_str.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_large_db_cache_ptr.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_large_struct_field_then_page_init.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_large_struct_field_then_page_init2.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_large_struct_field_then_page_init3.mettle",
+      "run": true,
+      "exit": 30
+    },
+    {
+      "source": "tests/test_match_expression.mettle",
+      "run": true,
+      "exit": 142
+    },
+    {
+      "source": "tests/test_member_on_pointer.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_multiple_returns.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_multiple_returns_global.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_opt_matmul_shape.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_strbuf_basic.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/test_struct_array_stride.mettle",
+      "run": true,
+      "exit": 1
+    },
+    {
+      "source": "tests/test_vk_struct_sizes.mettle",
+      "run": true,
+      "exit": 0
+    },
+    {
+      "source": "tests/tmp_abi_float_symbol_args.mettle",
+      "run": true,
+      "exit": 0
+    }
+  ]
+}
