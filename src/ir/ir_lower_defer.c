@@ -400,21 +400,39 @@ static int ir_emit_errdefer_condition(IRLoweringContext *context,
   return 1;
 }
 
-/* Whether the value this function returns is one a plain ASSIGN can carry.
- *
- * An aggregate goes back by address or in a shape the return path builds for
- * it, so copying its name into a temp changes what the RETURN is looking at:
- * `errdefer` then reads the address of a tagged enum instead of its tag, and
- * `--safe` loses the origin the value was carrying. Only a scalar needs the
- * copy anyway, because only a scalar's storage is what the RETURN reads. */
-static int ir_return_type_is_plain_scalar(IRLoweringContext *context) {
-  Type *type = NULL;
+/* A scope exists around every function body, deferred statement or not, so the
+ * pointer alone does not say there is anything to run. Only a chain that holds
+ * one needs the returned value copied out of reach of it, and for an aggregate
+ * the copy is not free: it costs `--safe` the allocation identity the value
+ * carries, which is a real loss on every function that returns a struct. */
+static int ir_defer_scope_has_any(const IRDeferScope *scope) {
+  for (; scope; scope = scope->parent) {
+    if (scope->stack.count > 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static Type *ir_current_return_type(IRLoweringContext *context) {
   if (!context || !context->type_checker ||
       !context->current_return_type_name) {
-    return 0;
+    return NULL;
   }
-  type = type_checker_get_type_by_name(context->type_checker,
+  return type_checker_get_type_by_name(context->type_checker,
                                        context->current_return_type_name);
+}
+
+/* Whether the value this function returns is one a plain ASSIGN can carry.
+ *
+ * An aggregate needs the copy too, but it cannot have this one: it goes back
+ * by address or in a shape the return path builds for it, so assigning its
+ * name into a temp changes what the RETURN is looking at. `errdefer` then
+ * reads the address of a tagged enum instead of its tag, and `--safe` loses
+ * the origin the value was carrying. It gets a declared local of its own type
+ * instead -- see ir_snapshot_returned_aggregate. */
+static int ir_return_type_is_plain_scalar(IRLoweringContext *context) {
+  Type *type = ir_current_return_type(context);
   if (!type) {
     return 0;
   }
@@ -433,10 +451,67 @@ static int ir_return_type_is_plain_scalar(IRLoweringContext *context) {
   case TYPE_FLOAT64:
   case TYPE_FLOAT16:
   case TYPE_BFLOAT16:
+  /* A pointer is register-width and the errdefer test on one reads the value,
+   * not the storage, so the copy carries everything the return path wants. */
+  case TYPE_POINTER:
     return 1;
   default:
     return 0;
   }
+}
+
+static int ir_return_type_is_copyable_aggregate(Type *type) {
+  if (!type) {
+    return 0;
+  }
+  return type->kind == TYPE_STRUCT || type->kind == TYPE_STRING ||
+         type->kind == TYPE_SLICE || type->kind == TYPE_TAGGED_ENUM;
+}
+
+/* The aggregate half of the same problem the scalar snapshot solves.
+ *
+ * `return p` on a struct hands the RETURN the name of the local, and the
+ * deferred statements run before the value leaves, so `defer p.x = 0` reached
+ * the caller. A temp cannot hold the copy -- the RETURN has to keep looking at
+ * a named value of the declared type for the by-address path and for the tag
+ * `errdefer` reads -- so declare a local of that same type and copy into it.
+ * Above eight bytes that is the whole-struct memcpy an ordinary `var q: P = p`
+ * lowers to; at or below it, the one word an ASSIGN moves is the whole value. */
+static int ir_snapshot_returned_aggregate(IRLoweringContext *context,
+                                          IRFunction *function, Type *type,
+                                          const IROperand *value,
+                                          SourceLocation location,
+                                          IROperand *out_copy) {
+  char name[48];
+  IROperand copy = ir_operand_none();
+
+  snprintf(name, sizeof(name), "return$$%d", ++context->local_rename_serial);
+  if (!ir_emit_local_declaration(context, function, name,
+                                 context->current_return_type_name, location)) {
+    return 0;
+  }
+  if (!ir_try_emit_aggregate_symbol_memcpy(context, function, name, value, type,
+                                           location)) {
+    IRInstruction take = {0};
+    take.op = IR_OP_ASSIGN;
+    take.location = location;
+    take.dest = ir_operand_symbol(name);
+    take.lhs = *value;
+    if (!take.dest.name) {
+      return 0;
+    }
+    if (!ir_emit(context, function, &take)) {
+      ir_operand_destroy(&take.dest);
+      return 0;
+    }
+    ir_operand_destroy(&take.dest);
+  }
+  copy = ir_operand_symbol(name);
+  if (!copy.name) {
+    return 0;
+  }
+  *out_copy = copy;
+  return 1;
 }
 
 int ir_emit_return_with_defers(IRLoweringContext *context,
@@ -457,21 +532,29 @@ int ir_emit_return_with_defers(IRLoweringContext *context,
    *
    * Take a copy first and return the copy. Only a name needs it: a temp
    * already holds a value nothing else writes, and a literal is a literal. */
-  if (defers && value->kind == IR_OPERAND_SYMBOL &&
-      ir_return_type_is_plain_scalar(context)) {
-    IRInstruction take = {0};
-    if (!ir_make_temp_operand(context, &snapshot)) {
-      return 0;
+  if (value->kind == IR_OPERAND_SYMBOL && ir_defer_scope_has_any(defers)) {
+    Type *return_type = ir_current_return_type(context);
+    if (ir_return_type_is_plain_scalar(context)) {
+      IRInstruction take = {0};
+      if (!ir_make_temp_operand(context, &snapshot)) {
+        return 0;
+      }
+      take.op = IR_OP_ASSIGN;
+      take.location = location;
+      take.dest = snapshot;
+      take.lhs = *value;
+      if (!ir_emit(context, function, &take)) {
+        ir_operand_destroy(&snapshot);
+        return 0;
+      }
+      value = &snapshot;
+    } else if (ir_return_type_is_copyable_aggregate(return_type)) {
+      if (!ir_snapshot_returned_aggregate(context, function, return_type, value,
+                                          location, &snapshot)) {
+        return 0;
+      }
+      value = &snapshot;
     }
-    take.op = IR_OP_ASSIGN;
-    take.location = location;
-    take.dest = snapshot;
-    take.lhs = *value;
-    if (!ir_emit(context, function, &take)) {
-      ir_operand_destroy(&snapshot);
-      return 0;
-    }
-    value = &snapshot;
   }
 
   if (defers) {

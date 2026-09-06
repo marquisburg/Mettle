@@ -245,6 +245,10 @@ export fn mettle_string_from_f64(bits: int64) -> string {
             v = v * 10.0;
             exponent = exponent - 1;
         }
+        if (v >= 9.9999995) {
+            v = v / 10.0;
+            exponent = exponent + 1;
+        }
     }
     at = mettle_string_put_fixed(buf, at, v);
     if (scaled) {

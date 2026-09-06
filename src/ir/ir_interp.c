@@ -3368,6 +3368,10 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
             value = value * 10.0;
             exponent = exponent - 1;
           }
+          if (value >= 9.9999995) {
+            value = value / 10.0;
+            exponent = exponent + 1;
+          }
         }
         long long int_part = (long long)value;
         double frac = value - (double)int_part;

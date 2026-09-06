@@ -6,7 +6,17 @@
 // storage when the return read it, so the cleanup's write reached the caller
 // and the function reported what the cleanup left rather than what it
 // computed. Silent, and exactly the shape `defer` exists for.
+//
+// An aggregate is the same rule and needed its own answer. It goes back by
+// address or in a shape the return path builds for it, so it cannot take the
+// scalar's copy-into-a-temp; it gets a declared local of its own type. A
+// pointer is register-width and joins the scalars.
 import "std/io";
+
+struct Pair { x: int32; y: int32; }
+struct Wide { a: int64; b: int64; c: int64; }
+
+enum Tag { One(int32), Two(int32) }
 
 var g_flag: int32 = 0;
 var g_count: int32 = 0;
@@ -50,6 +60,52 @@ var g_count: int32 = 0;
   return g_flag + 100;
 }
 
+// Eight bytes or fewer: the whole value is the one word an ASSIGN moves.
+@noinline fn pair_reset(seed: int32) -> Pair {
+  var p: Pair;
+  p.x = seed + 11;
+  p.y = seed + 22;
+  defer p.x = 0;
+  defer p.y = 0;
+  return p;
+}
+
+// Past eight bytes the copy is the whole-struct memcpy `var q: Wide = w` is.
+@noinline fn wide_reset(seed: int32) -> Wide {
+  var w: Wide;
+  w.a = (int64)seed + 111;
+  w.b = (int64)seed + 222;
+  w.c = (int64)seed + 333;
+  defer w.a = 0;
+  defer w.c = 0;
+  return w;
+}
+
+// A tagged enum is a discriminant beside its payload, and the cleanup rewrote
+// both. `errdefer` reads the tag off this same value, so the copy has to stay
+// a named value of the declared type.
+@noinline fn tag_reset(seed: int32) -> Tag {
+  var t: Tag = Tag.One(seed + 55);
+  defer t = Tag.Two(0);
+  return t;
+}
+
+@noinline fn pointer_reset(cell: int32*) -> int32* {
+  var p: int32* = cell;
+  defer p = (int32*)0;
+  return p;
+}
+
+// Nothing deferred: the value goes back untouched, and no copy is taken. An
+// aggregate copy costs `--safe` the allocation identity the value carries, so
+// a scope with an empty chain must not pay for one.
+@noinline fn no_defer(seed: int32) -> Pair {
+  var p: Pair;
+  p.x = seed;
+  p.y = seed + 1;
+  return p;
+}
+
 fn main(argc: int32, argv: cstring*) -> int32 {
   var wrong: int32 = 0;
   var n: int32 = argc;
@@ -71,7 +127,35 @@ fn main(argc: int32, argv: cstring*) -> int32 {
   if (g_flag != 0) { wrong = wrong + 512; }
   if (early_return(0 - n) != 104) { wrong = wrong + 1024; }
 
+  var pair: Pair = pair_reset(n);
+  if (pair.x != n + 11) { wrong = wrong + 2048; }
+  if (pair.y != n + 22) { wrong = wrong + 4096; }
+
+  var wide: Wide = wide_reset(n);
+  if (wide.a != (int64)n + 111) { wrong = wrong + 8192; }
+  if (wide.b != (int64)n + 222) { wrong = wrong + 16384; }
+  if (wide.c != (int64)n + 333) { wrong = wrong + 32768; }
+
+  match (tag_reset(n)) {
+    case One(v): { if (v != n + 55) { wrong = wrong + 65536; } }
+    case Two(v): { wrong = wrong + 131072; }
+  }
+
+  var cell: int32[1];
+  cell[0] = n;
+  var back: int32* = pointer_reset(&cell[0]);
+  if (back == (int32*)0) { wrong = wrong + 262144; }
+
+  var plain: Pair = no_defer(n);
+  if (plain.x != n) { wrong = wrong + 524288; }
+  if (plain.y != n + 1) { wrong = wrong + 1048576; }
+
   print("defer wrong=");
   println("{(int64)wrong}");
-  return wrong;
+  // The mask names which check failed and is past a byte wide now, so an exit
+  // code carrying it would report a clean run for any mask ending in one.
+  if (wrong != 0) {
+    return 1;
+  }
+  return 0;
 }
