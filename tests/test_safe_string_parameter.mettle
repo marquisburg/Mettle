@@ -1,0 +1,104 @@
+// A string that crosses a call keeps the origin of its characters.
+//
+// `--safe` carries an allocation identity beside every value, and for a
+// `string` the identity that matters belongs to the characters the record
+// points at. That origin travels as a block of byte tags, copied into the call
+// frame by the caller and back out by the callee, and `string` was missing
+// from the set of kinds that travel that way. So a string arriving as a
+// parameter had nothing recorded for its characters and every read through it
+// failed:
+//
+//   Fatal error: memory access has no tracked allocation identity
+//     --> std/conv.mettle:144:16 in str_eq_at
+//
+// which took out `str_starts_with`, `str_find`, `str_trim` and everything
+// built on them. Reading the same string one line earlier in the caller was
+// fine, and a heap-backed string failed exactly like a literal, so it was
+// never about where the characters lived.
+//
+// Two things had to follow the kind. A string literal has no storage to point
+// at and two occurrences of one are two records over two copies of the
+// characters, so a literal argument is copied into a local first and that is
+// what gets described and passed. And the helpers take pointers, so the
+// address of a string operand is now taken explicitly rather than left to the
+// backend to infer: the two backends did not infer the same thing.
+//
+// Build this with --safe. Without it the file is an ordinary program and the
+// answers are the same.
+import "std/io";
+import "std/mem";
+import "std/conv";
+
+@noinline fn first_byte(s: string) -> int32 {
+  if (s.length == 0) { return -1; }
+  return (int32)s.chars[0];
+}
+
+@noinline fn byte_sum(s: string) -> int32 {
+  var total: int32 = 0;
+  var i: int64 = 0;
+  while (i < (int64)s.length) {
+    total = total + (int32)s.chars[i];
+    i = i + 1;
+  }
+  return total;
+}
+
+// A string handed on to a second function: the origin has to survive both
+// frames, not just the first.
+@noinline fn relay(s: string) -> int32 {
+  return first_byte(s);
+}
+
+var g_text: string = "hello";
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var wrong: int32 = 0;
+
+  // A literal argument, which has no storage of its own.
+  if (first_byte("abc") != 97) { wrong = wrong + 1; }
+  if (byte_sum("abc") != 294) { wrong = wrong + 2; }
+
+  // A named local, and the same local read in place first.
+  var local: string = "abc";
+  if ((int32)local.chars[0] != 97) { wrong = wrong + 4; }
+  if (first_byte(local) != 97) { wrong = wrong + 8; }
+
+  // A global.
+  if (first_byte(g_text) != 104) { wrong = wrong + 16; }
+
+  // Two frames deep.
+  if (relay(local) != 97) { wrong = wrong + 32; }
+  if (relay("abc") != 97) { wrong = wrong + 64; }
+
+  // A string over a heap buffer, which is the case that proves this was never
+  // about literals: its characters are an ordinary allocation.
+  var buf: uint8* = malloc(8);
+  buf[0] = (uint8)(97 + argc - argc);
+  buf[1] = (uint8)(98);
+  buf[2] = (uint8)(0);
+  var heap_text: string = str_from_bytes((cstring)buf, 2);
+  if (first_byte(heap_text) != 97) { wrong = wrong + 128; }
+  if (byte_sum(heap_text) != 195) { wrong = wrong + 256; }
+  // Straight from the call that built it, with no name in between.
+  if (first_byte(str_from_bytes((cstring)buf, 2)) != 97) { wrong = wrong + 512; }
+  free(buf);
+
+  // The library surface this was breaking.
+  if (str_starts_with("hello", "he") != 1) { wrong = wrong + 1024; }
+  if (str_ends_with("hello", "lo") != 1) { wrong = wrong + 2048; }
+  if (str_contains("hello", "ell") != 1) { wrong = wrong + 4096; }
+  if (str_eq_at("hello", 1, "el") != 1) { wrong = wrong + 8192; }
+  if ((int64)(str_trim("  hi  ").length) != 2) { wrong = wrong + 16384; }
+  match (str_find("hello", "ll")) {
+    case Some(at): { if (at != (int64)(2)) { wrong = wrong + 32768; } }
+    case None: { wrong = wrong + 65536; }
+  }
+
+  print("safe string wrong=");
+  println("{(int64)wrong}");
+  if (wrong != 0) {
+    return 1;
+  }
+  return 0;
+}

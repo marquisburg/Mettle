@@ -6965,6 +6965,39 @@ catch {
   Write-CaseResult -Name "safe_mode_optimizer_corpus" -Passed $false -Reason $_.Exception.Message
 }
 
+# A string that crosses a call keeps the origin of its characters. `string` was
+# missing from the kinds whose origins travel as byte tags, so every read
+# through a string parameter failed as untracked and `std/conv`'s whole surface
+# was unusable under --safe. Both backends, because they disagreed about what a
+# bare string operand meant where a pointer was declared.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  $safeStrPrevMir = $env:METTLE_MIR
+  try {
+    foreach ($backend in @("mir", "baseline")) {
+      if ($backend -eq "baseline") { $env:METTLE_MIR = "0" } else { $env:METTLE_MIR = $null }
+      foreach ($mode in @(@("--safe"), @("-O", "--safe"), @())) {
+        $safeStrExe = Join-Path $tmpDir "test_safe_string_parameter.exe"
+        $safeStrBuild = & $CompilerPath --build @mode "tests/test_safe_string_parameter.mettle" -o $safeStrExe 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+          throw "did not build ($backend $($mode -join ' ')): $safeStrBuild"
+        }
+        $safeStrOut = & $safeStrExe 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0 -or $safeStrOut -notmatch "wrong=0") {
+          throw "failed ($backend $($mode -join ' ')): exit $LASTEXITCODE`n$safeStrOut"
+        }
+      }
+    }
+  }
+  finally { $env:METTLE_MIR = $safeStrPrevMir }
+  Write-CaseResult -Name "safe_mode_string_parameter" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "safe_mode_string_parameter" -Passed $false -Reason $_.Exception.Message
+}
+
 # Every valid and invalid pointer flow, in both build modes and on both
 # allocators. The compiled cases above cover the release path on each
 # allocator; this covers the other two corners of the same grid.

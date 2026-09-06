@@ -137,6 +137,7 @@ void mettle_safety_region_begin(void *pointer, int64_t size);
 void mettle_safety_region_end(void *pointer);
 uint64_t mettle_safety_literal_identity(const void *pointer, uint64_t size);
 uint64_t mettle_safety_string_identity(const void *record, uint64_t size);
+void mettle_safety_string_contents(void *record, uint64_t chars);
 void mettle_safety_buffer_check(void *pointer, int64_t size, uint32_t kind,
                                 uint32_t line, uint64_t identity);
 void *mettle_safety_call_push(void *callee, uint64_t count);

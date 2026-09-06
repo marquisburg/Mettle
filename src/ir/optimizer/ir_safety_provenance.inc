@@ -105,7 +105,13 @@ static size_t origin_aggregate_size(SafetyOrigins *origins, const IROperand *val
   SafetyOrigin *origin = origin_find(origins, value);
   MtlcType *type = origin ? origin->type : NULL;
   return type && (type->kind == MTLC_TYPE_STRUCT || type->kind == MTLC_TYPE_ARRAY ||
-                   type->kind == MTLC_TYPE_TAGGED_ENUM) ? type->size : 0;
+                   type->kind == MTLC_TYPE_TAGGED_ENUM ||
+                   type->kind == MTLC_TYPE_STRING) ? type->size : 0;
+}
+
+static int origin_value_is_string(SafetyOrigins *origins, const IROperand *value) {
+  SafetyOrigin *origin = origin_find(origins, value);
+  return origin && origin->type && origin->type->kind == MTLC_TYPE_STRING;
 }
 
 static int origin_address(SafetyOrigins *origins, SourceLocation location,
@@ -431,7 +437,10 @@ static int origin_instruction(SafetyOrigins *origins, IRInstruction *in,
     IROperand args[4] = {dest, is_float ? zero : lhs, left, rhs};
     if (!origin_call(origins, location, "mettle_safety_value_store", args, 4, NULL)) goto done;
   }
-  if (aggregate_size && op == IR_OP_ASSIGN) {
+  /* A string destination is handled by the STRING assignment below, which
+     knows a literal source has no tags to copy yet and seeds them instead. */
+  if (aggregate_size && op == IR_OP_ASSIGN &&
+      !origin_value_is_string(origins, &dest)) {
     IROperand source = ir_operand_none(), destination = ir_operand_none();
     int copied = origin_address(origins, location, &lhs, &source) &&
         origin_address(origins, location, &dest, &destination);
@@ -442,16 +451,31 @@ static int origin_instruction(SafetyOrigins *origins, IRInstruction *in,
     if (!copied) goto done;
   }
   SafetyOrigin *stored = origin_find(origins, &dest);
+  /* These helpers take pointers, and a string operand is storage, so the
+     address is taken rather than left implicit: the two backends do not agree
+     about what a bare string operand means where a pointer is declared, and an
+     ADDRESS_OF says it once for both. */
   if (op == IR_OP_ASSIGN && stored && stored->type && stored->type->kind == MTLC_TYPE_STRING) {
+    IROperand destination = ir_operand_none();
+    if (!origin_address(origins, location, &dest, &destination)) goto done;
     if (lhs.kind == IR_OPERAND_STRING) {
-      IROperand args[2] = {dest, ir_operand_int((long long)ir_operand_string_length(&lhs) + 1)};
-      IROperand ignored = origin_fresh();
-      int seeded = origin_call(origins, location, "mettle_safety_string_identity", args, 2, &ignored);
-      ir_operand_destroy(&ignored);
+      IROperand args[2] = {destination,
+                           ir_operand_int((long long)ir_operand_string_length(&lhs) + 1)};
+      int seeded = origin_call(origins, location, "mettle_safety_string_identity",
+                               args, 2, NULL);
+      ir_operand_destroy(&destination);
       if (!seeded) goto done;
     } else {
-      IROperand args[3] = {dest, lhs, ir_operand_int((long long)stored->type->size)};
-      if (!origin_call(origins, location, "mettle_safety_value_copy", args, 3, NULL)) goto done;
+      IROperand source = ir_operand_none();
+      int copied = origin_address(origins, location, &lhs, &source);
+      if (copied) {
+        IROperand args[3] = {destination, source,
+                             ir_operand_int((long long)stored->type->size)};
+        copied = origin_call(origins, location, "mettle_safety_value_copy", args, 3, NULL);
+      }
+      ir_operand_destroy(&source);
+      ir_operand_destroy(&destination);
+      if (!copied) goto done;
     }
   }
   if (output && op != IR_OP_STORE && op != IR_OP_DECLARE_LOCAL &&
@@ -516,6 +540,97 @@ static int safety_origins_function(IRProgram *program, IRFunction *function) {
         !ir_instruction_vector_append_move(&origins.out, &decl)) {
       ir_instruction_destroy_storage(&decl);
       goto done;
+    }
+  }
+  /* A string literal handed to a `string` parameter needs storage of its own.
+   *
+   * The backend does not intern literals: two occurrences of the same text are
+   * two records over two copies of the characters. So describing the record
+   * written beside the call and passing the record written in the call
+   * describes and passes different bytes, and the callee's read lands outside
+   * the region the caller described. A literal has no address to hold either.
+   * Copy it into a local once, describe that, and pass the local. This is the
+   * same reason the aggregate temporaries above are given named storage.
+   *
+   * The callee's declared parameter type is what says a literal is bound to a
+   * `string`; the same literal bound to a `cstring` is a different value and
+   * must be left alone. */
+  {
+    MtlcType *string_type = ir_program_lookup_type(program, "string");
+    for (size_t i = 0; string_type && i < function->instruction_count; i++) {
+      IRInstruction *in = &function->instructions[i];
+      const IRModuleSymbol *callee = NULL;
+      if (in->op != IR_OP_CALL || !in->text || !in->argument_count) continue;
+      if (strncmp(in->text, "mettle_safety_", 14) == 0) continue;
+      callee = ir_program_lookup_symbol(program, in->text);
+      if (!callee || callee->is_extern || !callee->param_types) continue;
+      for (size_t a = 0; a < in->argument_count && a < callee->param_count; a++) {
+        IROperand local, seed_args[2];
+        IRInstruction decl = {0}, copy = {0};
+        SafetyOrigin *origin = NULL;
+        char name[64];
+        long long chars;
+        if (in->arguments[a].kind != IR_OPERAND_STRING || !in->arguments[a].name)
+          continue;
+        if (!callee->param_types[a] ||
+            callee->param_types[a]->kind != MTLC_TYPE_STRING)
+          continue;
+
+        /* Not a `.safe` name: those are the pass's own scaffolding and
+           origin_add skips them, and this local is a value to track. */
+        snprintf(name, sizeof(name), ".strlit_%u", g_safety_next_id++);
+        local = ir_operand_symbol(name);
+        if (!local.name) goto done;
+        chars = (long long)ir_operand_string_length(&in->arguments[a]) + 1;
+
+        decl.op = IR_OP_DECLARE_LOCAL;
+        decl.location = in->location;
+        decl.value_type = string_type;
+        decl.text = mettle_strdup("string");
+        if (!decl.text || !ir_operand_clone(&local, &decl.dest) ||
+            !ir_instruction_vector_append_move(&origins.out, &decl)) {
+          ir_instruction_destroy_storage(&decl);
+          ir_operand_destroy(&local);
+          goto done;
+        }
+
+        copy.op = IR_OP_ASSIGN;
+        copy.location = in->location;
+        copy.value_type = string_type;
+        if (!ir_operand_clone(&local, &copy.dest) ||
+            !ir_operand_clone(&in->arguments[a], &copy.lhs) ||
+            !ir_instruction_vector_append_move(&origins.out, &copy)) {
+          ir_instruction_destroy_storage(&copy);
+          ir_operand_destroy(&local);
+          goto done;
+        }
+
+        {
+          IROperand slot = ir_operand_none();
+          int described = origin_address(&origins, in->location, &local, &slot);
+          if (described) {
+            seed_args[0] = slot;
+            seed_args[1] = ir_operand_int(chars);
+            described = origin_call(&origins, in->location,
+                                    "mettle_safety_string_contents",
+                                    seed_args, 2, NULL);
+          }
+          ir_operand_destroy(&slot);
+          if (!described) {
+            ir_operand_destroy(&local);
+            goto done;
+          }
+        }
+
+        if (!origin_add(&origins, &local)) {
+          ir_operand_destroy(&local);
+          goto done;
+        }
+        origin = origin_find(&origins, &local);
+        if (origin) origin->type = string_type;
+        ir_operand_destroy(&in->arguments[a]);
+        in->arguments[a] = local; /* the call now passes the local */
+      }
     }
   }
   for (size_t p = 0; p < function->parameter_count; p++) {

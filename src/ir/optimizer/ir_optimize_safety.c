@@ -3021,6 +3021,7 @@ static int safety_declare_runtime(IRProgram *program) {
       {"mettle_safety_entry_arguments", nothing, span_params, 1},
       {"mettle_safety_literal_identity", u64, pointer_u64, 2},
       {"mettle_safety_string_identity", u64, string_u64, 2},
+      {"mettle_safety_string_contents", nothing, pointer_u64, 2},
       {"mettle_safety_global_pointer", nothing, call_arg_params, 3},
   };
 

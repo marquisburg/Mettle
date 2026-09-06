@@ -479,6 +479,25 @@ void mettle_safety_call_arg_copy(void *call, uint64_t index, const void *source,
   frame->arguments[index] = (uint64_t)(uintptr_t)safety_packet_capture(frame, source, size);
 }
 
+/* Describe the characters a string value points at, and record that origin on
+ * the value's own pointer field.
+ *
+ * mettle_safety_string_identity describes the RECORD as well, which is right
+ * for one sitting in the image and wrong for one on the stack: registering a
+ * stack slot as a static region leaves a description behind that outlives the
+ * frame. A local holding a copy of a literal needs only its characters
+ * described. */
+void mettle_safety_string_contents(void *record, uint64_t chars) {
+  const void *data;
+  uint64_t identity;
+  if (!record) return;
+  data = *(const void *const *)record;
+  if (!data) return;
+  identity = mettle_safety_literal_identity(data, chars);
+  mettle_safety_value_store(record, (uint64_t)(uintptr_t)data, identity,
+                            sizeof(void *));
+}
+
 static void safety_packet_restore(SafetyCall *frame, uint64_t token, void *destination, uint64_t size) {
   SafetyPacket *packet = frame ? frame->packets : NULL;
   while (packet && (uint64_t)(uintptr_t)packet != token) packet = packet->next;
