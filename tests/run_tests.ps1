@@ -7043,7 +7043,8 @@ try {
       if ($backend -eq "baseline") { $env:METTLE_MIR = "0" } else { $env:METTLE_MIR = $null }
       foreach ($mode in @(@(), @("-O"), @("--release"))) {
         foreach ($fixture in @("test_loop_counter_written_in_body",
-                               "test_float_copy_two_readers")) {
+                               "test_float_copy_two_readers",
+                               "test_cast_versus_grouping")) {
           $fixExe = Join-Path $tmpDir "$fixture.exe"
           $fixBuild = & $CompilerPath --build @mode "tests/$fixture.mettle" -o $fixExe 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) {
@@ -8905,6 +8906,32 @@ try {
 catch {
   $failed++
   Write-CaseResult -Name "crash_classify_null_offset" -Passed $false -Reason $_.Exception.Message
+}
+
+# A divide whose result nothing reads still divides. The `if` here is dead and
+# evaluating its condition is not, so the program must fault at every level.
+# Dead-code elimination used to remove the branch and the fault with it, and
+# `--verify` called that a miscompile: the compiler disagreed with itself.
+$total++
+try {
+  if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
+  foreach ($mode in @(@(), @("-O"), @("--release"))) {
+    $exePath = Join-Path $tmpDir "crash_dead_divide_trap.exe"
+    $buildOut = & $CompilerPath --build @mode "tests/crash_dead_divide_trap.mettle" -o $exePath 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "Build failed ($($mode -join ' ')): $buildOut" }
+    $runOut = & $exePath 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0) {
+      throw "Expected a divide-by-zero fault ($($mode -join ' ')). Output: $runOut"
+    }
+    if ($runOut -notmatch 'integer divide by zero') {
+      throw "Missing the divide-by-zero classification ($($mode -join ' ')). Output: $runOut"
+    }
+  }
+  Write-CaseResult -Name "dead_divide_still_traps" -Passed $true
+}
+catch {
+  $failed++
+  Write-CaseResult -Name "dead_divide_still_traps" -Passed $false -Reason $_.Exception.Message
 }
 
 # Crash forensics: under --native-heap a freed page-backed block keeps its

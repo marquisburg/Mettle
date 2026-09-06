@@ -1,0 +1,30 @@
+// A divide whose result nothing reads still divides.
+//
+// The condition here divides and the body does nothing, so the whole `if` is
+// dead. Evaluating it is not: 8 % (5 / 8) is a divide by zero, and a divide by
+// zero faults on the machine and is reported with the line it happened on.
+// Dead-code elimination removed the branch and the fault with it, so debug
+// stopped here and -O returned 13. `--verify` calls that a miscompile and
+// quarantines whichever pass did it, which is the compiler disagreeing with
+// itself about the same instruction.
+//
+// The program is expected to crash, at every optimization level, with the
+// divide-by-zero classification and this file's name on the frame.
+import "std/io";
+
+@noinline fn dead_condition(a: uint32, b: uint32) -> int64 {
+  if ((b % (a / b)) != 0) {
+    a = a;
+  }
+  return (int64)(a + b);
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  // argc is 1, so a is 5 and b is 8: a / b is 0 and b % 0 faults.
+  var a: uint32 = (uint32)(4 + argc);
+  var b: uint32 = (uint32)(7 + argc);
+  println("calling dead_condition");
+  var r: int64 = dead_condition(a, b);
+  println("returned {r}, which means the divide was dropped");
+  return 0;
+}

@@ -379,6 +379,34 @@ int ir_instruction_writes_destination(const IRInstruction *instruction) {
   }
 }
 
+/* An integer divide or modulo faults on the machine, and a fault is something
+ * the program does. Removing one because nothing reads its result removes the
+ * trap with it, and `if ((b % (a / b)) != 0) { a = a; }` is a whole branch
+ * whose only effect IS the trap: debug stopped with a divide-by-zero report at
+ * the right line and -O returned a number. `--verify` calls that a miscompile
+ * and quarantines whichever pass did it, so the passes and the validator
+ * disagreed about the same instruction.
+ *
+ * A constant divisor settles it. Zero is the fault everyone means; on x86 the
+ * signed form also faults on the minimum over -1, so -1 stays live too. Any
+ * other constant cannot fault and the instruction is as dead as an add. A
+ * float divide answers inf or nan and never faults. */
+static int ir_binary_divide_may_fault(const IRInstruction *instruction) {
+  if (instruction->op != IR_OP_BINARY || instruction->is_float ||
+      !instruction->text) {
+    return 0;
+  }
+  if (strcmp(instruction->text, "/") != 0 &&
+      strcmp(instruction->text, "%") != 0) {
+    return 0;
+  }
+  if (instruction->rhs.kind == IR_OPERAND_INT &&
+      instruction->rhs.int_value != 0 && instruction->rhs.int_value != -1) {
+    return 0;
+  }
+  return 1;
+}
+
 int ir_instruction_is_trivially_dead_if_dest_unused(
     const IRInstruction *instruction) {
   if (!instruction) {
@@ -391,7 +419,7 @@ int ir_instruction_is_trivially_dead_if_dest_unused(
   case IR_OP_BINARY:
   case IR_OP_UNARY:
   case IR_OP_CAST:
-    return 1;
+    return !ir_binary_divide_may_fault(instruction);
   default:
     return 0;
   }

@@ -1,0 +1,85 @@
+// `(x) op y` where op is both a prefix and an infix operator.
+//
+// Four operators are both: `*` derefs and multiplies, `&` takes an address and
+// ands, `-` negates and subtracts, `+` is a sign and an addition. So after a
+// parenthesized run of tokens the parser has to decide whether it just read a
+// cast's target type or an ordinary grouped expression, and its only signal is
+// what the tokens look like: a built-in type keyword, or structure a type is
+// written with.
+//
+// It counted `[` and `.` as that structure, for `T[4]` and `mod.Type`. But
+// `a[0]` and `p.x` are written with them too, and those are what people
+// actually write, so
+//
+//   (arr[i]) * (arr[j])
+//   (p.x) - (q.x)
+//   (uint32)(a[i]) * (uint32)(b[i])
+//
+// all parsed as a cast whose target type was the index or the field path, and
+// the build stopped with "Unknown target type for cast" pointing inside the
+// parentheses. The other six binary operators are not prefix operators, so the
+// same expression written with `/` or `|` compiled: which operator was used
+// decided whether ordinary code was accepted.
+import "std/io";
+
+struct P { x: int32; y: int32; }
+
+@noinline fn side(v: int32) -> int32 {
+  return v + 1;
+}
+
+fn main(argc: int32, argv: cstring*) -> int32 {
+  var wrong: int32 = 0;
+  var n: int32 = argc - argc;
+
+  var arr: int32[4];
+  arr[0] = 10 + n;
+  arr[1] = 20;
+  arr[2] = 3;
+  arr[3] = 4;
+
+  var p: P;
+  var q: P;
+  p.x = 3; p.y = 4;
+  q.x = 5; q.y = 6;
+
+  // Grouped index or field, then an operator that is also a prefix operator.
+  if ((arr[0]) * (arr[1]) != 200) { wrong = wrong + 1; }
+  if ((arr[0]) + (arr[1]) != 30) { wrong = wrong + 2; }
+  if ((arr[0]) - (arr[1]) != -10) { wrong = wrong + 4; }
+  if (((arr[2]) & (arr[3])) != 0) { wrong = wrong + 8; }
+  if ((p.x) * (q.x) != 15) { wrong = wrong + 16; }
+  if ((p.x) - (q.x) != -2) { wrong = wrong + 32; }
+  if ((p.y) + (q.y) != 10) { wrong = wrong + 64; }
+
+  // The same shape with a cast on each side, which is how a widening dot
+  // product is written.
+  var b: int8[4];
+  b[0] = (int8)(7); b[1] = (int8)(9);
+  if ((uint32)(b[0]) * (uint32)(b[1]) != (uint32)(63)) { wrong = wrong + 128; }
+  if ((int64)(b[0]) - (int64)(b[1]) != (int64)(-2)) { wrong = wrong + 256; }
+
+  // A call in the same position, which never had the problem and must not
+  // acquire one.
+  if ((side(1)) * (side(2)) != 6) { wrong = wrong + 512; }
+
+  // Casts to real types still parse, including the prefix operators they were
+  // ambiguous with.
+  var v: int32 = 7 + n;
+  var vp: int32* = &v;
+  if ((int32)*vp != 7) { wrong = wrong + 1024; }
+  if ((int64)-3 != (int64)(-3)) { wrong = wrong + 2048; }
+  var sp: P* = &p;
+  var back: P* = (P*)&p;
+  if (back != sp) { wrong = wrong + 4096; }
+
+  // A keyword-based array type keeps its keyword, so it is still a type.
+  if (sizeof(int32[4]) != 16) { wrong = wrong + 8192; }
+
+  print("cast grouping wrong=");
+  println("{(int64)wrong}");
+  if (wrong != 0) {
+    return 1;
+  }
+  return 0;
+}

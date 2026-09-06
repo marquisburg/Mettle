@@ -4845,12 +4845,22 @@ ASTNode *parser_parse_cast_expression(Parser *parser) {
 
   parser_advance(parser); // consume ')'
 
-  // A bare single identifier (no built-in keyword, and no pointer/array/
-  // generic/qualified structure such as `*`, `[`, `<` or `.`) gives the parser
-  // no reason to believe it names a type. `(MyStruct*)`, `(Vec<T>)`,
-  // `(mod.Type)` and the like are structurally types and stay casts.
+  // A bare single identifier (no built-in keyword, and no pointer/generic/
+  // function structure such as `*`, `<` or `(`) gives the parser no reason to
+  // believe it names a type. `(MyStruct*)`, `(Vec<T>)` and `(fn(int32)->T)`
+  // are structurally types and stay casts.
+  //
+  // `[` and `.` are NOT on that list, though `T[4]` and `mod.Type` are written
+  // with them, because `a[0]` and `p.x` are written with them too and those
+  // are far commoner. Taking them as type structure made `(a[i]) * (b[j])` and
+  // `(p.x) - (q.x)` parse as a cast whose target is the index or the field
+  // path, and the build failed with "Unknown target type for cast" pointing
+  // inside the parentheses. Only the four operators that are both prefix and
+  // infix reach this test, so a cast to an array or a qualified type still
+  // parses everywhere else; `(int32[4])` keeps its keyword, and a qualified
+  // pointer type keeps its `*`.
   int looks_like_type =
-      type_starts_with_keyword || strpbrk(type_name, "*[<.(") != NULL;
+      type_starts_with_keyword || strpbrk(type_name, "*<(") != NULL;
 
   // Check if it's a grouped expression instead
   int is_binary = parser_is_binary_operator(parser->current_token.type);
