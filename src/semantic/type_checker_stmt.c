@@ -630,6 +630,41 @@ static int type_checker_check_loop_uniformity(TypeChecker *checker,
   return 1;
 }
 
+static int type_checker_narrow_loop_step(TypeChecker *checker,
+                                         ForStatement *for_stmt) {
+  VarDeclaration *counter_decl;
+  Assignment *step;
+  Symbol *counter;
+  Type *step_type;
+  ASTNode *narrowed;
+
+  if (!for_stmt->increment || for_stmt->increment->type != AST_ASSIGNMENT ||
+      !for_stmt->initializer ||
+      for_stmt->initializer->type != AST_VAR_DECLARATION ||
+      !((VarDeclaration *)for_stmt->initializer->data)->structural_type) {
+    return 1;
+  }
+  counter_decl = (VarDeclaration *)for_stmt->initializer->data;
+  step = (Assignment *)for_stmt->increment->data;
+  counter = symbol_table_lookup(checker->symbol_table, counter_decl->name);
+  if (!counter || !counter->type || !step->value ||
+      !type_checker_is_integer_type(counter->type)) {
+    return 1;
+  }
+  step_type = type_checker_infer_type(checker, step->value);
+  if (!step_type || !type_checker_is_integer_type(step_type) ||
+      step_type->size <= counter->type->size) {
+    return 1;
+  }
+  narrowed = ast_create_cast_expression(counter->type->name, step->value,
+                                        for_stmt->increment->location);
+  if (!narrowed) {
+    return 0;
+  }
+  step->value = narrowed;
+  return 1;
+}
+
 int type_checker_check_for_statement(TypeChecker *checker,
                                             ASTNode *statement) {
   ForStatement *for_stmt = (ForStatement *)statement->data;
@@ -714,31 +749,11 @@ int type_checker_check_for_statement(TypeChecker *checker,
     }
   }
 
-  if (for_stmt->increment && for_stmt->increment->type == AST_ASSIGNMENT &&
-      for_stmt->initializer &&
-      for_stmt->initializer->type == AST_VAR_DECLARATION &&
-      ((VarDeclaration *)for_stmt->initializer->data)->structural_type) {
-    VarDeclaration *counter_decl =
-        (VarDeclaration *)for_stmt->initializer->data;
-    Assignment *step = (Assignment *)for_stmt->increment->data;
-    Symbol *counter = symbol_table_lookup(checker->symbol_table,
-                                          counter_decl->name);
-    if (counter && counter->type && step->value &&
-        type_checker_is_integer_type(counter->type)) {
-      Type *step_type = type_checker_infer_type(checker, step->value);
-      if (step_type && type_checker_is_integer_type(step_type) &&
-          step_type->size > counter->type->size) {
-        ASTNode *narrowed = ast_create_cast_expression(
-            counter->type->name, step->value, for_stmt->increment->location);
-        if (!narrowed) {
-          free(post_init_snapshot);
-          type_checker_init_tracker_exit_scope(checker);
-          symbol_table_exit_scope(checker->symbol_table);
-          return 0;
-        }
-        step->value = narrowed;
-      }
-    }
+  if (!type_checker_narrow_loop_step(checker, for_stmt)) {
+    free(post_init_snapshot);
+    type_checker_init_tracker_exit_scope(checker);
+    symbol_table_exit_scope(checker->symbol_table);
+    return 0;
   }
 
   if (for_stmt->increment) {
@@ -1181,92 +1196,170 @@ int type_checker_check_statement(TypeChecker *checker, ASTNode *statement) {
   return type_checker_check_conflict_free(checker, statement);
 }
 
-static int type_checker_check_statement_body(TypeChecker *checker,
-                                             ASTNode *statement) {
-  switch (statement->type) {
-  case AST_DEFER_STATEMENT:
-    return type_checker_check_defer_statement(checker, statement);
+static int type_checker_check_block(TypeChecker *checker, ASTNode *statement) {
+    // A block of statements
+    Program *block = (Program *)statement->data;
+    if (block) {
+      /* Const eval rewrites the block before any of it is checked: a `comptime for`
+       * becomes one copy of its body per field, and each copy is checked
+       * against a different field type from here on. */
+      int expanded_ok =
+          type_checker_expand_comptime_block(checker, statement, 0);
 
-  case AST_ERRDEFER_STATEMENT: {
-    if (!checker->current_function) {
-      type_checker_set_error_at_location(
-          checker, statement->location,
-          "Errdefer statement outside of a function");
-      return 0;
-    }
+      /* If this block is itself an expansion, every diagnostic raised while
+       * checking it names the iteration that generated it. The frame is live
+       * for the whole check, nested frames included, so a `comptime for` inside a
+       * `comptime for` reports the full chain. */
+      SourceSpan expansion_origin;
+      const char *expansion_note =
+          type_checker_expansion_note(checker, statement, &expansion_origin);
+      int note_frame_pushed =
+          expansion_note && checker->error_reporter &&
+          error_reporter_push_note_frame(checker->error_reporter,
+                                         expansion_origin, expansion_note);
 
-    DeferStatement *defer_stmt = (DeferStatement *)statement->data;
-    if (!defer_stmt || !defer_stmt->statement) {
-      type_checker_set_error_at_location(checker, statement->location,
-                                         "Invalid errdefer statement");
-      return 0;
-    }
+      // Enter a new nested scope
+      if (!symbol_table_enter_scope(checker->symbol_table, SCOPE_BLOCK)) {
+        type_checker_set_error_at_location(
+            checker, statement->location,
+            "Out of memory while entering block scope");
+        if (note_frame_pushed)
+          error_reporter_pop_note_frame(checker->error_reporter);
+        return 0;
+      }
+      if (!type_checker_init_tracker_enter_scope(checker)) {
+        type_checker_set_error_at_location(
+            checker, statement->location,
+            "Out of memory while entering initialization analysis scope");
+        symbol_table_exit_scope(checker->symbol_table);
+        if (note_frame_pushed)
+          error_reporter_pop_note_frame(checker->error_reporter);
+        return 0;
+      }
 
-    switch (defer_stmt->statement->type) {
-    case AST_FUNCTION_CALL:
-    case AST_ASSIGNMENT:
-    case AST_PROGRAM:
-      break;
-    default:
-      type_checker_set_error_at_location(checker,
-                                         defer_stmt->statement->location,
-                                         "Errdeferred statement must be a "
-                                         "function call, assignment, or block");
-      return 0;
-    }
+      /* The binding is declared in the expansion's own scope, so it cannot be
+       * seen by anything outside the body the programmer wrote. */
+      int block_ok = expanded_ok &&
+                     type_checker_declare_expansion_binding(checker, statement);
+      int reached_terminator = 0;
+      size_t block_guard_depth = type_checker_guard_depth(checker);
+      for (size_t i = 0; i < statement->child_count; i++) {
+        ASTNode *child = statement->children[i];
+        /* A directive still standing here is one the expander refused and has
+         * already reported on. Checking it again would only cascade. */
+        if (child && child->type == AST_COMPTIME_FOR) {
+          continue;
+        }
+        if (reached_terminator && checker->error_reporter && child) {
+          error_reporter_add_warning(
+              checker->error_reporter, ERROR_SEMANTIC, child->location,
+              "Unreachable code: statement will never execute");
+        }
+        // A bad statement doesn't stop the walk: keep checking the block's
+        // remaining statements so one compile reports every error.
+        if (!type_checker_check_statement(checker, statement->children[i])) {
+          block_ok = 0;
+        }
+        if (type_checker_statement_guarantees_termination(child)) {
+          reached_terminator = 1;
+        }
+        if (child && child->type == AST_IF_STATEMENT && child->data) {
+          IfStatement *early = (IfStatement *)child->data;
+          if (early->condition && !early->else_branch &&
+              early->else_if_count == 0 && early->then_branch &&
+              type_checker_statement_guarantees_termination(
+                  early->then_branch)) {
+            type_checker_push_guard(checker, early->condition, 1);
+          }
+        }
+      }
+      type_checker_pop_guards(checker, block_guard_depth);
 
-    return type_checker_check_statement(checker, defer_stmt->statement);
-  }
-  case AST_VAR_DECLARATION:
-  case AST_FUNCTION_DECLARATION:
-  case AST_STRUCT_DECLARATION:
-  case AST_ASSIGNMENT:
-    // These are handled by process_declaration
-    return type_checker_process_declaration(checker, statement);
-
-  case AST_FUNCTION_CALL: {
-    // Function call as statement (no return value used)
-    Type *return_type = type_checker_infer_type(checker, statement);
-    if (!return_type) {
-      return 0;
-    }
-    if (type_checker_reject_comptime_escape(checker, statement->location,
-                                            return_type)) {
-      return 0;
+      if (block_ok)
+        type_checker_warn_unused_locals(checker);
+      type_checker_init_tracker_exit_scope(checker);
+      symbol_table_exit_scope(checker->symbol_table);
+      if (note_frame_pushed)
+        error_reporter_pop_note_frame(checker->error_reporter);
+      if (!block_ok)
+        return 0;
     }
     return 1;
-  }
+}
 
-  case AST_GPU_LAUNCH:
-    return type_checker_check_gpu_launch(checker, statement);
+static int type_checker_check_while(TypeChecker *checker, ASTNode *statement) {
+    WhileStatement *while_stmt = (WhileStatement *)statement->data;
+    if (!while_stmt || !while_stmt->condition) {
+      type_checker_set_error_at_location(checker, statement->location,
+                                         "Invalid while statement");
+      return 0;
+    }
 
-  case AST_BARRIER_STATEMENT: {
-    BarrierStatement *barrier = (BarrierStatement *)statement->data;
-    FunctionDeclaration *owner =
-        checker->current_function_decl &&
-                checker->current_function_decl->type == AST_FUNCTION_DECLARATION
-            ? (FunctionDeclaration *)checker->current_function_decl->data
-            : NULL;
-    const unsigned supported = AST_MEMORY_REGION_WORKGROUP |
-                               AST_MEMORY_REGION_GLOBAL;
-    if (!owner || !owner->is_kernel) {
+    // Check condition type
+    Type *condition_type =
+        type_checker_infer_type(checker, while_stmt->condition);
+    if (!condition_type) {
+      return 0; // Error already reported
+    }
+    if (type_checker_reject_comptime_escape(
+            checker, while_stmt->condition->location, condition_type)) {
+      return 0;
+    }
+
+    // Condition should be a numeric type (treated as boolean)
+    if (!type_checker_is_numeric_type(condition_type)) {
+      type_checker_report_type_mismatch(checker,
+                                        while_stmt->condition->location,
+                                        "numeric type", condition_type->name);
+      return 0;
+    }
+    if (!type_checker_check_loop_uniformity(checker, while_stmt->condition,
+                                            &while_stmt->uniform_mode)) {
+      return 0;
+    }
+
+    size_t init_snapshot_count = 0;
+    unsigned char *init_snapshot =
+        type_checker_init_tracker_capture(checker, &init_snapshot_count);
+    if (checker->tracked_var_count > 0 && !init_snapshot) {
       type_checker_set_error_at_location(
           checker, statement->location,
-          "Barrier statements are only legal inside a GPU kernel");
+          "Out of memory while analyzing variable initialization flow");
       return 0;
     }
-    if (!barrier || barrier->memory_regions == 0 ||
-        (barrier->memory_regions & ~supported) != 0 ||
-        barrier->memory_order < AST_MEMORY_ORDER_ACQUIRE ||
-        barrier->memory_order > AST_MEMORY_ORDER_SEQ_CST) {
-      type_checker_set_error_at_location(checker, statement->location,
-                                         "Invalid barrier memory contract");
-      return 0;
-    }
-    return 1;
-  }
 
-  case AST_RETURN_STATEMENT: {
+    checker->loop_depth++;
+    type_checker_push_loop_label(checker, while_stmt->label);
+    {
+      size_t guard_depth = type_checker_guard_depth(checker);
+      size_t trip_depth = type_checker_loop_trip_depth(checker);
+      int body_ok = 1;
+      type_checker_push_guard(checker, while_stmt->condition, 0);
+      type_checker_push_loop_trip(checker, while_stmt->condition,
+                                  while_stmt->body);
+      if (while_stmt->body &&
+          !type_checker_check_statement(checker, while_stmt->body)) {
+        body_ok = 0;
+      }
+      type_checker_pop_loop_trip(checker, trip_depth);
+      type_checker_pop_guards(checker, guard_depth);
+      if (!body_ok) {
+        type_checker_pop_loop_label(checker);
+        checker->loop_depth--;
+        free(init_snapshot);
+        return 0;
+      }
+    }
+    type_checker_pop_loop_label(checker);
+    checker->loop_depth--;
+    type_checker_init_tracker_restore(checker, init_snapshot,
+                                      init_snapshot_count);
+    free(init_snapshot);
+
+    return 1;
+}
+
+static int type_checker_check_return(TypeChecker *checker, ASTNode *statement) {
     ReturnStatement *ret_stmt = (ReturnStatement *)statement->data;
     size_t return_count = ret_stmt
                               ? (ret_stmt->value_count
@@ -1389,82 +1482,144 @@ static int type_checker_check_statement_body(TypeChecker *checker,
       }
     }
     return 1;
+}
+
+static int type_checker_check_barrier(TypeChecker *checker, ASTNode *statement) {
+    BarrierStatement *barrier = (BarrierStatement *)statement->data;
+    FunctionDeclaration *owner =
+        checker->current_function_decl &&
+                checker->current_function_decl->type == AST_FUNCTION_DECLARATION
+            ? (FunctionDeclaration *)checker->current_function_decl->data
+            : NULL;
+    const unsigned supported = AST_MEMORY_REGION_WORKGROUP |
+                               AST_MEMORY_REGION_GLOBAL;
+    if (!owner || !owner->is_kernel) {
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "Barrier statements are only legal inside a GPU kernel");
+      return 0;
+    }
+    if (!barrier || barrier->memory_regions == 0 ||
+        (barrier->memory_regions & ~supported) != 0 ||
+        barrier->memory_order < AST_MEMORY_ORDER_ACQUIRE ||
+        barrier->memory_order > AST_MEMORY_ORDER_SEQ_CST) {
+      type_checker_set_error_at_location(checker, statement->location,
+                                         "Invalid barrier memory contract");
+      return 0;
+    }
+    return 1;
+}
+
+static int type_checker_check_errdefer(TypeChecker *checker, ASTNode *statement) {
+    if (!checker->current_function) {
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "Errdefer statement outside of a function");
+      return 0;
+    }
+
+    DeferStatement *defer_stmt = (DeferStatement *)statement->data;
+    if (!defer_stmt || !defer_stmt->statement) {
+      type_checker_set_error_at_location(checker, statement->location,
+                                         "Invalid errdefer statement");
+      return 0;
+    }
+
+    switch (defer_stmt->statement->type) {
+    case AST_FUNCTION_CALL:
+    case AST_ASSIGNMENT:
+    case AST_PROGRAM:
+      break;
+    default:
+      type_checker_set_error_at_location(checker,
+                                         defer_stmt->statement->location,
+                                         "Errdeferred statement must be a "
+                                         "function call, assignment, or block");
+      return 0;
+    }
+
+    return type_checker_check_statement(checker, defer_stmt->statement);
+}
+
+static int type_checker_check_break(TypeChecker *checker, ASTNode *statement) {
+    LoopControlStatement *brk = (LoopControlStatement *)statement->data;
+    if (checker->loop_depth <= 0 && checker->switch_depth <= 0) {
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "'break' can only be used inside a loop or switch");
+      return 0;
+    }
+    if (brk && brk->target_label &&
+        !type_checker_loop_label_in_scope(checker, brk->target_label)) {
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "'break %s' has no matching labeled loop", brk->target_label);
+      return 0;
+    }
+    return 1;
+}
+
+static int type_checker_check_continue(TypeChecker *checker, ASTNode *statement) {
+    LoopControlStatement *cont = (LoopControlStatement *)statement->data;
+    if (checker->loop_depth <= 0) {
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "'continue' can only be used inside a loop");
+      return 0;
+    }
+    if (cont && cont->target_label &&
+        !type_checker_loop_label_in_scope(checker, cont->target_label)) {
+      type_checker_set_error_at_location(
+          checker, statement->location,
+          "'continue %s' has no matching labeled loop", cont->target_label);
+      return 0;
+    }
+    return 1;
+}
+
+static int type_checker_check_statement_body(TypeChecker *checker,
+                                             ASTNode *statement) {
+  switch (statement->type) {
+  case AST_DEFER_STATEMENT:
+    return type_checker_check_defer_statement(checker, statement);
+
+  case AST_ERRDEFER_STATEMENT:
+    return type_checker_check_errdefer(checker, statement);
+
+  case AST_VAR_DECLARATION:
+  case AST_FUNCTION_DECLARATION:
+  case AST_STRUCT_DECLARATION:
+  case AST_ASSIGNMENT:
+    // These are handled by process_declaration
+    return type_checker_process_declaration(checker, statement);
+
+  case AST_FUNCTION_CALL: {
+    // Function call as statement (no return value used)
+    Type *return_type = type_checker_infer_type(checker, statement);
+    if (!return_type) {
+      return 0;
+    }
+    if (type_checker_reject_comptime_escape(checker, statement->location,
+                                            return_type)) {
+      return 0;
+    }
+    return 1;
   }
+
+  case AST_GPU_LAUNCH:
+    return type_checker_check_gpu_launch(checker, statement);
+
+  case AST_BARRIER_STATEMENT:
+    return type_checker_check_barrier(checker, statement);
+
+  case AST_RETURN_STATEMENT:
+    return type_checker_check_return(checker, statement);
 
   case AST_IF_STATEMENT:
     return type_checker_check_if_statement(checker, statement);
 
-  case AST_WHILE_STATEMENT: {
-    WhileStatement *while_stmt = (WhileStatement *)statement->data;
-    if (!while_stmt || !while_stmt->condition) {
-      type_checker_set_error_at_location(checker, statement->location,
-                                         "Invalid while statement");
-      return 0;
-    }
-
-    // Check condition type
-    Type *condition_type =
-        type_checker_infer_type(checker, while_stmt->condition);
-    if (!condition_type) {
-      return 0; // Error already reported
-    }
-    if (type_checker_reject_comptime_escape(
-            checker, while_stmt->condition->location, condition_type)) {
-      return 0;
-    }
-
-    // Condition should be a numeric type (treated as boolean)
-    if (!type_checker_is_numeric_type(condition_type)) {
-      type_checker_report_type_mismatch(checker,
-                                        while_stmt->condition->location,
-                                        "numeric type", condition_type->name);
-      return 0;
-    }
-    if (!type_checker_check_loop_uniformity(checker, while_stmt->condition,
-                                            &while_stmt->uniform_mode)) {
-      return 0;
-    }
-
-    size_t init_snapshot_count = 0;
-    unsigned char *init_snapshot =
-        type_checker_init_tracker_capture(checker, &init_snapshot_count);
-    if (checker->tracked_var_count > 0 && !init_snapshot) {
-      type_checker_set_error_at_location(
-          checker, statement->location,
-          "Out of memory while analyzing variable initialization flow");
-      return 0;
-    }
-
-    checker->loop_depth++;
-    type_checker_push_loop_label(checker, while_stmt->label);
-    {
-      size_t guard_depth = type_checker_guard_depth(checker);
-      size_t trip_depth = type_checker_loop_trip_depth(checker);
-      int body_ok = 1;
-      type_checker_push_guard(checker, while_stmt->condition, 0);
-      type_checker_push_loop_trip(checker, while_stmt->condition,
-                                  while_stmt->body);
-      if (while_stmt->body &&
-          !type_checker_check_statement(checker, while_stmt->body)) {
-        body_ok = 0;
-      }
-      type_checker_pop_loop_trip(checker, trip_depth);
-      type_checker_pop_guards(checker, guard_depth);
-      if (!body_ok) {
-        type_checker_pop_loop_label(checker);
-        checker->loop_depth--;
-        free(init_snapshot);
-        return 0;
-      }
-    }
-    type_checker_pop_loop_label(checker);
-    checker->loop_depth--;
-    type_checker_init_tracker_restore(checker, init_snapshot,
-                                      init_snapshot_count);
-    free(init_snapshot);
-
-    return 1;
-  }
+  case AST_WHILE_STATEMENT:
+    return type_checker_check_while(checker, statement);
 
   case AST_FOR_STATEMENT:
     return type_checker_check_for_statement(checker, statement);
@@ -1495,41 +1650,11 @@ static int type_checker_check_statement_body(TypeChecker *checker,
     }
     return 1;
 
-  case AST_BREAK_STATEMENT: {
-    LoopControlStatement *brk = (LoopControlStatement *)statement->data;
-    if (checker->loop_depth <= 0 && checker->switch_depth <= 0) {
-      type_checker_set_error_at_location(
-          checker, statement->location,
-          "'break' can only be used inside a loop or switch");
-      return 0;
-    }
-    if (brk && brk->target_label &&
-        !type_checker_loop_label_in_scope(checker, brk->target_label)) {
-      type_checker_set_error_at_location(
-          checker, statement->location,
-          "'break %s' has no matching labeled loop", brk->target_label);
-      return 0;
-    }
-    return 1;
-  }
+  case AST_BREAK_STATEMENT:
+    return type_checker_check_break(checker, statement);
 
-  case AST_CONTINUE_STATEMENT: {
-    LoopControlStatement *cont = (LoopControlStatement *)statement->data;
-    if (checker->loop_depth <= 0) {
-      type_checker_set_error_at_location(
-          checker, statement->location,
-          "'continue' can only be used inside a loop");
-      return 0;
-    }
-    if (cont && cont->target_label &&
-        !type_checker_loop_label_in_scope(checker, cont->target_label)) {
-      type_checker_set_error_at_location(
-          checker, statement->location,
-          "'continue %s' has no matching labeled loop", cont->target_label);
-      return 0;
-    }
-    return 1;
-  }
+  case AST_CONTINUE_STATEMENT:
+    return type_checker_check_continue(checker, statement);
 
   case AST_INLINE_ASM:
     return 1;
@@ -1542,96 +1667,9 @@ static int type_checker_check_statement_body(TypeChecker *checker,
         "'comptime for' must be a statement in a block, not a bare branch body");
     return 0;
 
-  case AST_PROGRAM: {
-    // A block of statements
-    Program *block = (Program *)statement->data;
-    if (block) {
-      /* Const eval rewrites the block before any of it is checked: a `comptime for`
-       * becomes one copy of its body per field, and each copy is checked
-       * against a different field type from here on. */
-      int expanded_ok =
-          type_checker_expand_comptime_block(checker, statement, 0);
+  case AST_PROGRAM:
+    return type_checker_check_block(checker, statement);
 
-      /* If this block is itself an expansion, every diagnostic raised while
-       * checking it names the iteration that generated it. The frame is live
-       * for the whole check, nested frames included, so a `comptime for` inside a
-       * `comptime for` reports the full chain. */
-      SourceSpan expansion_origin;
-      const char *expansion_note =
-          type_checker_expansion_note(checker, statement, &expansion_origin);
-      int note_frame_pushed =
-          expansion_note && checker->error_reporter &&
-          error_reporter_push_note_frame(checker->error_reporter,
-                                         expansion_origin, expansion_note);
-
-      // Enter a new nested scope
-      if (!symbol_table_enter_scope(checker->symbol_table, SCOPE_BLOCK)) {
-        type_checker_set_error_at_location(
-            checker, statement->location,
-            "Out of memory while entering block scope");
-        if (note_frame_pushed)
-          error_reporter_pop_note_frame(checker->error_reporter);
-        return 0;
-      }
-      if (!type_checker_init_tracker_enter_scope(checker)) {
-        type_checker_set_error_at_location(
-            checker, statement->location,
-            "Out of memory while entering initialization analysis scope");
-        symbol_table_exit_scope(checker->symbol_table);
-        if (note_frame_pushed)
-          error_reporter_pop_note_frame(checker->error_reporter);
-        return 0;
-      }
-
-      /* The binding is declared in the expansion's own scope, so it cannot be
-       * seen by anything outside the body the programmer wrote. */
-      int block_ok = expanded_ok &&
-                     type_checker_declare_expansion_binding(checker, statement);
-      int reached_terminator = 0;
-      size_t block_guard_depth = type_checker_guard_depth(checker);
-      for (size_t i = 0; i < statement->child_count; i++) {
-        ASTNode *child = statement->children[i];
-        /* A directive still standing here is one the expander refused and has
-         * already reported on. Checking it again would only cascade. */
-        if (child && child->type == AST_COMPTIME_FOR) {
-          continue;
-        }
-        if (reached_terminator && checker->error_reporter && child) {
-          error_reporter_add_warning(
-              checker->error_reporter, ERROR_SEMANTIC, child->location,
-              "Unreachable code: statement will never execute");
-        }
-        // A bad statement doesn't stop the walk: keep checking the block's
-        // remaining statements so one compile reports every error.
-        if (!type_checker_check_statement(checker, statement->children[i])) {
-          block_ok = 0;
-        }
-        if (type_checker_statement_guarantees_termination(child)) {
-          reached_terminator = 1;
-        }
-        if (child && child->type == AST_IF_STATEMENT && child->data) {
-          IfStatement *early = (IfStatement *)child->data;
-          if (early->condition && !early->else_branch &&
-              early->else_if_count == 0 && early->then_branch &&
-              type_checker_statement_guarantees_termination(
-                  early->then_branch)) {
-            type_checker_push_guard(checker, early->condition, 1);
-          }
-        }
-      }
-      type_checker_pop_guards(checker, block_guard_depth);
-
-      if (block_ok)
-        type_checker_warn_unused_locals(checker);
-      type_checker_init_tracker_exit_scope(checker);
-      symbol_table_exit_scope(checker->symbol_table);
-      if (note_frame_pushed)
-        error_reporter_pop_note_frame(checker->error_reporter);
-      if (!block_ok)
-        return 0;
-    }
-    return 1;
-  }
   default: {
     /* Everything that reaches here is an expression standing where a
        statement belongs. Name the shape and say what happens to its value,

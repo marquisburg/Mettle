@@ -1347,7 +1347,217 @@ static int type_checker_builtin_by_name(TypeChecker *checker,
   return 0;
 }
 
+static int type_checker_parse_view_layout(TypeChecker *checker, const char *name, Type **out) {
+  unsigned char layout = VIEW_LAYOUT_NONE;
+  unsigned short parameter = 0;
+  size_t length = strlen(name);
+  size_t head = type_checker_split_view_layout(name, length, &layout,
+                                               &parameter);
+  if (head != length) {
+    char *plain = malloc(head + 1);
+    Type *base;
+    Type *laid_out;
+    if (!plain) {
+      *out = NULL;
+      return 1;
+    }
+    memcpy(plain, name, head);
+    plain[head] = '\0';
+    base = type_checker_get_type_by_name(checker, plain);
+    free(plain);
+    if (!base || base->kind != TYPE_SLICE) {
+      *out = NULL;
+      return 1;
+    }
+    for (size_t i = 0; i < checker->type_table_count; i++) {
+      Type *existing = checker->type_table[i];
+      if (existing && existing->name &&
+          strcmp(existing->name, name) == 0) {
+        *out = existing;
+        return 1;
+      }
+    }
+    laid_out = type_create(TYPE_SLICE, name);
+    if (!laid_out) {
+      *out = NULL;
+      return 1;
+    }
+    /* The layout is the only difference, and the field arrays are the
+       base's. Interning directly rather than canonicalizing is what keeps
+       them the base's: a canonicalization that found an equal type would
+       destroy this one and take those arrays with it. */
+    *laid_out = *base;
+    laid_out->name = (char *)string_intern(name);
+    laid_out->type_table_index = UINT32_MAX;
+    laid_out->view_layout = layout;
+    laid_out->view_layout_param = parameter;
+    if (type_checker_intern_type(checker, laid_out) == UINT32_MAX) {
+      *out = base;
+      return 1;
+    }
+    *out = laid_out;
+    return 1;
+  }
+  return 0;
+}
+
+static int type_checker_parse_extent_view(TypeChecker *checker, const char *name, Type **out) {
+  size_t length = strlen(name);
+  if (length > 3 && name[length - 1] == ']' && strchr(name, ',')) {
+    size_t open = length - 1;
+    size_t extents[4];
+    size_t rank = 0;
+    int all_numeric = 1;
+    while (open > 0 && name[open] != '[') {
+      open--;
+    }
+    if (name[open] == '[' && open > 0) {
+      const char *scan = name + open + 1;
+      while (scan < name + length - 1 && rank < 4) {
+        char *end = NULL;
+        unsigned long value = strtoul(scan, &end, 10);
+        if (end == scan || value == 0) {
+          all_numeric = 0;
+          break;
+        }
+        extents[rank++] = (size_t)value;
+        scan = end;
+        if (*scan == ',') {
+          scan++;
+        } else {
+          break;
+        }
+      }
+      if (all_numeric && rank >= 2 && scan == name + length - 1) {
+        unsigned char space = DEVICE_SPACE_NONE;
+        size_t align = 0;
+        size_t plain = type_checker_split_device_qualifiers(name, open,
+                                                            &space, &align);
+        char *element_name = malloc(plain + 1);
+        Type *element;
+        Type *view;
+        if (!element_name || plain == 0) {
+          free(element_name);
+          *out = NULL;
+          return 1;
+        }
+        memcpy(element_name, name, plain);
+        element_name[plain] = '\0';
+        element = type_checker_get_type_by_name(checker, element_name);
+        free(element_name);
+        if (!element) {
+          *out = NULL;
+          return 1;
+        }
+        view = type_checker_static_view_of(checker, element, name, extents,
+                                           rank);
+        if (view) {
+          view->device_space = space;
+          view->declared_align = align;
+          *out = view;
+          return 1;
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+static int type_checker_parse_slice(TypeChecker *checker, const char *name, Type **out) {
+  size_t length = strlen(name);
+  if (length > 4 && strcmp(name + length - 4, "[..]") == 0) {
+    char *element_name = malloc(length - 3);
+    Type *element = NULL;
+    if (!element_name) {
+      *out = NULL;
+      return 1;
+    }
+    memcpy(element_name, name, length - 4);
+    element_name[length - 4] = '\0';
+    element = type_checker_get_type_by_name(checker, element_name);
+    free(element_name);
+    *out = element ? type_checker_slice_of(checker, element) : NULL;
+    return 1;
+  }
+  if (length > 2 && name[length - 2] == '[' && name[length - 1] == ']') {
+    size_t head = length - 2;
+    unsigned char space = DEVICE_SPACE_NONE;
+    size_t align = 0;
+    size_t plain = type_checker_split_device_qualifiers(name, head, &space,
+                                                        &align);
+    char *element_name = malloc(plain + 1);
+    char *qualifiers = NULL;
+    Type *element = NULL;
+    Type *slice = NULL;
+    if (!element_name || plain == 0) {
+      free(element_name);
+      *out = NULL;
+      return 1;
+    }
+    memcpy(element_name, name, plain);
+    element_name[plain] = '\0';
+    if (plain != head) {
+      qualifiers = type_checker_qualifier_text(name, head, plain);
+      if (!qualifiers) {
+        free(element_name);
+        *out = NULL;
+        return 1;
+      }
+    }
+    element = type_checker_get_type_by_name(checker, element_name);
+    free(element_name);
+    slice = element ? type_checker_device_slice_of(checker, element, space,
+                                                   align, qualifiers)
+                    : NULL;
+    free(qualifiers);
+    *out = slice;
+    return 1;
+  }
+  if (length > 3 && name[length - 1] == ']' && name[length - 2] == ',') {
+    size_t open = length - 2;
+    while (open > 0 && name[open] == ',') {
+      open--;
+    }
+    if (name[open] == '[' && open > 0) {
+      size_t rank = length - 1 - open;
+      unsigned char space = DEVICE_SPACE_NONE;
+      size_t align = 0;
+      size_t plain = type_checker_split_device_qualifiers(name, open, &space,
+                                                          &align);
+      char *element_name = malloc(plain + 1);
+      char *qualifiers = NULL;
+      Type *element = NULL;
+      Type *view = NULL;
+      if (!element_name || plain == 0) {
+        free(element_name);
+        *out = NULL;
+        return 1;
+      }
+      memcpy(element_name, name, plain);
+      element_name[plain] = '\0';
+      if (plain != open) {
+        qualifiers = type_checker_qualifier_text(name, open, plain);
+        if (!qualifiers) {
+          free(element_name);
+          *out = NULL;
+          return 1;
+        }
+      }
+      element = type_checker_get_type_by_name(checker, element_name);
+      free(element_name);
+      view = element ? type_checker_device_view_of(checker, element, rank,
+                                                   space, align, qualifiers)
+                     : NULL;
+      free(qualifiers);
+      *out = view;
+      return 1;
+    }
+  }
+  return 0;
+}
+
 Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
+  Type *named = NULL;
   if (!checker || !name)
     return NULL;
 
@@ -1362,199 +1572,22 @@ Type *type_checker_get_type_by_name(TypeChecker *checker, const char *name) {
   /* A layout is part of the type, so it is peeled first and stamped on what is
      left. `float16[128,64] layout swizzle128` is a swizzled view of the same
      shape as the row-major one, and neither flows into the other. */
-  {
-    unsigned char layout = VIEW_LAYOUT_NONE;
-    unsigned short parameter = 0;
-    size_t length = strlen(name);
-    size_t head = type_checker_split_view_layout(name, length, &layout,
-                                                 &parameter);
-    if (head != length) {
-      char *plain = malloc(head + 1);
-      Type *base;
-      Type *laid_out;
-      if (!plain) {
-        return NULL;
-      }
-      memcpy(plain, name, head);
-      plain[head] = '\0';
-      base = type_checker_get_type_by_name(checker, plain);
-      free(plain);
-      if (!base || base->kind != TYPE_SLICE) {
-        return NULL;
-      }
-      for (size_t i = 0; i < checker->type_table_count; i++) {
-        Type *existing = checker->type_table[i];
-        if (existing && existing->name &&
-            strcmp(existing->name, name) == 0) {
-          return existing;
-        }
-      }
-      laid_out = type_create(TYPE_SLICE, name);
-      if (!laid_out) {
-        return NULL;
-      }
-      /* The layout is the only difference, and the field arrays are the
-         base's. Interning directly rather than canonicalizing is what keeps
-         them the base's: a canonicalization that found an equal type would
-         destroy this one and take those arrays with it. */
-      *laid_out = *base;
-      laid_out->name = (char *)string_intern(name);
-      laid_out->type_table_index = UINT32_MAX;
-      laid_out->view_layout = layout;
-      laid_out->view_layout_param = parameter;
-      if (type_checker_intern_type(checker, laid_out) == UINT32_MAX) {
-        return base;
-      }
-      return laid_out;
-    }
+  if (type_checker_parse_view_layout(checker, name, &named)) {
+    return named;
   }
 
   /* `T[128,64]`: a view whose extents are in its type. It is a pointer and a
      shape, so nothing travels beside the data and every index into one is
      bounded by the declaration. */
-  {
-    size_t length = strlen(name);
-    if (length > 3 && name[length - 1] == ']' && strchr(name, ',')) {
-      size_t open = length - 1;
-      size_t extents[4];
-      size_t rank = 0;
-      int all_numeric = 1;
-      while (open > 0 && name[open] != '[') {
-        open--;
-      }
-      if (name[open] == '[' && open > 0) {
-        const char *scan = name + open + 1;
-        while (scan < name + length - 1 && rank < 4) {
-          char *end = NULL;
-          unsigned long value = strtoul(scan, &end, 10);
-          if (end == scan || value == 0) {
-            all_numeric = 0;
-            break;
-          }
-          extents[rank++] = (size_t)value;
-          scan = end;
-          if (*scan == ',') {
-            scan++;
-          } else {
-            break;
-          }
-        }
-        if (all_numeric && rank >= 2 && scan == name + length - 1) {
-          unsigned char space = DEVICE_SPACE_NONE;
-          size_t align = 0;
-          size_t plain = type_checker_split_device_qualifiers(name, open,
-                                                              &space, &align);
-          char *element_name = malloc(plain + 1);
-          Type *element;
-          Type *view;
-          if (!element_name || plain == 0) {
-            free(element_name);
-            return NULL;
-          }
-          memcpy(element_name, name, plain);
-          element_name[plain] = '\0';
-          element = type_checker_get_type_by_name(checker, element_name);
-          free(element_name);
-          if (!element) {
-            return NULL;
-          }
-          view = type_checker_static_view_of(checker, element, name, extents,
-                                             rank);
-          if (view) {
-            view->device_space = space;
-            view->declared_align = align;
-            return view;
-          }
-        }
-      }
-    }
+  if (type_checker_parse_extent_view(checker, name, &named)) {
+    return named;
   }
 
   /* `T[]`: a slice, which is `T*` and a length in one value. The brackets are
    * empty because the length is not part of the type. `T[..]` is the same type
    * written where a parameter gathers its arguments. */
-  {
-    size_t length = strlen(name);
-    if (length > 4 && strcmp(name + length - 4, "[..]") == 0) {
-      char *element_name = malloc(length - 3);
-      Type *element = NULL;
-      if (!element_name) {
-        return NULL;
-      }
-      memcpy(element_name, name, length - 4);
-      element_name[length - 4] = '\0';
-      element = type_checker_get_type_by_name(checker, element_name);
-      free(element_name);
-      return element ? type_checker_slice_of(checker, element) : NULL;
-    }
-    if (length > 2 && name[length - 2] == '[' && name[length - 1] == ']') {
-      size_t head = length - 2;
-      unsigned char space = DEVICE_SPACE_NONE;
-      size_t align = 0;
-      size_t plain = type_checker_split_device_qualifiers(name, head, &space,
-                                                          &align);
-      char *element_name = malloc(plain + 1);
-      char *qualifiers = NULL;
-      Type *element = NULL;
-      Type *slice = NULL;
-      if (!element_name || plain == 0) {
-        free(element_name);
-        return NULL;
-      }
-      memcpy(element_name, name, plain);
-      element_name[plain] = '\0';
-      if (plain != head) {
-        qualifiers = type_checker_qualifier_text(name, head, plain);
-        if (!qualifiers) {
-          free(element_name);
-          return NULL;
-        }
-      }
-      element = type_checker_get_type_by_name(checker, element_name);
-      free(element_name);
-      slice = element ? type_checker_device_slice_of(checker, element, space,
-                                                     align, qualifiers)
-                      : NULL;
-      free(qualifiers);
-      return slice;
-    }
-    if (length > 3 && name[length - 1] == ']' && name[length - 2] == ',') {
-      size_t open = length - 2;
-      while (open > 0 && name[open] == ',') {
-        open--;
-      }
-      if (name[open] == '[' && open > 0) {
-        size_t rank = length - 1 - open;
-        unsigned char space = DEVICE_SPACE_NONE;
-        size_t align = 0;
-        size_t plain = type_checker_split_device_qualifiers(name, open, &space,
-                                                            &align);
-        char *element_name = malloc(plain + 1);
-        char *qualifiers = NULL;
-        Type *element = NULL;
-        Type *view = NULL;
-        if (!element_name || plain == 0) {
-          free(element_name);
-          return NULL;
-        }
-        memcpy(element_name, name, plain);
-        element_name[plain] = '\0';
-        if (plain != open) {
-          qualifiers = type_checker_qualifier_text(name, open, plain);
-          if (!qualifiers) {
-            free(element_name);
-            return NULL;
-          }
-        }
-        element = type_checker_get_type_by_name(checker, element_name);
-        free(element_name);
-        view = element ? type_checker_device_view_of(checker, element, rank,
-                                                     space, align, qualifiers)
-                       : NULL;
-        free(qualifiers);
-        return view;
-      }
-    }
+  if (type_checker_parse_slice(checker, name, &named)) {
+    return named;
   }
 
   /* A parenthesised type. Bare, it is the type inside; suffixed, the array and
@@ -2196,16 +2229,119 @@ static int type_checker_expression_is_destination_width(TypeChecker *checker,
              expression->resolved_type, dest_type);
 }
 
+static int assignable_widens_effects(TypeChecker *checker, Type *dest_type,
+                                     Type *src_type, ASTNode *src_expr) {
+  return checker && dest_type && src_type && src_expr &&
+         dest_type->kind == TYPE_FUNCTION_POINTER &&
+         src_type->kind == TYPE_FUNCTION_POINTER &&
+         !src_type->fn_effects_closed && src_type->fn_require_count == 0 &&
+         (dest_type->closure_env != NULL) ==
+             (src_type->closure_env != NULL) &&
+         type_checker_fn_signatures_equal(dest_type, src_type);
+}
+
+static int assignable_device_view(TypeChecker *checker, Type *dest_type,
+                                  Type *src_type, ASTNode *src_expr) {
+  return checker && dest_type && src_type && src_expr &&
+         dest_type->kind == TYPE_SLICE && src_type->kind == TYPE_SLICE &&
+         dest_type->view_extents[0] > 0 &&
+         dest_type->device_space != DEVICE_SPACE_NONE &&
+         src_type->device_space == DEVICE_SPACE_NONE &&
+         dest_type->view_layout == src_type->view_layout &&
+         dest_type->view_layout_param == src_type->view_layout_param &&
+         type_view_rank(dest_type) == type_view_rank(src_type) &&
+         dest_type->view_extents[0] == src_type->view_extents[0] &&
+         dest_type->view_extents[1] == src_type->view_extents[1] &&
+         dest_type->view_extents[2] == src_type->view_extents[2] &&
+         dest_type->view_extents[3] == src_type->view_extents[3] &&
+         type_checker_types_equal(dest_type->base_type, src_type->base_type) &&
+         type_checker_lvalue_device_space(checker, src_expr) ==
+             dest_type->device_space;
+}
+
+static int assignable_device_array(TypeChecker *checker, Type *dest_type,
+                                   Type *src_type, ASTNode *src_expr) {
+  return checker && dest_type && src_type && src_expr &&
+         src_type->kind == TYPE_ARRAY && dest_type->declared_align == 0 &&
+         (dest_type->kind == TYPE_POINTER ||
+          (dest_type->kind == TYPE_SLICE && type_view_rank(dest_type) == 1)) &&
+         dest_type->device_space != DEVICE_SPACE_NONE &&
+         dest_type->base_type && src_type->base_type &&
+         type_checker_types_equal(dest_type->base_type, src_type->base_type) &&
+         type_checker_lvalue_device_space(checker, src_expr) ==
+             dest_type->device_space;
+}
+
+static int assignable_is_literal(const ASTNode *src_expr) {
+  return src_expr->type == AST_NUMBER_LITERAL ||
+         src_expr->type == AST_STRING_LITERAL ||
+         (src_expr->type == AST_UNARY_EXPRESSION &&
+          ((UnaryExpression *)src_expr->data)->operand &&
+          ((UnaryExpression *)src_expr->data)->operand->type ==
+              AST_NUMBER_LITERAL);
+}
+
+static int assignable_refuse(TypeChecker *checker, const char *message) {
+  free(checker->refine_failure);
+  checker->refine_failure = strdup(message);
+  return 0;
+}
+
+static int assignable_to_refinement(TypeChecker *checker, Type *dest_type,
+                                    Type *src_type, ASTNode *src_expr) {
+  Type *dest_base = type_checker_refinement_base(dest_type);
+  char message[320];
+
+  if (!type_checker_is_assignable_from(checker, dest_base, src_type,
+                                       src_expr) ||
+      !src_expr) {
+    return 0;
+  }
+  if (dest_type->refinement) {
+    return type_checker_prove_refinement(checker, dest_type, src_expr);
+  }
+  if (src_type->refined_base) {
+    snprintf(message, sizeof(message),
+             "'%s' and '%s' are different declared types and do not mix; "
+             "convert one of them where the meaning is decided: (%s)value",
+             src_type->name ? src_type->name : "?",
+             dest_type->name ? dest_type->name : "?",
+             dest_type->name ? dest_type->name : "?");
+    return assignable_refuse(checker, message);
+  }
+  if (!assignable_is_literal(src_expr)) {
+    snprintf(message, sizeof(message),
+             "'%s' is a declared type; a plain '%s' becomes one where the "
+             "meaning is decided: (%s)value",
+             dest_type->name ? dest_type->name : "?",
+             src_type->name ? src_type->name : "?",
+             dest_type->name ? dest_type->name : "?");
+    return assignable_refuse(checker, message);
+  }
+  src_expr->proven_refinement = dest_type;
+  return 1;
+}
+
+static int assignable_narrows_float(Type *dest_type, ASTNode *src_expr) {
+  NumberLiteral *literal;
+
+  if (src_expr->type != AST_NUMBER_LITERAL || !src_expr->data) {
+    return 0;
+  }
+  literal = (NumberLiteral *)src_expr->data;
+  if (!literal->is_float) {
+    return 0;
+  }
+  return dest_type->kind == TYPE_FLOAT16
+             ? mettle_f64_is_exact_f16(literal->float_value)
+             : mettle_f64_is_exact_bf16(literal->float_value);
+}
+
 int type_checker_is_assignable_from(TypeChecker *checker, Type *dest_type,
                                     Type *src_type, ASTNode *src_expr) {
   long long folded = 0;
 
-  if (checker && dest_type && src_type && src_expr &&
-      dest_type->kind == TYPE_FUNCTION_POINTER &&
-      src_type->kind == TYPE_FUNCTION_POINTER &&
-      !src_type->fn_effects_closed && src_type->fn_require_count == 0 &&
-      (dest_type->closure_env != NULL) == (src_type->closure_env != NULL) &&
-      type_checker_fn_signatures_equal(dest_type, src_type)) {
+  if (assignable_widens_effects(checker, dest_type, src_type, src_expr)) {
     const char *named = type_checker_function_value_name(checker, src_expr);
     if (named) {
       return type_checker_add_effect_obligation(
@@ -2215,88 +2351,13 @@ int type_checker_is_assignable_from(TypeChecker *checker, Type *dest_type,
           src_expr->location);
     }
   }
-  if (type_checker_is_assignable(checker, dest_type, src_type)) {
-    return 1;
-  }
-  /* An array whose binding names a device space decays into a pointer or a
-     view in that space. The space comes from where the storage was declared,
-     so `workgroup var tile: float32[256]` reaches a `float32 shared*`
-     parameter and nothing else does. */
-  /* A view whose extents are in its type, declared as workgroup or private
-     storage, reaches a parameter that names the same shape in that space. The
-     space comes from the binding, so nothing else does. */
-  if (checker && dest_type && src_type && src_expr &&
-      dest_type->kind == TYPE_SLICE && src_type->kind == TYPE_SLICE &&
-      dest_type->view_extents[0] > 0 &&
-      dest_type->device_space != DEVICE_SPACE_NONE &&
-      src_type->device_space == DEVICE_SPACE_NONE &&
-      dest_type->view_layout == src_type->view_layout &&
-      dest_type->view_layout_param == src_type->view_layout_param &&
-      type_view_rank(dest_type) == type_view_rank(src_type) &&
-      dest_type->view_extents[0] == src_type->view_extents[0] &&
-      dest_type->view_extents[1] == src_type->view_extents[1] &&
-      dest_type->view_extents[2] == src_type->view_extents[2] &&
-      dest_type->view_extents[3] == src_type->view_extents[3] &&
-      type_checker_types_equal(dest_type->base_type, src_type->base_type) &&
-      type_checker_lvalue_device_space(checker, src_expr) ==
-          dest_type->device_space) {
-    return 1;
-  }
-  if (checker && dest_type && src_type && src_expr &&
-      src_type->kind == TYPE_ARRAY && dest_type->declared_align == 0 &&
-      (dest_type->kind == TYPE_POINTER ||
-       (dest_type->kind == TYPE_SLICE && type_view_rank(dest_type) == 1)) &&
-      dest_type->device_space != DEVICE_SPACE_NONE &&
-      dest_type->base_type && src_type->base_type &&
-      type_checker_types_equal(dest_type->base_type, src_type->base_type) &&
-      type_checker_lvalue_device_space(checker, src_expr) ==
-          dest_type->device_space) {
+  if (type_checker_is_assignable(checker, dest_type, src_type) ||
+      assignable_device_view(checker, dest_type, src_type, src_expr) ||
+      assignable_device_array(checker, dest_type, src_type, src_expr)) {
     return 1;
   }
   if (checker && dest_type && src_type && dest_type->refined_base) {
-    Type *dest_base = type_checker_refinement_base(dest_type);
-    char message[320];
-    if (!type_checker_is_assignable_from(checker, dest_base, src_type,
-                                         src_expr)) {
-      return 0;
-    }
-    if (!src_expr) {
-      return 0;
-    }
-    if (!dest_type->refinement) {
-      int literal = src_expr->type == AST_NUMBER_LITERAL ||
-                    src_expr->type == AST_STRING_LITERAL ||
-                    (src_expr->type == AST_UNARY_EXPRESSION &&
-                     ((UnaryExpression *)src_expr->data)->operand &&
-                     ((UnaryExpression *)src_expr->data)->operand->type ==
-                         AST_NUMBER_LITERAL);
-      if (src_type->refined_base) {
-        snprintf(message, sizeof(message),
-                 "'%s' and '%s' are different declared types and do not "
-                 "mix; convert one of them where the meaning is decided: "
-                 "(%s)value",
-                 src_type->name ? src_type->name : "?",
-                 dest_type->name ? dest_type->name : "?",
-                 dest_type->name ? dest_type->name : "?");
-        free(checker->refine_failure);
-        checker->refine_failure = strdup(message);
-        return 0;
-      }
-      if (!literal) {
-        snprintf(message, sizeof(message),
-                 "'%s' is a declared type; a plain '%s' becomes one where "
-                 "the meaning is decided: (%s)value",
-                 dest_type->name ? dest_type->name : "?",
-                 src_type->name ? src_type->name : "?",
-                 dest_type->name ? dest_type->name : "?");
-        free(checker->refine_failure);
-        checker->refine_failure = strdup(message);
-        return 0;
-      }
-      src_expr->proven_refinement = dest_type;
-      return 1;
-    }
-    return type_checker_prove_refinement(checker, dest_type, src_expr);
+    return assignable_to_refinement(checker, dest_type, src_type, src_expr);
   }
   if (src_type && src_type->refined_base) {
     src_type = type_checker_refinement_base(src_type);
@@ -2307,17 +2368,7 @@ int type_checker_is_assignable_from(TypeChecker *checker, Type *dest_type,
   if (src_expr && checker && dest_type && src_type &&
       (dest_type->kind == TYPE_FLOAT16 || dest_type->kind == TYPE_BFLOAT16) &&
       (src_type->kind == TYPE_FLOAT32 || src_type->kind == TYPE_FLOAT64)) {
-    if (src_expr->type == AST_NUMBER_LITERAL && src_expr->data) {
-      NumberLiteral *lit = (NumberLiteral *)src_expr->data;
-      if (lit->is_float) {
-        double v = lit->float_value;
-        if (dest_type->kind == TYPE_FLOAT16) {
-          return mettle_f64_is_exact_f16(v);
-        }
-        return mettle_f64_is_exact_bf16(v);
-      }
-    }
-    return 0;
+    return assignable_narrows_float(dest_type, src_expr);
   }
   if (!src_expr || !checker || !dest_type || !src_type ||
       !type_checker_is_integer_type(dest_type) ||
