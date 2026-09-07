@@ -668,15 +668,12 @@ $cases = @(
       # grouped by cause with consequence text and sizes
       'backend report: explain_demo\.mettle',
       'optimized IR instructions are in register-allocated code',
-      'contains the affine-map kernel `simd_affine_map` in a form the register allocator',
-      'consequence: the kernel itself runs at full vector speed',
-      # A whole-function fallback leads the plan: it is a measured cost over a
-      # whole function, where a loop remark is a prediction about one loop. It
-      # also names the calls that brought the kernel in -- main never wrote a
-      # vectorized loop of its own, so "contains simd_affine_map" alone would
-      # point at nothing the reader could find.
-      'spills main \(\d+ instrs\)',
-      'kernel inlined from `saxpy` @ line \d+',
+      # Every function the demo reaches codegen with is register-allocated: a
+      # runtime affine-map coefficient runs through the kernel bridge now, so
+      # the backend section reports full coverage and no function leads the
+      # plan on a codegen fallback.
+      '(\d+)/\1 functions reaching codegen \(after inlining\) compiled with the register-allocating backend',
+      '100\.0% of the program',
       # dependence analysis: a non-reassociable loop-carried recurrence (the
       # LCG/hash shape) is diagnosed as a genuine scalar floor, naming the
       # carried operators -- not the generic "no vectorizer recognized" fallback
@@ -696,9 +693,10 @@ $cases = @(
     OutputMustMatch = @(
       'loops: \d+ vectorized, \d+ scalar; \d+ fix suggestions verified',
       'calls: \d+ inlined, \d+ kept as real calls',
-      'backend: \d+/\d+ functions register-allocated',
-      # the digest names what to do, not just how the build went
-      'start with: main \(\d+ instrs\)  move the vectorized loop into a function of its own',
+      'backend: (\d+)/\1 functions register-allocated',
+      # the digest names what to do, not just how the build went: with every
+      # function register-allocated, the first thing to do is a proven fix
+      'start with: \[proven\] \w+:\d+  ',
       'full report \(\d+ lines\): .*explain_sidecar\.explain\.txt'
     )
     OutputMustNotMatch = @(
@@ -709,7 +707,7 @@ $cases = @(
       'optimization report: explain_demo\.mettle',
       'verified: simulated that fix and re-ran the optimizer',
       'backend report: explain_demo\.mettle',
-      'consequence: the kernel itself runs at full vector speed'
+      '100\.0% of the program'
     )
   },
   @{
@@ -9212,12 +9210,12 @@ try {
     throw "JSON loop costs missing cycles or bottleneck port"
   }
   # The triage a tool renders as a fix-it panel: same ranking as the prose
-  # "where to start". Whole-function codegen fallbacks lead (a measured cost,
-  # not a per-loop prediction), then proven fixes, and the fix is untruncated.
+  # "where to start". A whole-function codegen fallback would lead (a measured
+  # cost, not a per-loop prediction); with every function register-allocated
+  # the proven fixes lead, and the fix is untruncated.
   $start = @($json.startHere)
   if ($start.Count -lt 1) { throw "JSON startHere ranking missing" }
-  if ($start[0].kind -ne "backend") { throw "JSON startHere should lead with the codegen fallback" }
-  if (-not $start[0].why -or -not $start[0].instructions) { throw "JSON backend entry incomplete" }
+  if ($start[0].kind -ne "remark" -or -not $start[0].proven) { throw "JSON startHere should lead with a proven fix" }
   $firstRemark = @($start | Where-Object { $_.kind -eq "remark" })[0]
   if (-not $firstRemark.proven) { throw "JSON startHere should lead its remarks with a proven fix" }
   if (-not $firstRemark.fix -or -not $firstRemark.code) { throw "JSON startHere entry incomplete" }
