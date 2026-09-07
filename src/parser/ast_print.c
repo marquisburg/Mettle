@@ -458,6 +458,77 @@ static void print_effect_clause(AstPrinter *printer, const char *word,
   }
 }
 
+static void print_function_declaration(AstPrinter *printer, const ASTNode *node) {
+  const FunctionDeclaration *decl = (const FunctionDeclaration *)node->data;
+  if (!decl) {
+    return;
+  }
+  if (decl->is_inline) {
+    fputs(decl->is_inline_contract ? "@inline! " : "@inline ", printer->out);
+  }
+  if (decl->is_noinline) {
+    fputs("@noinline ", printer->out);
+  }
+  if (decl->is_pure) {
+    fputs("@pure ", printer->out);
+  }
+  if (decl->is_noalloc) {
+    fputs("@noalloc ", printer->out);
+  }
+  if (decl->is_test) {
+    fputs("@test ", printer->out);
+  }
+  if (decl->is_rule) {
+    fputs("@rule ", printer->out);
+  }
+  if (decl->is_swappable) {
+    fputs("@swappable ", printer->out);
+  }
+  if (decl->is_naked) {
+    fputs("@naked ", printer->out);
+  }
+  if (decl->is_interrupt) {
+    fputs("@interrupt ", printer->out);
+  }
+  if (decl->simd_mode == SIMD_ATTR_HINT) {
+    fputs("@simd ", printer->out);
+  } else if (decl->simd_mode == SIMD_ATTR_CONTRACT) {
+    fputs("@simd! ", printer->out);
+  }
+  if (decl->is_exported) {
+    fputs("export ", printer->out);
+  }
+  fprintf(printer->out, "fn %s(", decl->name ? decl->name : "<name>");
+  for (size_t i = 0; i < decl->parameter_count; i++) {
+    fprintf(printer->out, "%s%s: %s", i ? ", " : "",
+            decl->parameter_names[i], decl->parameter_types[i]);
+  }
+  fputc(')', printer->out);
+  if (decl->return_type) {
+    fprintf(printer->out, " -> %s", decl->return_type);
+  }
+  print_effect_clause(printer, "with", decl->effects_with,
+                      decl->effects_with_count);
+  print_effect_clause(printer, "forbids", decl->effects_forbids,
+                      decl->effects_forbids_count);
+  print_effect_clause(printer, "requires", decl->effects_requires,
+                      decl->effects_requires_count);
+  print_effect_clause(printer, "provides", decl->effects_provides,
+                      decl->effects_provides_count);
+  if (!decl->body) {
+    fputs(";\n\n", printer->out);
+    return;
+  }
+  fputs(" {\n", printer->out);
+  printer->depth++;
+  for (size_t i = 0; i < decl->body->child_count; i++) {
+    print_statement(printer, decl->body->children[i]);
+  }
+  printer->depth--;
+  fputs("}\n\n", printer->out);
+  return;
+}
+
 static void print_declaration(AstPrinter *printer, const ASTNode *node) {
   if (!node) {
     return;
@@ -530,76 +601,8 @@ static void print_declaration(AstPrinter *printer, const ASTNode *node) {
     break;
   }
 
-  case AST_FUNCTION_DECLARATION: {
-    const FunctionDeclaration *decl = (const FunctionDeclaration *)node->data;
-    if (!decl) {
-      break;
-    }
-    if (decl->is_inline) {
-      fputs(decl->is_inline_contract ? "@inline! " : "@inline ", printer->out);
-    }
-    if (decl->is_noinline) {
-      fputs("@noinline ", printer->out);
-    }
-    if (decl->is_pure) {
-      fputs("@pure ", printer->out);
-    }
-    if (decl->is_noalloc) {
-      fputs("@noalloc ", printer->out);
-    }
-    if (decl->is_test) {
-      fputs("@test ", printer->out);
-    }
-    if (decl->is_rule) {
-      fputs("@rule ", printer->out);
-    }
-    if (decl->is_swappable) {
-      fputs("@swappable ", printer->out);
-    }
-    if (decl->is_naked) {
-      fputs("@naked ", printer->out);
-    }
-    if (decl->is_interrupt) {
-      fputs("@interrupt ", printer->out);
-    }
-    if (decl->simd_mode == SIMD_ATTR_HINT) {
-      fputs("@simd ", printer->out);
-    } else if (decl->simd_mode == SIMD_ATTR_CONTRACT) {
-      fputs("@simd! ", printer->out);
-    }
-    if (decl->is_exported) {
-      fputs("export ", printer->out);
-    }
-    fprintf(printer->out, "fn %s(", decl->name ? decl->name : "<name>");
-    for (size_t i = 0; i < decl->parameter_count; i++) {
-      fprintf(printer->out, "%s%s: %s", i ? ", " : "",
-              decl->parameter_names[i], decl->parameter_types[i]);
-    }
-    fputc(')', printer->out);
-    if (decl->return_type) {
-      fprintf(printer->out, " -> %s", decl->return_type);
-    }
-    print_effect_clause(printer, "with", decl->effects_with,
-                        decl->effects_with_count);
-    print_effect_clause(printer, "forbids", decl->effects_forbids,
-                        decl->effects_forbids_count);
-    print_effect_clause(printer, "requires", decl->effects_requires,
-                        decl->effects_requires_count);
-    print_effect_clause(printer, "provides", decl->effects_provides,
-                        decl->effects_provides_count);
-    if (!decl->body) {
-      fputs(";\n\n", printer->out);
-      break;
-    }
-    fputs(" {\n", printer->out);
-    printer->depth++;
-    for (size_t i = 0; i < decl->body->child_count; i++) {
-      print_statement(printer, decl->body->children[i]);
-    }
-    printer->depth--;
-    fputs("}\n\n", printer->out);
-    break;
-  }
+  case AST_FUNCTION_DECLARATION:
+    return print_function_declaration(printer, node);
 
   case AST_IMPORT:
   case AST_IMPORT_STR:

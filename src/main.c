@@ -4032,7 +4032,21 @@ static DriverFlagResult parse_flag_gpu(CompilerOptions *options,
     options->report_launches = 1;
   } else if (strcmp(argv[i], "--report-gpu-types") == 0) {
     options->report_gpu_types = 1;
-  } else if (strcmp(argv[i], "--old") == 0 && i + 1 < argc) {
+  } else {
+    return DRIVER_FLAG_UNMATCHED;
+  }
+  *index = i;
+  return DRIVER_FLAG_TAKEN;
+}
+
+static DriverFlagResult parse_flag_checks(CompilerOptions *options,
+                                     DriverFlags *flags,
+                                     int argc, char *argv[],
+                                     int *index) {
+  int i = *index;
+  (void)argc;
+  (void)flags;
+  if (strcmp(argv[i], "--old") == 0 && i + 1 < argc) {
     options->swap_old_name = argv[++i];
   } else if (strcmp(argv[i], "--new") == 0 && i + 1 < argc) {
     options->swap_new_name = argv[++i];
@@ -4267,6 +4281,7 @@ typedef DriverFlagResult (*DriverFlagParser)(CompilerOptions *, DriverFlags *,
 
 static const DriverFlagParser DRIVER_FLAG_PARSERS[] = {
     parse_flag_output, parse_flag_diagnostics, parse_flag_gpu,
+    parse_flag_checks,
     parse_flag_codegen, parse_flag_target};
 
 static int parse_arguments(CompilerOptions *options, DriverFlags *flags,

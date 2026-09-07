@@ -787,6 +787,153 @@ typedef struct {
 // construct), 0 on error (a parser error is set). Recognizes `@inline` /
 // `@inline!`, `@noinline`, `@pure`, `@noalloc`, and `@simd` / `@simd!`;
 // rejects unknown names, duplicates, and the `@inline`+`@noinline` conflict.
+static int parser_parse_one_decorator(Parser *parser,
+                                      ParsedDecorators *out) {
+  parser_advance(parser); // consume '@'
+  if (!parser_is_identifier_like(parser->current_token.type)) {
+    parser_set_error(parser,
+                     "Expected a decorator name after '@' (one of 'inline', "
+                     "'noinline', 'pure', 'noalloc', 'simd', 'swappable')");
+    return 0;
+  }
+  const char *name = parser->current_token.value;
+  if (strcmp(name, "inline") == 0) {
+    if (out->is_inline) {
+      parser_set_error(parser, "Duplicate '@inline' decorator");
+      return 0;
+    }
+    out->is_inline = 1;
+    parser_advance(parser);
+    if (parser->current_token.type == TOKEN_NOT) {
+      out->is_inline_contract = 1; // `@inline!`: contract, not just a hint
+      parser_advance(parser);      // consume '!'
+    }
+  } else if (strcmp(name, "noalloc") == 0) {
+    if (out->is_noalloc) {
+      parser_set_error(parser, "Duplicate '@noalloc' decorator");
+      return 0;
+    }
+    out->is_noalloc = 1;
+    parser_advance(parser);
+  } else if (strcmp(name, "noinline") == 0) {
+    if (out->is_noinline) {
+      parser_set_error(parser, "Duplicate '@noinline' decorator");
+      return 0;
+    }
+    out->is_noinline = 1;
+    parser_advance(parser);
+  } else if (strcmp(name, "pure") == 0) {
+    if (out->is_pure) {
+      parser_set_error(parser, "Duplicate '@pure' decorator");
+      return 0;
+    }
+    out->is_pure = 1;
+    parser_advance(parser);
+  } else if (strcmp(name, "test") == 0) {
+    if (out->is_test) {
+      parser_set_error(parser, "Duplicate '@test' decorator");
+      return 0;
+    }
+    out->is_test = 1;
+    parser_advance(parser);
+  } else if (strcmp(name, "swappable") == 0) {
+    if (out->is_swappable) {
+      parser_set_error(parser, "Duplicate '@swappable' decorator");
+      return 0;
+    }
+    out->is_swappable = 1;
+    parser_advance(parser);
+  } else if (strcmp(name, "naked") == 0) {
+    if (out->is_naked) {
+      parser_set_error(parser, "Duplicate '@naked' decorator");
+      return 0;
+    }
+    out->is_naked = 1;
+    parser_advance(parser);
+  } else if (strcmp(name, "interrupt") == 0) {
+    if (out->is_interrupt) {
+      parser_set_error(parser, "Duplicate '@interrupt' decorator");
+      return 0;
+    }
+    out->is_interrupt = 1;
+    parser_advance(parser);
+  } else if (strcmp(name, "rule") == 0) {
+    if (out->is_rule) {
+      parser_set_error(parser, "Duplicate '@rule' decorator");
+      return 0;
+    }
+    out->is_rule = 1;
+    parser_advance(parser);
+  } else if (strcmp(name, "conflict_free") == 0) {
+    if (out->conflict_free_mode) {
+      parser_set_error(parser, "Duplicate '@conflict_free' decorator");
+      return 0;
+    }
+    parser_advance(parser); // consume 'conflict_free'
+    out->conflict_free_mode = 1;
+    if (parser->current_token.type == TOKEN_NOT) {
+      out->conflict_free_mode = 2;
+      parser_advance(parser); // consume '!'
+    }
+  } else if (strcmp(name, "uniform") == 0) {
+    if (out->uniform_mode) {
+      parser_set_error(parser, "Duplicate '@uniform' decorator");
+      return 0;
+    }
+    parser_advance(parser); // consume 'uniform'
+    out->uniform_mode = 1;
+    if (parser->current_token.type == TOKEN_NOT) {
+      out->uniform_mode = 2;
+      parser_advance(parser); // consume '!'
+    }
+  } else if (strcmp(name, "simd") == 0) {
+    if (out->simd_mode != SIMD_ATTR_NONE) {
+      parser_set_error(parser, "Duplicate '@simd' decorator");
+      return 0;
+    }
+    parser_advance(parser); // consume 'simd'
+    out->simd_mode = SIMD_ATTR_HINT;
+    if (parser->current_token.type == TOKEN_NOT) {
+      out->simd_mode = SIMD_ATTR_CONTRACT;
+      parser_advance(parser); // consume '!'
+    }
+  } else if (strcmp(name, "unroll") == 0) {
+    if (out->unroll_factor) {
+      parser_set_error(parser, "Duplicate '@unroll' decorator");
+      return 0;
+    }
+    parser_advance(parser); // consume 'unroll'
+    if (!parser_expect(parser, TOKEN_LPAREN)) {
+      parser_set_error(parser, "Expected '(factor)' after '@unroll'");
+      return 0;
+    }
+    if (parser->current_token.type != TOKEN_NUMBER ||
+        strchr(parser->current_token.value, '.')) {
+      parser_set_error(parser,
+                       "Expected an integer unroll factor in '@unroll(n)'");
+      return 0;
+    }
+    long long factor = strtoll(parser->current_token.value, NULL, 0);
+    if (factor < 2 || factor > 16) {
+      parser_set_error(parser, "'@unroll' factor must be between 2 and 16");
+      return 0;
+    }
+    out->unroll_factor = (int)factor;
+    parser_advance(parser);
+    if (!parser_expect(parser, TOKEN_RPAREN)) {
+      return 0;
+    }
+  } else {
+    parser_set_error(parser,
+                     "Unknown decorator after '@' (expected 'inline', "
+                     "'noinline', 'pure', 'noalloc', 'test', 'rule', "
+                     "'naked', 'interrupt', 'swappable', 'simd', or "
+                     "'unroll')");
+    return 0;
+  }
+  return 1;
+}
+
 static int parser_parse_decorator_chain(Parser *parser, ParsedDecorators *out) {
   out->is_inline = 0;
   out->is_inline_contract = 0;
@@ -804,146 +951,7 @@ static int parser_parse_decorator_chain(Parser *parser, ParsedDecorators *out) {
   out->conflict_free_mode = 0;
 
   while (parser->current_token.type == TOKEN_AT) {
-    parser_advance(parser); // consume '@'
-    if (!parser_is_identifier_like(parser->current_token.type)) {
-      parser_set_error(parser,
-                       "Expected a decorator name after '@' (one of 'inline', "
-                       "'noinline', 'pure', 'noalloc', 'simd', 'swappable')");
-      return 0;
-    }
-    const char *name = parser->current_token.value;
-    if (strcmp(name, "inline") == 0) {
-      if (out->is_inline) {
-        parser_set_error(parser, "Duplicate '@inline' decorator");
-        return 0;
-      }
-      out->is_inline = 1;
-      parser_advance(parser);
-      if (parser->current_token.type == TOKEN_NOT) {
-        out->is_inline_contract = 1; // `@inline!`: contract, not just a hint
-        parser_advance(parser);      // consume '!'
-      }
-    } else if (strcmp(name, "noalloc") == 0) {
-      if (out->is_noalloc) {
-        parser_set_error(parser, "Duplicate '@noalloc' decorator");
-        return 0;
-      }
-      out->is_noalloc = 1;
-      parser_advance(parser);
-    } else if (strcmp(name, "noinline") == 0) {
-      if (out->is_noinline) {
-        parser_set_error(parser, "Duplicate '@noinline' decorator");
-        return 0;
-      }
-      out->is_noinline = 1;
-      parser_advance(parser);
-    } else if (strcmp(name, "pure") == 0) {
-      if (out->is_pure) {
-        parser_set_error(parser, "Duplicate '@pure' decorator");
-        return 0;
-      }
-      out->is_pure = 1;
-      parser_advance(parser);
-    } else if (strcmp(name, "test") == 0) {
-      if (out->is_test) {
-        parser_set_error(parser, "Duplicate '@test' decorator");
-        return 0;
-      }
-      out->is_test = 1;
-      parser_advance(parser);
-    } else if (strcmp(name, "swappable") == 0) {
-      if (out->is_swappable) {
-        parser_set_error(parser, "Duplicate '@swappable' decorator");
-        return 0;
-      }
-      out->is_swappable = 1;
-      parser_advance(parser);
-    } else if (strcmp(name, "naked") == 0) {
-      if (out->is_naked) {
-        parser_set_error(parser, "Duplicate '@naked' decorator");
-        return 0;
-      }
-      out->is_naked = 1;
-      parser_advance(parser);
-    } else if (strcmp(name, "interrupt") == 0) {
-      if (out->is_interrupt) {
-        parser_set_error(parser, "Duplicate '@interrupt' decorator");
-        return 0;
-      }
-      out->is_interrupt = 1;
-      parser_advance(parser);
-    } else if (strcmp(name, "rule") == 0) {
-      if (out->is_rule) {
-        parser_set_error(parser, "Duplicate '@rule' decorator");
-        return 0;
-      }
-      out->is_rule = 1;
-      parser_advance(parser);
-    } else if (strcmp(name, "conflict_free") == 0) {
-      if (out->conflict_free_mode) {
-        parser_set_error(parser, "Duplicate '@conflict_free' decorator");
-        return 0;
-      }
-      parser_advance(parser); // consume 'conflict_free'
-      out->conflict_free_mode = 1;
-      if (parser->current_token.type == TOKEN_NOT) {
-        out->conflict_free_mode = 2;
-        parser_advance(parser); // consume '!'
-      }
-    } else if (strcmp(name, "uniform") == 0) {
-      if (out->uniform_mode) {
-        parser_set_error(parser, "Duplicate '@uniform' decorator");
-        return 0;
-      }
-      parser_advance(parser); // consume 'uniform'
-      out->uniform_mode = 1;
-      if (parser->current_token.type == TOKEN_NOT) {
-        out->uniform_mode = 2;
-        parser_advance(parser); // consume '!'
-      }
-    } else if (strcmp(name, "simd") == 0) {
-      if (out->simd_mode != SIMD_ATTR_NONE) {
-        parser_set_error(parser, "Duplicate '@simd' decorator");
-        return 0;
-      }
-      parser_advance(parser); // consume 'simd'
-      out->simd_mode = SIMD_ATTR_HINT;
-      if (parser->current_token.type == TOKEN_NOT) {
-        out->simd_mode = SIMD_ATTR_CONTRACT;
-        parser_advance(parser); // consume '!'
-      }
-    } else if (strcmp(name, "unroll") == 0) {
-      if (out->unroll_factor) {
-        parser_set_error(parser, "Duplicate '@unroll' decorator");
-        return 0;
-      }
-      parser_advance(parser); // consume 'unroll'
-      if (!parser_expect(parser, TOKEN_LPAREN)) {
-        parser_set_error(parser, "Expected '(factor)' after '@unroll'");
-        return 0;
-      }
-      if (parser->current_token.type != TOKEN_NUMBER ||
-          strchr(parser->current_token.value, '.')) {
-        parser_set_error(parser,
-                         "Expected an integer unroll factor in '@unroll(n)'");
-        return 0;
-      }
-      long long factor = strtoll(parser->current_token.value, NULL, 0);
-      if (factor < 2 || factor > 16) {
-        parser_set_error(parser, "'@unroll' factor must be between 2 and 16");
-        return 0;
-      }
-      out->unroll_factor = (int)factor;
-      parser_advance(parser);
-      if (!parser_expect(parser, TOKEN_RPAREN)) {
-        return 0;
-      }
-    } else {
-      parser_set_error(parser,
-                       "Unknown decorator after '@' (expected 'inline', "
-                       "'noinline', 'pure', 'noalloc', 'test', 'rule', "
-                       "'naked', 'interrupt', 'swappable', 'simd', or "
-                       "'unroll')");
+    if (!parser_parse_one_decorator(parser, out)) {
       return 0;
     }
   }
@@ -1518,6 +1526,62 @@ static ASTNode *parser_make_rewrite_side(const char *prefix,
   return decl;
 }
 
+static int parser_parse_rewrite_clause(Parser *parser, ASTNode **from_expr,
+                                       ASTNode **to_expr,
+                                       ASTNode **where_expr) {
+  ASTNode **slot = NULL;
+  const char *clause = NULL;
+  char message[128];
+
+  if (parser->current_token.type == TOKEN_NEWLINE ||
+      parser->current_token.type == TOKEN_SEMICOLON) {
+    parser_advance(parser);
+    return 1;
+  }
+  if (parser->current_token.type == TOKEN_WHERE) {
+    slot = where_expr;
+    clause = "where";
+  } else if (parser_is_identifier_like(parser->current_token.type) &&
+             parser->current_token.value &&
+             strcmp(parser->current_token.value, "from") == 0) {
+    slot = from_expr;
+    clause = "from";
+  } else if (parser_is_identifier_like(parser->current_token.type) &&
+             parser->current_token.value &&
+             strcmp(parser->current_token.value, "to") == 0) {
+    slot = to_expr;
+    clause = "to";
+  } else {
+    parser_set_error(parser,
+                     "Expected 'from', 'to' or 'where' inside a 'rewrite' "
+                     "rule");
+    return 0;
+  }
+  if (*slot) {
+    snprintf(message, sizeof(message),
+             "A 'rewrite' rule has one '%s' clause", clause);
+    parser_set_error(parser, message);
+    return 0;
+  }
+  parser_advance(parser);
+  *slot = parser_parse_expression(parser);
+  if (!*slot) {
+    if (!parser->has_error) {
+      snprintf(message, sizeof(message),
+               "Expected an expression after '%s'", clause);
+      parser_set_error(parser, message);
+    }
+    return 0;
+  }
+  if (parser->current_token.type != TOKEN_SEMICOLON &&
+      parser->current_token.type != TOKEN_NEWLINE &&
+      parser->current_token.type != TOKEN_RBRACE) {
+    parser_set_error(parser, "Expected ';' after the clause's expression");
+    return 0;
+  }
+  return 1;
+}
+
 static ASTNode *parser_parse_rewrite_declaration(Parser *parser) {
   SourceLocation location = parser_current_location(parser);
   parser_advance(parser);
@@ -1587,64 +1651,8 @@ static ASTNode *parser_parse_rewrite_declaration(Parser *parser) {
 
   while (parser->current_token.type != TOKEN_RBRACE &&
          parser->current_token.type != TOKEN_EOF) {
-    if (parser->current_token.type == TOKEN_NEWLINE ||
-        parser->current_token.type == TOKEN_SEMICOLON) {
-      parser_advance(parser);
-      continue;
-    }
-    ASTNode **slot = NULL;
-    const char *clause = NULL;
-    if (parser->current_token.type == TOKEN_WHERE) {
-      slot = &where_expr;
-      clause = "where";
-    } else if (parser_is_identifier_like(parser->current_token.type) &&
-               parser->current_token.value &&
-               strcmp(parser->current_token.value, "from") == 0) {
-      slot = &from_expr;
-      clause = "from";
-    } else if (parser_is_identifier_like(parser->current_token.type) &&
-               parser->current_token.value &&
-               strcmp(parser->current_token.value, "to") == 0) {
-      slot = &to_expr;
-      clause = "to";
-    } else {
-      parser_set_error(parser,
-                       "Expected 'from', 'to' or 'where' inside a 'rewrite' "
-                       "rule");
-      parser_free_rewrite_parts(param_names, param_types, param_count,
-                                return_type, rule_name, from_expr, to_expr,
-                                where_expr);
-      return NULL;
-    }
-    if (*slot) {
-      char message[128];
-      snprintf(message, sizeof(message),
-               "A 'rewrite' rule has one '%s' clause", clause);
-      parser_set_error(parser, message);
-      parser_free_rewrite_parts(param_names, param_types, param_count,
-                                return_type, rule_name, from_expr, to_expr,
-                                where_expr);
-      return NULL;
-    }
-    parser_advance(parser);
-    *slot = parser_parse_expression(parser);
-    if (!*slot) {
-      if (!parser->has_error) {
-        char message[128];
-        snprintf(message, sizeof(message),
-                 "Expected an expression after '%s'", clause);
-        parser_set_error(parser, message);
-      }
-      parser_free_rewrite_parts(param_names, param_types, param_count,
-                                return_type, rule_name, from_expr, to_expr,
-                                where_expr);
-      return NULL;
-    }
-    if (parser->current_token.type != TOKEN_SEMICOLON &&
-        parser->current_token.type != TOKEN_NEWLINE &&
-        parser->current_token.type != TOKEN_RBRACE) {
-      parser_set_error(parser,
-                       "Expected ';' after the clause's expression");
+    if (!parser_parse_rewrite_clause(parser, &from_expr, &to_expr,
+                                     &where_expr)) {
       parser_free_rewrite_parts(param_names, param_types, param_count,
                                 return_type, rule_name, from_expr, to_expr,
                                 where_expr);
@@ -2419,6 +2427,63 @@ static int parser_reject_foreign_declaration(Parser *parser) {
   return 1;
 }
 
+static ASTNode *parser_parse_decorated_statement(Parser *parser) {
+  ParsedDecorators decos;
+  if (!parser_parse_decorator_chain(parser, &decos))
+    return NULL;
+  if (decos.is_inline || decos.is_noinline || decos.is_pure ||
+      decos.is_noalloc || decos.is_swappable || decos.is_rule) {
+    parser_set_error(parser,
+                     "'@inline', '@noinline', '@pure', '@noalloc', "
+                     "'@swappable', and '@rule' apply to a function, not a "
+                     "loop");
+    return NULL;
+  }
+  if (decos.simd_mode == SIMD_ATTR_NONE && !decos.unroll_factor &&
+      !decos.uniform_mode && !decos.conflict_free_mode) {
+    parser_set_error(parser,
+                     "Expected a '@simd', '@unroll', '@uniform' or "
+                     "'@conflict_free' decorator before this statement");
+    return NULL;
+  }
+
+  ASTNode *loop = parser_parse_statement(parser);
+  if (!loop)
+    return NULL;
+  if (decos.conflict_free_mode) {
+    loop->conflict_free_mode = decos.conflict_free_mode;
+    if (decos.simd_mode == SIMD_ATTR_NONE && !decos.unroll_factor &&
+        !decos.uniform_mode) {
+      return loop;
+    }
+  }
+  if (loop->type == AST_IF_STATEMENT) {
+    if (decos.simd_mode != SIMD_ATTR_NONE || decos.unroll_factor) {
+      parser_set_error(
+          parser, "'@simd' / '@unroll' must be applied to a 'for' or "
+                  "'while' loop");
+      ast_destroy_node(loop);
+      return NULL;
+    }
+    ((IfStatement *)loop->data)->uniform_mode = decos.uniform_mode;
+  } else if (loop->type == AST_FOR_STATEMENT) {
+    ((ForStatement *)loop->data)->simd_mode = decos.simd_mode;
+    ((ForStatement *)loop->data)->unroll_factor = decos.unroll_factor;
+    ((ForStatement *)loop->data)->uniform_mode = decos.uniform_mode;
+  } else if (loop->type == AST_WHILE_STATEMENT) {
+    ((WhileStatement *)loop->data)->simd_mode = decos.simd_mode;
+    ((WhileStatement *)loop->data)->unroll_factor = decos.unroll_factor;
+    ((WhileStatement *)loop->data)->uniform_mode = decos.uniform_mode;
+  } else {
+    parser_set_error(parser,
+                     "'@simd' and '@unroll' apply to a 'for' or 'while' "
+                     "loop, and '@uniform' to one of those or an 'if'");
+    ast_destroy_node(loop);
+    return NULL;
+  }
+  return loop;
+}
+
 ASTNode *parser_parse_statement(Parser *parser) {
   if (!parser)
     return NULL;
@@ -2457,60 +2522,7 @@ ASTNode *parser_parse_statement(Parser *parser) {
   // The attribute may sit in front of a label too: `@simd outer: for ...`.
   // Only `@simd` is meaningful on a loop; the other decorators are function-only.
   if (parser->current_token.type == TOKEN_AT) {
-    ParsedDecorators decos;
-    if (!parser_parse_decorator_chain(parser, &decos))
-      return NULL;
-    if (decos.is_inline || decos.is_noinline || decos.is_pure ||
-        decos.is_noalloc || decos.is_swappable || decos.is_rule) {
-      parser_set_error(parser,
-                       "'@inline', '@noinline', '@pure', '@noalloc', "
-                       "'@swappable', and '@rule' apply to a function, not a "
-                       "loop");
-      return NULL;
-    }
-    if (decos.simd_mode == SIMD_ATTR_NONE && !decos.unroll_factor &&
-        !decos.uniform_mode && !decos.conflict_free_mode) {
-      parser_set_error(parser,
-                       "Expected a '@simd', '@unroll', '@uniform' or "
-                       "'@conflict_free' decorator before this statement");
-      return NULL;
-    }
-
-    ASTNode *loop = parser_parse_statement(parser);
-    if (!loop)
-      return NULL;
-    if (decos.conflict_free_mode) {
-      loop->conflict_free_mode = decos.conflict_free_mode;
-      if (decos.simd_mode == SIMD_ATTR_NONE && !decos.unroll_factor &&
-          !decos.uniform_mode) {
-        return loop;
-      }
-    }
-    if (loop->type == AST_IF_STATEMENT) {
-      if (decos.simd_mode != SIMD_ATTR_NONE || decos.unroll_factor) {
-        parser_set_error(
-            parser, "'@simd' / '@unroll' must be applied to a 'for' or "
-                    "'while' loop");
-        ast_destroy_node(loop);
-        return NULL;
-      }
-      ((IfStatement *)loop->data)->uniform_mode = decos.uniform_mode;
-    } else if (loop->type == AST_FOR_STATEMENT) {
-      ((ForStatement *)loop->data)->simd_mode = decos.simd_mode;
-      ((ForStatement *)loop->data)->unroll_factor = decos.unroll_factor;
-      ((ForStatement *)loop->data)->uniform_mode = decos.uniform_mode;
-    } else if (loop->type == AST_WHILE_STATEMENT) {
-      ((WhileStatement *)loop->data)->simd_mode = decos.simd_mode;
-      ((WhileStatement *)loop->data)->unroll_factor = decos.unroll_factor;
-      ((WhileStatement *)loop->data)->uniform_mode = decos.uniform_mode;
-    } else {
-      parser_set_error(parser,
-                       "'@simd' and '@unroll' apply to a 'for' or 'while' "
-                       "loop, and '@uniform' to one of those or an 'if'");
-      ast_destroy_node(loop);
-      return NULL;
-    }
-    return loop;
+    return parser_parse_decorated_statement(parser);
   }
 
   // Labeled loop: IDENT ':' (while | for)
@@ -4584,24 +4596,7 @@ fail:
   return NULL;
 }
 
-ASTNode *parser_parse_primary_expression(Parser *parser) {
-  if (!parser)
-    return NULL;
-
-  SourceLocation location = parser_current_location(parser);
-
-  if (parser_is_identifier_like(parser->current_token.type) ||
-      parser_is_type_keyword(parser->current_token.type)) {
-    /* Type names (`int32`, `string`, ...) are compile-time Type values in
-     * expression position, not a parallel type-level grammar. */
-    ASTNode *result =
-        ast_create_identifier(parser->current_token.value, location);
-    parser_advance(parser);
-    return result;
-  }
-
-  switch (parser->current_token.type) {
-  case TOKEN_NUMBER: {
+static ASTNode *parser_parse_number_literal(Parser *parser, SourceLocation location) {
     // Check if it's a float or integer
     char *value = parser->current_token.value;
     ASTNode *result;
@@ -4643,7 +4638,28 @@ ASTNode *parser_parse_primary_expression(Parser *parser) {
 
     parser_advance(parser);
     return result;
+}
+
+ASTNode *parser_parse_primary_expression(Parser *parser) {
+  if (!parser)
+    return NULL;
+
+  SourceLocation location = parser_current_location(parser);
+
+  if (parser_is_identifier_like(parser->current_token.type) ||
+      parser_is_type_keyword(parser->current_token.type)) {
+    /* Type names (`int32`, `string`, ...) are compile-time Type values in
+     * expression position, not a parallel type-level grammar. */
+    ASTNode *result =
+        ast_create_identifier(parser->current_token.value, location);
+    parser_advance(parser);
+    return result;
   }
+
+  switch (parser->current_token.type) {
+  case TOKEN_NUMBER:
+    return parser_parse_number_literal(parser, location);
+
   case TOKEN_STRING: {
     ASTNode *result;
     /* The lexeme length, not strlen: `\0` is a legal escape, so the literal's
@@ -6019,6 +6035,104 @@ fail:
   return 0;
 }
 
+static int parser_parse_kernel_attributes(Parser *parser,
+                                          int *kernel_block,
+                                          int *kernel_threads_per_item) {
+  parser_advance(parser);
+  if (parser->current_token.type != TOKEN_IDENTIFIER ||
+      strcmp(parser->current_token.value, "block") != 0) {
+    parser_set_error(parser,
+                     "Expected 'block' in kernel attribute list "
+                     "(kernel(block = N) or kernel(block = (x, y, z)))");
+    return 0;
+  }
+  parser_advance(parser);
+  if (!parser_expect(parser, TOKEN_EQUALS)) {
+    return 0;
+  }
+  int dims = 1;
+  int grouped = parser->current_token.type == TOKEN_LPAREN;
+  if (grouped) {
+    parser_advance(parser);
+    dims = 3;
+  }
+  long long product = 1;
+  for (int d = 0; d < dims; d++) {
+    if (d && !parser_expect(parser, TOKEN_COMMA)) {
+      return 0;
+    }
+    if (parser->current_token.type != TOKEN_NUMBER ||
+        strchr(parser->current_token.value, '.')) {
+      parser_set_error(parser,
+                       "Kernel block dimensions must be positive integer "
+                       "literals");
+      return 0;
+    }
+    long long value = strtoll(parser->current_token.value, NULL, 0);
+    if (value < 1 || value > 1024) {
+      parser_set_error(parser,
+                       "Kernel block dimension must be between 1 and 1024");
+      return 0;
+    }
+    kernel_block[d] = (int)value;
+    product *= value;
+    parser_advance(parser);
+  }
+  if (grouped && !parser_expect(parser, TOKEN_RPAREN)) {
+    return 0;
+  }
+  if (dims == 1) {
+    kernel_block[1] = 1;
+    kernel_block[2] = 1;
+  }
+  if (product > 1024) {
+    parser_set_error(parser,
+                     "Kernel block volume must not exceed 1024 work-items");
+    return 0;
+  }
+  /* `per = thread` (the default) or `per = warp`: how many threads one unit
+   * of work costs. A warp-per-row matvec covers block_volume/32 rows per
+   * block, not block_volume, and `dispatch k[work: n]` has to know which. */
+  if (parser->current_token.type == TOKEN_COMMA) {
+    parser_advance(parser);
+    if (parser->current_token.type != TOKEN_IDENTIFIER ||
+        strcmp(parser->current_token.value, "per") != 0) {
+      parser_set_error(parser,
+                       "Expected 'per' after the kernel block shape "
+                       "(kernel(block = N, per = warp))");
+      return 0;
+    }
+    parser_advance(parser);
+    if (!parser_expect(parser, TOKEN_EQUALS)) {
+      return 0;
+    }
+    if (parser->current_token.type != TOKEN_IDENTIFIER) {
+      parser_set_error(parser, "Expected 'thread' or 'warp' after 'per ='");
+      return 0;
+    }
+    if (strcmp(parser->current_token.value, "warp") == 0) {
+      (*kernel_threads_per_item) = 32;
+    } else if (strcmp(parser->current_token.value, "thread") == 0) {
+      (*kernel_threads_per_item) = 1;
+    } else {
+      parser_set_error(parser, "Kernel 'per' must be 'thread' or 'warp'");
+      return 0;
+    }
+    if (product % ((*kernel_threads_per_item) > 0 ? (*kernel_threads_per_item) : 1)
+        != 0) {
+      parser_set_error(parser,
+                       "A 'per = warp' kernel needs a block volume that is a "
+                       "whole number of 32-lane warps");
+      return 0;
+    }
+    parser_advance(parser);
+  }
+  if (!parser_expect(parser, TOKEN_RPAREN)) {
+    return 0;
+  }
+  return 1;
+}
+
 ASTNode *parser_parse_function_declaration(Parser *parser) {
   if (!parser)
     return NULL;
@@ -6042,99 +6156,10 @@ ASTNode *parser_parse_function_declaration(Parser *parser) {
    * rejected by the driver instead of running with a garbage lane mapping. */
   int kernel_block[3] = {0, 0, 0};
   int kernel_threads_per_item = 0;
-  if (is_kernel && parser->current_token.type == TOKEN_LPAREN) {
-    parser_advance(parser);
-    if (parser->current_token.type != TOKEN_IDENTIFIER ||
-        strcmp(parser->current_token.value, "block") != 0) {
-      parser_set_error(parser,
-                       "Expected 'block' in kernel attribute list "
-                       "(kernel(block = N) or kernel(block = (x, y, z)))");
-      return NULL;
-    }
-    parser_advance(parser);
-    if (!parser_expect(parser, TOKEN_EQUALS)) {
-      return NULL;
-    }
-    int dims = 1;
-    int grouped = parser->current_token.type == TOKEN_LPAREN;
-    if (grouped) {
-      parser_advance(parser);
-      dims = 3;
-    }
-    long long product = 1;
-    for (int d = 0; d < dims; d++) {
-      if (d && !parser_expect(parser, TOKEN_COMMA)) {
-        return NULL;
-      }
-      if (parser->current_token.type != TOKEN_NUMBER ||
-          strchr(parser->current_token.value, '.')) {
-        parser_set_error(parser,
-                         "Kernel block dimensions must be positive integer "
-                         "literals");
-        return NULL;
-      }
-      long long value = strtoll(parser->current_token.value, NULL, 0);
-      if (value < 1 || value > 1024) {
-        parser_set_error(parser,
-                         "Kernel block dimension must be between 1 and 1024");
-        return NULL;
-      }
-      kernel_block[d] = (int)value;
-      product *= value;
-      parser_advance(parser);
-    }
-    if (grouped && !parser_expect(parser, TOKEN_RPAREN)) {
-      return NULL;
-    }
-    if (dims == 1) {
-      kernel_block[1] = 1;
-      kernel_block[2] = 1;
-    }
-    if (product > 1024) {
-      parser_set_error(parser,
-                       "Kernel block volume must not exceed 1024 work-items");
-      return NULL;
-    }
-    /* `per = thread` (the default) or `per = warp`: how many threads one unit
-     * of work costs. A warp-per-row matvec covers block_volume/32 rows per
-     * block, not block_volume, and `dispatch k[work: n]` has to know which. */
-    if (parser->current_token.type == TOKEN_COMMA) {
-      parser_advance(parser);
-      if (parser->current_token.type != TOKEN_IDENTIFIER ||
-          strcmp(parser->current_token.value, "per") != 0) {
-        parser_set_error(parser,
-                         "Expected 'per' after the kernel block shape "
-                         "(kernel(block = N, per = warp))");
-        return NULL;
-      }
-      parser_advance(parser);
-      if (!parser_expect(parser, TOKEN_EQUALS)) {
-        return NULL;
-      }
-      if (parser->current_token.type != TOKEN_IDENTIFIER) {
-        parser_set_error(parser, "Expected 'thread' or 'warp' after 'per ='");
-        return NULL;
-      }
-      if (strcmp(parser->current_token.value, "warp") == 0) {
-        kernel_threads_per_item = 32;
-      } else if (strcmp(parser->current_token.value, "thread") == 0) {
-        kernel_threads_per_item = 1;
-      } else {
-        parser_set_error(parser, "Kernel 'per' must be 'thread' or 'warp'");
-        return NULL;
-      }
-      if (product % (kernel_threads_per_item > 0 ? kernel_threads_per_item : 1)
-          != 0) {
-        parser_set_error(parser,
-                         "A 'per = warp' kernel needs a block volume that is a "
-                         "whole number of 32-lane warps");
-        return NULL;
-      }
-      parser_advance(parser);
-    }
-    if (!parser_expect(parser, TOKEN_RPAREN)) {
-      return NULL;
-    }
+  if (is_kernel && parser->current_token.type == TOKEN_LPAREN &&
+      !parser_parse_kernel_attributes(parser, kernel_block,
+                                      &kernel_threads_per_item)) {
+    return NULL;
   }
 
   // Expect function name
