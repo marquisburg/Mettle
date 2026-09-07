@@ -11243,6 +11243,204 @@ static int mir_emit_volatile_global_write(MirFunction *fn, CodeGenerator *g,
   return mir_emit_global_flush_names(fn, g, map, &name, 1);
 }
 
+static int mir_name_list_add(const char ***names, size_t *count, size_t *cap,
+                             const char *name) {
+  if (*count >= *cap) {
+    size_t grown_cap = *cap ? *cap * 2 : 4;
+    const char **grown =
+        (const char **)realloc(*names, grown_cap * sizeof(*grown));
+    if (!grown) {
+      return 0;
+    }
+    *names = grown;
+    *cap = grown_cap;
+  }
+  (*names)[(*count)++] = name;
+  return 1;
+}
+
+static int mir_name_list_has(const char *const *names, size_t count,
+                             const char *name) {
+  for (size_t j = 0; j < count; j++) {
+    if (strcmp(names[j], name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int mir_bind_parameter(MirFunction *fn, CodeGenerator *generator,
+                              const IRFunction *ir_function, MirNameMap *map,
+                              size_t index) {
+  MirParam *param = &fn->params[fn->param_count];
+  MtlcType *pt = code_generator_binary_get_resolved_type(
+      generator,
+      ir_function->parameter_types ? ir_function->parameter_types[index] : NULL,
+      0);
+  int float_bits = pt ? code_generator_binary_resolved_type_float_bits(pt) : 0;
+  int is_aggregate = pt && code_generator_type_is_aggregate(pt);
+  int width = float_bits
+                  ? float_bits / 8
+                  : (pt ? code_generator_binary_resolved_type_scalar_size(pt)
+                        : 8);
+  MirVregId v;
+
+  if (is_aggregate ||
+      (!float_bits && width != 1 && width != 2 && width != 4 && width != 8)) {
+    width = 8;
+  }
+  v = mir_name_map_get_or_add(map, fn, ir_function->parameter_names[index], 0,
+                              float_bits ? MIR_RC_XMM : MIR_RC_GP,
+                              float_bits ? width : 8);
+  if (v == MIR_VREG_NONE) {
+    return 0;
+  }
+  param->vreg = v;
+  param->arg_index = (int)index;
+  param->width = width;
+  param->is_float = float_bits ? 1 : 0;
+  param->is_signed =
+      (!is_aggregate && pt)
+          ? code_generator_binary_resolved_type_is_signed_integer(pt)
+          : 0;
+  mir_sysv_bind_param(generator, ir_function->name, pt, param);
+  if (param->sysv_eightbytes > 0) {
+    MirVregId storage = mir_new_vreg(fn, MIR_RC_GP, 8);
+    if (storage == MIR_VREG_NONE) {
+      return 0;
+    }
+    fn->vregs[storage].address_taken = 1;
+    fn->vregs[storage].home_bytes = (param->sysv_size + 15) & ~15;
+    param->sysv_storage = storage;
+  }
+  fn->param_count++;
+  return 1;
+}
+
+static int mir_bind_return(MirFunction *fn, CodeGenerator *generator,
+                           const IRFunction *ir_function) {
+  MtlcType *rt = code_generator_binary_get_resolved_type(
+      generator, ir_function->return_type_name, 1);
+  BinarySysvAggregate aggregate;
+  int float_bits;
+
+  if (mir_sysv_returns_in_registers(generator, ir_function, &aggregate)) {
+    fn->returns_sysv_registers = 1;
+    fn->sysv_return_eightbytes = (int)aggregate.eightbyte_count;
+    fn->sysv_return_size = (int)aggregate.size;
+    for (size_t e = 0; e < aggregate.eightbyte_count && e < 2; e++) {
+      fn->sysv_return_sse[e] = aggregate.classes[e] == BINARY_EIGHTBYTE_SSE;
+    }
+    return 1;
+  }
+  if (!rt) {
+    return 1;
+  }
+  if (code_generator_type_is_aggregate(rt)) {
+    if (code_generator_abi_classify(rt) != ABI_PASS_INDIRECT) {
+      return 1;
+    }
+    fn->returns_indirect = 1;
+    fn->indirect_return_size = (int)code_generator_abi_type_size(rt);
+    fn->indirect_return_vreg = mir_new_vreg(fn, MIR_RC_GP, 8);
+    return fn->indirect_return_vreg != MIR_VREG_NONE;
+  }
+  float_bits = code_generator_binary_resolved_type_float_bits(rt);
+  if (float_bits) {
+    fn->float_return_bits = float_bits;
+    return 1;
+  }
+  {
+    int width = code_generator_binary_resolved_type_scalar_size(rt);
+    if (width == 1 || width == 2 || width == 4) {
+      fn->scalar_return_width = width;
+      fn->scalar_return_signed =
+          code_generator_binary_resolved_type_is_signed_integer(rt);
+    }
+  }
+  return 1;
+}
+
+static const IROperand *mir_instruction_operand(const IRInstruction *in,
+                                                int k) {
+  if (k == 0) {
+    return &in->dest;
+  }
+  if (k == 1) {
+    return &in->lhs;
+  }
+  if (k == 2) {
+    return &in->rhs;
+  }
+  return (size_t)(k - 3) < in->argument_count ? &in->arguments[k - 3] : NULL;
+}
+
+static int mir_cache_global_operand(MirFunction *fn, CodeGenerator *generator,
+                                    MirNameMap *map, const IRInstruction *in,
+                                    const IROperand *op,
+                                    MirGlobalWriteback *wb,
+                                    size_t *all_cap) {
+  const CgSym *sym;
+  int size;
+  int float_bits;
+  MirVregId v;
+
+  if (in->op == IR_OP_ADDRESS_OF && op == &in->lhs) {
+    return 1;
+  }
+  if (op->kind != IR_OPERAND_SYMBOL || !op->name ||
+      mir_name_map_has(map, op->name) ||
+      !mir_name_is_global_scalar(generator, op->name)) {
+    return 1;
+  }
+  sym = code_generator_lookup_symbol(generator, op->name);
+  size = sym ? code_generator_binary_resolved_type_scalar_size(sym->type) : 0;
+  if (size != 1 && size != 2 && size != 4 && size != 8) {
+    return 1;
+  }
+  float_bits = code_generator_binary_resolved_type_float_bits(sym->type);
+  v = mir_name_map_get_or_add(map, fn, op->name, 0,
+                              float_bits ? MIR_RC_XMM : MIR_RC_GP,
+                              float_bits ? float_bits / 8 : 8);
+  if (v == MIR_VREG_NONE ||
+      !mir_emit1(fn, MIR_LOAD_GLOBAL, mir_op_vreg(v), mir_op_symbol(op->name),
+                 mir_op_none(), size,
+                 code_generator_binary_resolved_type_is_signed_integer(
+                     sym->type)
+                     ? 0
+                     : 1,
+                 0)) {
+    return 0;
+  }
+  return mir_name_list_add(&wb->all, &wb->all_count, all_cap, op->name);
+}
+
+static int mir_cache_globals(MirFunction *fn, CodeGenerator *generator,
+                             const IRFunction *ir_function, MirNameMap *map,
+                             MirGlobalWriteback *wb, size_t *dirty_cap,
+                             size_t *all_cap) {
+  for (size_t i = 0; i < ir_function->instruction_count; i++) {
+    const IRInstruction *in = &ir_function->instructions[i];
+
+    if (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+        mir_name_is_global_scalar(generator, in->dest.name) &&
+        !mir_name_list_has(wb->names, wb->count, in->dest.name) &&
+        !mir_name_list_add(&wb->names, &wb->count, dirty_cap, in->dest.name)) {
+      return 0;
+    }
+    for (int k = 0;; k++) {
+      const IROperand *op = mir_instruction_operand(in, k);
+      if (!op) {
+        break;
+      }
+      if (!mir_cache_global_operand(fn, generator, map, in, op, wb, all_cap)) {
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
 int code_generator_binary_emit_function_via_mir(
     CodeGenerator *generator,
     IRFunction *ir_function, BinaryFunctionContext *context) {
@@ -11290,94 +11488,15 @@ int code_generator_binary_emit_function_via_mir(
     context->omit_frame_pointer = fpo;
   }
 
-  /* Bind parameters to vregs and record their incoming extension. */
   const BinaryAbi *abi = code_generator_binary_active_abi();
-  (void)abi;
   for (size_t i = 0; i < ir_function->parameter_count; i++) {
-    const char *pname = ir_function->parameter_names[i];
-    MtlcType *pt = code_generator_binary_get_resolved_type(
-        generator, ir_function->parameter_types
-                       ? ir_function->parameter_types[i]
-                       : NULL,
-        0);
-    int pfb = pt ? code_generator_binary_resolved_type_float_bits(pt) : 0;
-    int is_agg = pt && code_generator_type_is_aggregate(pt);
-    int w = pfb ? pfb / 8 : (pt ? code_generator_binary_resolved_type_scalar_size(pt) : 8);
-    if (is_agg || (!pfb && w != 1 && w != 2 && w != 4 && w != 8)) {
-      /* A DIRECT small aggregate arrives in a full GP register; home all 8 bytes
-       * with no integer extension (field access reads within the struct size). */
-      w = 8;
-    }
-    MirVregId v = mir_name_map_get_or_add(&map, &fn, pname, 0,
-                                          pfb ? MIR_RC_XMM : MIR_RC_GP,
-                                          pfb ? w : 8);
-    if (v == MIR_VREG_NONE) {
+    if (!mir_bind_parameter(&fn, generator, ir_function, &map, i)) {
       goto oom;
     }
-    fn.params[fn.param_count].vreg = v;
-    fn.params[fn.param_count].arg_index = (int)i;
-    fn.params[fn.param_count].width = w;
-    fn.params[fn.param_count].is_float = pfb ? 1 : 0;
-    fn.params[fn.param_count].is_signed =
-        (!is_agg && pt)
-            ? code_generator_binary_resolved_type_is_signed_integer(pt)
-            : 0;
-    mir_sysv_bind_param(generator, ir_function->name, pt,
-                        &fn.params[fn.param_count]);
-    if (fn.params[fn.param_count].sysv_eightbytes > 0) {
-      MirVregId storage = mir_new_vreg(&fn, MIR_RC_GP, 8);
-      if (storage == MIR_VREG_NONE) {
-        goto oom;
-      }
-      fn.vregs[storage].address_taken = 1;
-      fn.vregs[storage].home_bytes =
-          (fn.params[fn.param_count].sysv_size + 15) & ~15;
-      fn.params[fn.param_count].sysv_storage = storage;
-    }
-    fn.param_count++;
   }
 
-  /* INDIRECT struct return: the caller passes a hidden out-pointer (Win64: RCX,
-   * SysV: RDI) ahead of the user arguments. Reserve a vreg for it; the prologue
-   * homes that register into it (shifting user params up one ABI slot) and each
-   * RETURN copies the struct there and returns the pointer in RAX. */
-  {
-    MtlcType *rt = code_generator_binary_get_resolved_type(
-        generator, ir_function->return_type_name, 1);
-    BinarySysvAggregate ragg;
-    if (mir_sysv_returns_in_registers(generator, ir_function, &ragg)) {
-      fn.returns_sysv_registers = 1;
-      fn.sysv_return_eightbytes = (int)ragg.eightbyte_count;
-      fn.sysv_return_size = (int)ragg.size;
-      for (size_t e = 0; e < ragg.eightbyte_count && e < 2; e++) {
-        fn.sysv_return_sse[e] = ragg.classes[e] == BINARY_EIGHTBYTE_SSE;
-      }
-    } else if (rt && code_generator_type_is_aggregate(rt) &&
-        code_generator_abi_classify(rt) == ABI_PASS_INDIRECT) {
-      fn.returns_indirect = 1;
-      fn.indirect_return_size = (int)code_generator_abi_type_size(rt);
-      fn.indirect_return_vreg = mir_new_vreg(&fn, MIR_RC_GP, 8);
-      if (fn.indirect_return_vreg == MIR_VREG_NONE) {
-        goto oom;
-      }
-    } else if (rt && code_generator_binary_resolved_type_float_bits(rt) != 0) {
-      fn.float_return_bits = code_generator_binary_resolved_type_float_bits(rt);
-    } else if (rt && code_generator_binary_resolved_type_float_bits(rt) == 0 &&
-               !code_generator_type_is_aggregate(rt)) {
-      /* A narrow integer return (int32/uint32/int16/...) must be canonicalized
-       * before `mov rax`: MIR computes in 64-bit, so the value can carry garbage
-       * above its width, and the Win64/SysV ABI leaves the high RAX bits
-       * undefined for a sub-64-bit return, a caller that uses the full register
-       * (e.g. `(int64)narrow_fn()`) would then read the garbage. Record the
-       * return width/signedness so the RETURN lowering extends to canonical
-       * 64-bit form. */
-      int rw = code_generator_binary_resolved_type_scalar_size(rt);
-      if (rw == 1 || rw == 2 || rw == 4) {
-        fn.scalar_return_width = rw;
-        fn.scalar_return_signed =
-            code_generator_binary_resolved_type_is_signed_integer(rt);
-      }
-    }
+  if (!mir_bind_return(&fn, generator, ir_function)) {
+    goto oom;
   }
 
   {
@@ -11390,101 +11509,9 @@ int code_generator_binary_emit_function_via_mir(
     fn.incoming_arg_slots = slot_count;
   }
 
-  /* Cache global scalars: load each referenced global once at entry into a vreg
-   * so body references (reads AND writes) resolve to that register instead of a
-   * per-use RIP-relative memory access. A read-only global is just cached; a
-   * written global is additionally recorded for write-back before each return.
-   * Eligibility has proven every global access here is a leaf-function scalar
-   * global with no aliasing pointer in scope. Emitted before the body so the
-   * cache vreg is defined at index 0 (live across the whole function, like a
-   * parameter); the loop-extension in the allocator then keeps it live across
-   * loop back-edges. */
-  for (size_t i = 0; i < ir_function->instruction_count; i++) {
-    const IRInstruction *in = &ir_function->instructions[i];
-    /* Record a written global scalar for write-back (deduped). */
-    if (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
-        mir_name_is_global_scalar(generator, in->dest.name)) {
-      int present = 0;
-      for (size_t j = 0; j < wb.count; j++) {
-        if (strcmp(wb.names[j], in->dest.name) == 0) {
-          present = 1;
-          break;
-        }
-      }
-      if (!present) {
-        if (wb.count >= wb_cap) {
-          size_t nc = wb_cap ? wb_cap * 2 : 4;
-          const char **grown =
-              (const char **)realloc(wb.names, nc * sizeof(*grown));
-          if (!grown) {
-            goto oom;
-          }
-          wb.names = grown;
-          wb_cap = nc;
-        }
-        wb.names[wb.count++] = in->dest.name;
-      }
-    }
-    /* Load each global (read or written) into its cache vreg once at entry.
-     * Scans dest/lhs/rhs AND call arguments, a global used only as a call
-     * argument (f(g)) must still be loaded, or the value path would resolve it
-     * to an undefined vreg holding a stale register. */
-    for (int k = 0;; k++) {
-      const IROperand *op;
-      if (k == 0) {
-        op = &in->dest;
-      } else if (k == 1) {
-        op = &in->lhs;
-      } else if (k == 2) {
-        op = &in->rhs;
-      } else if ((size_t)(k - 3) < in->argument_count) {
-        op = &in->arguments[k - 3];
-      } else {
-        break;
-      }
-      if (in->op == IR_OP_ADDRESS_OF && op == &in->lhs) {
-        continue; /* ADDRESS_OF lowers through MIR_LEA_*; no value preload. */
-      }
-      if (op->kind != IR_OPERAND_SYMBOL || !op->name ||
-          mir_name_map_has(&map, op->name) ||
-          !mir_name_is_global_scalar(generator, op->name)) {
-        continue;
-      }
-      const CgSym *s = code_generator_lookup_symbol(generator, op->name);
-      int size = s ? code_generator_binary_resolved_type_scalar_size(s->type) : 0;
-      if (size != 1 && size != 2 && size != 4 && size != 8) {
-        continue;
-      }
-      int is_signed =
-          code_generator_binary_resolved_type_is_signed_integer(s->type);
-      /* A float global must be cached in an XMM vreg so float consumers read it
-       * via the XMM path; a GP cache leaves the bits in a GP register the float
-       * ops never read (reading an uninitialized xmm instead). */
-      int fbits = code_generator_binary_resolved_type_float_bits(s->type);
-      MirVregId v = mir_name_map_get_or_add(
-          &map, &fn, op->name, 0, fbits ? MIR_RC_XMM : MIR_RC_GP,
-          fbits ? fbits / 8 : 8);
-      if (v == MIR_VREG_NONE) {
-        goto oom;
-      }
-      if (!mir_emit1(&fn, MIR_LOAD_GLOBAL, mir_op_vreg(v),
-                     mir_op_symbol(op->name), mir_op_none(), size,
-                     is_signed ? 0 : 1, 0)) {
-        goto oom;
-      }
-      /* Record this cached global for reload-after-call. The map-has guard
-       * above means each global is loaded (and recorded) exactly once. */
-      if (wb.all_count >= wb_all_cap) {
-        size_t nc = wb_all_cap ? wb_all_cap * 2 : 4;
-        const char **grown = (const char **)realloc(wb.all, nc * sizeof(*grown));
-        if (!grown) {
-          goto oom;
-        }
-        wb.all = grown;
-        wb_all_cap = nc;
-      }
-      wb.all[wb.all_count++] = op->name;
-    }
+  if (!mir_cache_globals(&fn, generator, ir_function, &map, &wb, &wb_cap,
+                         &wb_all_cap)) {
+    goto oom;
   }
 
   /* Address-taken globals (&g): a pointer can read/write their memory, so the

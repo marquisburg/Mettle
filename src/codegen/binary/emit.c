@@ -45,10 +45,8 @@ int code_generator_binary_declare_external_symbol(
   }
 
   if (!binary_emitter_declare_external(emitter, symbol_name)) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to declare external symbol");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to declare external symbol");
     return 0;
   }
 
@@ -113,10 +111,8 @@ int code_generator_binary_emit_cstring_literal_address(
   rdata_section = binary_emitter_get_or_create_section(
       emitter, ".rdata", BINARY_SECTION_RDATA, 0, 1);
   if (rdata_section == (size_t)-1) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to create .rdata section");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to create .rdata section");
     goto cleanup;
   }
 
@@ -131,10 +127,8 @@ int code_generator_binary_emit_cstring_literal_address(
       !code_generator_binary_emit_symbol_address(generator, context, label, 0,
                                                  target_register)) {
     if (!generator->has_error) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to emit string literal");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit string literal");
     }
     goto cleanup;
   }
@@ -200,10 +194,8 @@ int code_generator_binary_emit_string_literal_value_address(
         emitter, rdata_name, BINARY_SECTION_RDATA, rdata_characteristics, 8);
   }
   if (rdata_section == (size_t)-1) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to create .rdata section");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to create .rdata section");
     goto cleanup;
   }
 
@@ -221,10 +213,8 @@ int code_generator_binary_emit_string_literal_value_address(
       !binary_emitter_align_section(emitter, rdata_section, 8, 0) ||
       !binary_emitter_append_zeros(emitter, rdata_section, 16, &struct_offset)) {
     if (!generator->has_error) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to emit string literal");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit string literal");
     }
     goto cleanup;
   }
@@ -245,10 +235,8 @@ int code_generator_binary_emit_string_literal_value_address(
       !code_generator_binary_emit_symbol_address(generator, context, struct_label,
                                                  0, target_register)) {
     if (!generator->has_error) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to emit string literal");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit string literal");
     }
     goto cleanup;
   }
@@ -288,10 +276,8 @@ int code_generator_binary_emit_global_string_variable(
   data_section = binary_emitter_get_or_create_section(emitter, ".data",
                                                       BINARY_SECTION_DATA, 0, 8);
   if (data_section == (size_t)-1) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to create .data section");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to create .data section");
     return 0;
   }
 
@@ -306,10 +292,8 @@ int code_generator_binary_emit_global_string_variable(
     rdata_section = binary_emitter_get_or_create_section(
         emitter, ".rdata", BINARY_SECTION_RDATA, 0, 8);
     if (rdata_section == (size_t)-1) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to create .rdata section");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to create .rdata section");
       free(chars_label);
       return 0;
     }
@@ -323,10 +307,8 @@ int code_generator_binary_emit_global_string_variable(
         !binary_emitter_define_symbol(emitter, chars_label, BINARY_SYMBOL_LOCAL,
                                       rdata_section, chars_offset,
                                       length + 1)) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to emit global string characters");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit global string characters");
       free(chars_label);
       return 0;
     }
@@ -334,10 +316,8 @@ int code_generator_binary_emit_global_string_variable(
 
   if (!binary_emitter_align_section(emitter, data_section, 8, 0) ||
       !binary_emitter_append_zeros(emitter, data_section, 16, &struct_offset)) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to reserve global string storage");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to reserve global string storage");
     free(chars_label);
     return 0;
   }
@@ -356,10 +336,8 @@ int code_generator_binary_emit_global_string_variable(
     if (!binary_emitter_add_relocation(emitter, data_section, struct_offset,
                                        BINARY_RELOCATION_ADDR64, chars_label,
                                        0)) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to emit global string relocation");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit global string relocation");
       free(chars_label);
       return 0;
     }
@@ -367,10 +345,8 @@ int code_generator_binary_emit_global_string_variable(
 
   if (!binary_emitter_define_symbol(emitter, link_name, BINARY_SYMBOL_GLOBAL,
                                     data_section, struct_offset, 16)) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to define global string symbol");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to define global string symbol");
     free(chars_label);
     return 0;
   }
@@ -1437,265 +1413,223 @@ int code_generator_binary_emit_destination_store(
   }
 }
 
-int code_generator_binary_emit_runtime_trap_call(
-    CodeGenerator *generator, BinaryFunctionContext *context,
-    const IRInstruction *instruction) {
-  char *trap_pc_label = NULL;
-  size_t displacement_offset = 0;
-  int is_trap_ex =
-      instruction && instruction->text &&
-      strcmp(instruction->text, "mettle_crash_trap_ex") == 0;
-  const char *trap_symbol =
-      is_trap_ex ? "mettle_crash_trap_ex" : "mettle_crash_trap";
-  size_t message_arg_index = is_trap_ex ? 1u : 0u;
-  const BinaryAbi *abi = code_generator_binary_active_abi();
+static int binary_trap_out_of_memory(CodeGenerator *generator,
+                                     BinaryFunctionContext *context) {
+  if (!generator->has_error) {
+    code_generator_set_error(generator,
+                             "Out of memory while emitting runtime trap "
+                             "call in function '%s'",
+                             context->function_name);
+  }
+  return 0;
+}
 
-  if (!generator || !context || !instruction ||
-      instruction->argument_count == 0) {
+static int binary_emit_trap_message_address(CodeGenerator *generator,
+                                            BinaryFunctionContext *context,
+                                            const IROperand *message,
+                                            BinaryGpRegister target) {
+  if (message->kind == IR_OPERAND_STRING) {
+    return code_generator_binary_emit_cstring_literal_address(
+        generator, context, message->name ? message->name : "", target);
+  }
+  return code_generator_binary_emit_operand_load(generator, context, message,
+                                                 target);
+}
+
+static int binary_emit_trap_puts(CodeGenerator *generator,
+                                 BinaryFunctionContext *context, int shadow) {
+  size_t displacement_offset = 0;
+
+  return binary_emit_sub_rsp_imm32(&context->code, shadow) &&
+         binary_emit_call_placeholder(&context->code, &displacement_offset) &&
+         binary_call_relocation_table_add(&context->call_relocations, "puts",
+                                          displacement_offset) &&
+         binary_emit_add_rsp_imm32(&context->code, shadow);
+}
+
+static int binary_emit_trap_abort(CodeGenerator *generator,
+                                  BinaryFunctionContext *context,
+                                  const IROperand *message) {
+  const BinaryAbi *abi = code_generator_binary_active_abi();
+  BinaryGpRegister arg0 = abi->int_param_registers[0];
+  int shadow = abi->shadow_space_size;
+  size_t displacement_offset = 0;
+
+  if (!code_generator_binary_declare_external_symbol(generator, "puts") ||
+      !code_generator_binary_declare_external_symbol(generator, "exit")) {
     return 0;
   }
-
-  if (!generator->generate_stack_trace_support) {
-    const char *puts_symbol = "puts";
-    const char *exit_symbol = "exit";
-    const IROperand *message_operand =
-        instruction->argument_count > message_arg_index
-            ? &instruction->arguments[message_arg_index]
-            : &instruction->arguments[0];
-    /* Abort through the owned puts(message) and exit(1) ABI. The first register and
-     * the shadow-space reservation come from the active ABI (MS-x64 RCX + 32B
-     * shadow; SysV RDI + no shadow) so calls into the owned runtime are correct
-     * on both platforms. */
-    BinaryGpRegister arg0 = abi->int_param_registers[0];
-    int shadow = abi->shadow_space_size;
-
-    if (!code_generator_binary_declare_external_symbol(generator, puts_symbol) ||
-        !code_generator_binary_declare_external_symbol(generator, exit_symbol)) {
-      return 0;
-    }
-    if (message_operand->kind == IR_OPERAND_STRING) {
-      if (!code_generator_binary_emit_cstring_literal_address(
-              generator, context,
-              message_operand->name ? message_operand->name : "", arg0)) {
-        return 0;
-      }
-    } else if (!code_generator_binary_emit_operand_load(
-                   generator, context, message_operand, arg0)) {
-      return 0;
-    }
-    /* Then a second line saying where the rest of the report lives. Crash
-     * reporting is on by default, so this path is what most people see, and
-     * on its own it names neither the file nor the line nor the call that got
-     * there. The hint costs one string and one call on a path that is about
-     * to end the process. */
-    if (!binary_emit_sub_rsp_imm32(&context->code, shadow) ||
-        !binary_emit_call_placeholder(&context->code, &displacement_offset) ||
-        !binary_call_relocation_table_add(&context->call_relocations,
-                                          puts_symbol, displacement_offset) ||
-        !binary_emit_add_rsp_imm32(&context->code, shadow) ||
-        !code_generator_binary_emit_cstring_literal_address(
-            generator, context,
-            "  rebuild with -s for the file, line and stack trace", arg0) ||
-        !binary_emit_sub_rsp_imm32(&context->code, shadow) ||
-        !binary_emit_call_placeholder(&context->code, &displacement_offset) ||
-        !binary_call_relocation_table_add(&context->call_relocations,
-                                          puts_symbol, displacement_offset) ||
-        !binary_emit_add_rsp_imm32(&context->code, shadow) ||
-        !binary_emit_mov_reg_imm64(&context->code, arg0, 1) ||
-        !binary_emit_sub_rsp_imm32(&context->code, shadow) ||
-        !binary_emit_call_placeholder(&context->code, &displacement_offset) ||
-        !binary_call_relocation_table_add(&context->call_relocations,
-                                          exit_symbol, displacement_offset) ||
-        !binary_emit_add_rsp_imm32(&context->code, shadow)) {
-      if (!generator->has_error) {
-        code_generator_set_error(generator,
-                                 "Out of memory while emitting runtime trap "
-                                 "call in function '%s'",
-                                 context->function_name);
-      }
-      return 0;
-    }
-    return 1;
+  if (!binary_emit_trap_message_address(generator, context, message, arg0)) {
+    return 0;
   }
+  if (!binary_emit_trap_puts(generator, context, shadow) ||
+      !code_generator_binary_emit_cstring_literal_address(
+          generator, context,
+          "  rebuild with -s for the file, line and stack trace", arg0) ||
+      !binary_emit_trap_puts(generator, context, shadow) ||
+      !binary_emit_mov_reg_imm64(&context->code, arg0, 1) ||
+      !binary_emit_sub_rsp_imm32(&context->code, shadow) ||
+      !binary_emit_call_placeholder(&context->code, &displacement_offset) ||
+      !binary_call_relocation_table_add(&context->call_relocations, "exit",
+                                        displacement_offset) ||
+      !binary_emit_add_rsp_imm32(&context->code, shadow)) {
+    return binary_trap_out_of_memory(generator, context);
+  }
+  return 1;
+}
 
-  trap_pc_label = code_generator_generate_label(generator, "mettledbg_trap_pc");
-  if (!trap_pc_label) {
+static char *binary_open_trap_site(CodeGenerator *generator,
+                                   BinaryFunctionContext *context,
+                                   const IRInstruction *instruction,
+                                   const char *trap_symbol, int is_trap_ex) {
+  char *label = code_generator_generate_label(generator, "mettledbg_trap_pc");
+
+  if (!label) {
     code_generator_set_error(generator,
                              "Out of memory while creating runtime trap label");
-    return 0;
+    return NULL;
   }
-
-  if (!binary_label_table_define(&context->labels, trap_pc_label,
-                                 context->code.size)) {
+  if (!binary_label_table_define(&context->labels, label, context->code.size)) {
     code_generator_set_error(
-        generator,
-        "Failed to define runtime trap label in function '%s'",
+        generator, "Failed to define runtime trap label in function '%s'",
         context->function_name);
-    free(trap_pc_label);
-    return 0;
+    free(label);
+    return NULL;
   }
-
-  if (!code_generator_binary_record_debug_label_export(
-          context, trap_pc_label, context->code.size)) {
+  if (!code_generator_binary_record_debug_label_export(context, label,
+                                                       context->code.size)) {
     code_generator_set_error(generator,
                              "Out of memory while recording runtime trap "
                              "label in function '%s'",
                              context->function_name);
-    free(trap_pc_label);
-    return 0;
+    free(label);
+    return NULL;
   }
-
-  if (instruction->location.line > 0) {
-    if (!code_generator_binary_emit_runtime_location_marker(
-            generator, context, instruction->location.line,
-            instruction->location.column,
-            code_generator_runtime_filename(generator,
-                                            instruction->location.filename))) {
-      free(trap_pc_label);
-      return 0;
-    }
+  if (instruction->location.line > 0 &&
+      !code_generator_binary_emit_runtime_location_marker(
+          generator, context, instruction->location.line,
+          instruction->location.column,
+          code_generator_runtime_filename(generator,
+                                          instruction->location.filename))) {
+    free(label);
+    return NULL;
   }
-
   if (is_trap_ex && instruction->argument_count >= 4) {
-    uint32_t kind = 0;
-    const char *message = NULL;
-    if (instruction->arguments[0].kind == IR_OPERAND_INT) {
-      kind = (uint32_t)instruction->arguments[0].int_value;
-    }
-    if (instruction->arguments[1].kind == IR_OPERAND_STRING) {
-      message = instruction->arguments[1].name;
-    }
+    uint32_t kind = instruction->arguments[0].kind == IR_OPERAND_INT
+                        ? (uint32_t)instruction->arguments[0].int_value
+                        : 0u;
+    const char *message = instruction->arguments[1].kind == IR_OPERAND_STRING
+                              ? instruction->arguments[1].name
+                              : NULL;
     code_generator_record_runtime_trap_site(
-        generator, trap_pc_label, kind, instruction->location.line,
+        generator, label, kind, instruction->location.line,
         instruction->location.column,
         code_generator_runtime_filename(generator,
                                         instruction->location.filename),
         message, NULL);
   }
-
   if (!code_generator_binary_declare_external_symbol(generator, trap_symbol)) {
-    free(trap_pc_label);
+    free(label);
+    return NULL;
+  }
+  return label;
+}
+
+static int binary_emit_trap_detail(CodeGenerator *generator,
+                                   BinaryFunctionContext *context,
+                                   const IROperand *detail,
+                                   BinaryGpRegister target, int spill,
+                                   int spill_offset) {
+  if (detail->kind == IR_OPERAND_INT) {
+    if (!binary_emit_mov_reg_imm64(&context->code, target,
+                                   (unsigned long long)detail->int_value)) {
+      return 0;
+    }
+  } else if (!code_generator_binary_emit_operand_load(generator, context,
+                                                      detail, target)) {
     return 0;
   }
-
-  if (is_trap_ex) {
-    size_t register_count = abi->int_param_count;
-    int stack_argument_count = register_count < 6 ? 6 - (int)register_count : 0;
-    int call_frame_size =
-        abi->shadow_space_size + stack_argument_count * 8;
-    BinaryGpRegister arg0_target =
-        register_count > 4 ? abi->int_param_registers[4] : BINARY_GP_RAX;
-    BinaryGpRegister arg1_target =
-        register_count > 5 ? abi->int_param_registers[5] : BINARY_GP_RAX;
-    if (instruction->argument_count < 4 ||
-        instruction->arguments[0].kind != IR_OPERAND_INT ||
-        instruction->arguments[1].kind != IR_OPERAND_STRING ||
-        register_count < 4) {
-      code_generator_set_error(
-          generator,
-          "Invalid mettle_crash_trap_ex call in function '%s'",
-          context->function_name);
-      free(trap_pc_label);
-      return 0;
-    }
-
-    if (!binary_emit_sub_rsp_imm32(&context->code, call_frame_size) ||
-        !binary_emit_mov_reg_imm64(
-            &context->code, abi->int_param_registers[0],
-            (unsigned long long)instruction->arguments[0].int_value) ||
-        !code_generator_binary_emit_cstring_literal_address(
-            generator, context,
-            instruction->arguments[1].name ? instruction->arguments[1].name : "",
-            abi->int_param_registers[1]) ||
-        !binary_emit_lea_reg_rip_placeholder(
-            &context->code, abi->int_param_registers[2],
-            &displacement_offset) ||
-        !binary_label_fixup_table_add(&context->label_fixups, trap_pc_label,
-                                      displacement_offset) ||
-        !binary_emit_mov_reg_reg(&context->code, abi->int_param_registers[3],
-                                 BINARY_GP_RBP)) {
-      free(trap_pc_label);
-      return 0;
-    }
-
-    if (instruction->arguments[2].kind == IR_OPERAND_INT) {
-      if (!binary_emit_mov_reg_imm64(
-              &context->code, arg0_target,
-              (unsigned long long)instruction->arguments[2].int_value)) {
-        free(trap_pc_label);
-        return 0;
-      }
-    } else if (!code_generator_binary_emit_operand_load(
-                   generator, context, &instruction->arguments[2],
-                    arg0_target)) {
-      free(trap_pc_label);
-      return 0;
-    }
-    if (register_count <= 4 &&
-        !binary_emit_mov_mem_reg(&context->code, BINARY_GP_RSP,
-                                 abi->shadow_space_size, arg0_target)) {
-      free(trap_pc_label);
-      return 0;
-    }
-
-    if (instruction->arguments[3].kind == IR_OPERAND_INT) {
-      if (!binary_emit_mov_reg_imm64(
-              &context->code, arg1_target,
-              (unsigned long long)instruction->arguments[3].int_value)) {
-        free(trap_pc_label);
-        return 0;
-      }
-    } else if (!code_generator_binary_emit_operand_load(
-                   generator, context, &instruction->arguments[3],
-                    arg1_target)) {
-      free(trap_pc_label);
-      return 0;
-    }
-    if (register_count <= 5 &&
-        !binary_emit_mov_mem_reg(&context->code, BINARY_GP_RSP,
-                                 abi->shadow_space_size + 8, arg1_target)) {
-      free(trap_pc_label);
-      return 0;
-    }
-
-    if (!binary_emit_call_placeholder(&context->code, &displacement_offset) ||
-        !binary_call_relocation_table_add(&context->call_relocations,
-                                          trap_symbol, displacement_offset) ||
-        !binary_emit_add_rsp_imm32(&context->code, call_frame_size)) {
-      if (!generator->has_error) {
-        code_generator_set_error(generator,
-                                 "Out of memory while emitting runtime trap "
-                                 "call in function '%s'",
-                                 context->function_name);
-      }
-      free(trap_pc_label);
-      return 0;
-    }
-
-    free(trap_pc_label);
-    return 1;
-  }
-
-  if (instruction->arguments[0].kind == IR_OPERAND_STRING) {
-    if (!code_generator_binary_emit_cstring_literal_address(
-            generator, context,
-            instruction->arguments[0].name ? instruction->arguments[0].name
-                                             : "",
-            abi->int_param_registers[0])) {
-      free(trap_pc_label);
-      return 0;
-    }
-  } else if (!code_generator_binary_emit_operand_load(
-                  generator, context, &instruction->arguments[0],
-                  abi->int_param_registers[0])) {
-    free(trap_pc_label);
+  if (spill && !binary_emit_mov_mem_reg(&context->code, BINARY_GP_RSP,
+                                        spill_offset, target)) {
     return 0;
   }
+  return 1;
+}
 
-  if (!binary_emit_lea_reg_rip_placeholder(
-          &context->code, abi->int_param_registers[1],
-          &displacement_offset) ||
-      !binary_label_fixup_table_add(&context->label_fixups, trap_pc_label,
+static int binary_emit_trap_detailed_call(CodeGenerator *generator,
+                                          BinaryFunctionContext *context,
+                                          const IRInstruction *instruction,
+                                          const BinaryAbi *abi,
+                                          const char *trap_symbol,
+                                          const char *label) {
+  size_t register_count = abi->int_param_count;
+  int stacked = register_count < 6 ? 6 - (int)register_count : 0;
+  int call_frame_size = abi->shadow_space_size + stacked * 8;
+  BinaryGpRegister detail0 =
+      register_count > 4 ? abi->int_param_registers[4] : BINARY_GP_RAX;
+  BinaryGpRegister detail1 =
+      register_count > 5 ? abi->int_param_registers[5] : BINARY_GP_RAX;
+  size_t displacement_offset = 0;
+
+  if (instruction->argument_count < 4 ||
+      instruction->arguments[0].kind != IR_OPERAND_INT ||
+      instruction->arguments[1].kind != IR_OPERAND_STRING ||
+      register_count < 4) {
+    code_generator_set_error(generator,
+                             "Invalid mettle_crash_trap_ex call in function "
+                             "'%s'",
+                             context->function_name);
+    return 0;
+  }
+  if (!binary_emit_sub_rsp_imm32(&context->code, call_frame_size) ||
+      !binary_emit_mov_reg_imm64(
+          &context->code, abi->int_param_registers[0],
+          (unsigned long long)instruction->arguments[0].int_value) ||
+      !code_generator_binary_emit_cstring_literal_address(
+          generator, context,
+          instruction->arguments[1].name ? instruction->arguments[1].name : "",
+          abi->int_param_registers[1]) ||
+      !binary_emit_lea_reg_rip_placeholder(&context->code,
+                                           abi->int_param_registers[2],
+                                           &displacement_offset) ||
+      !binary_label_fixup_table_add(&context->label_fixups, label,
+                                    displacement_offset) ||
+      !binary_emit_mov_reg_reg(&context->code, abi->int_param_registers[3],
+                               BINARY_GP_RBP) ||
+      !binary_emit_trap_detail(generator, context, &instruction->arguments[2],
+                               detail0, register_count <= 4,
+                               abi->shadow_space_size) ||
+      !binary_emit_trap_detail(generator, context, &instruction->arguments[3],
+                               detail1, register_count <= 5,
+                               abi->shadow_space_size + 8)) {
+    return 0;
+  }
+  if (!binary_emit_call_placeholder(&context->code, &displacement_offset) ||
+      !binary_call_relocation_table_add(&context->call_relocations, trap_symbol,
+                                        displacement_offset) ||
+      !binary_emit_add_rsp_imm32(&context->code, call_frame_size)) {
+    return binary_trap_out_of_memory(generator, context);
+  }
+  return 1;
+}
+
+static int binary_emit_trap_message_call(CodeGenerator *generator,
+                                         BinaryFunctionContext *context,
+                                         const IRInstruction *instruction,
+                                         const BinaryAbi *abi,
+                                         const char *trap_symbol,
+                                         const char *label) {
+  size_t displacement_offset = 0;
+
+  if (!binary_emit_trap_message_address(generator, context,
+                                        &instruction->arguments[0],
+                                        abi->int_param_registers[0])) {
+    return 0;
+  }
+  if (!binary_emit_lea_reg_rip_placeholder(&context->code,
+                                           abi->int_param_registers[1],
+                                           &displacement_offset) ||
+      !binary_label_fixup_table_add(&context->label_fixups, label,
                                     displacement_offset) ||
       !binary_emit_mov_reg_reg(&context->code, abi->int_param_registers[2],
                                BINARY_GP_RBP) ||
@@ -1704,18 +1638,50 @@ int code_generator_binary_emit_runtime_trap_call(
       !binary_call_relocation_table_add(&context->call_relocations, trap_symbol,
                                         displacement_offset) ||
       !binary_emit_add_rsp_imm32(&context->code, abi->shadow_space_size)) {
-    if (!generator->has_error) {
-      code_generator_set_error(generator,
-                               "Out of memory while emitting runtime trap "
-                               "call in function '%s'",
-                               context->function_name);
-    }
-    free(trap_pc_label);
+    return binary_trap_out_of_memory(generator, context);
+  }
+  return 1;
+}
+
+int code_generator_binary_emit_runtime_trap_call(
+    CodeGenerator *generator, BinaryFunctionContext *context,
+    const IRInstruction *instruction) {
+  const BinaryAbi *abi = code_generator_binary_active_abi();
+  int is_trap_ex;
+  const char *trap_symbol;
+  size_t message_index;
+  char *label;
+  int ok;
+
+  if (!generator || !context || !instruction ||
+      instruction->argument_count == 0) {
     return 0;
   }
+  is_trap_ex = instruction->text &&
+               strcmp(instruction->text, "mettle_crash_trap_ex") == 0;
+  trap_symbol = is_trap_ex ? "mettle_crash_trap_ex" : "mettle_crash_trap";
+  message_index = is_trap_ex ? 1u : 0u;
 
-  free(trap_pc_label);
-  return 1;
+  if (!generator->generate_stack_trace_support) {
+    return binary_emit_trap_abort(
+        generator, context,
+        instruction->argument_count > message_index
+            ? &instruction->arguments[message_index]
+            : &instruction->arguments[0]);
+  }
+  label = binary_open_trap_site(generator, context, instruction, trap_symbol,
+                                is_trap_ex);
+  if (!label) {
+    return 0;
+  }
+  ok = is_trap_ex ? binary_emit_trap_detailed_call(generator, context,
+                                                   instruction, abi,
+                                                   trap_symbol, label)
+                  : binary_emit_trap_message_call(generator, context,
+                                                  instruction, abi,
+                                                  trap_symbol, label);
+  free(label);
+  return ok;
 }
 
 int code_generator_binary_load_needs_sign_extend(

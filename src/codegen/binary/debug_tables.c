@@ -119,10 +119,8 @@ int code_generator_binary_export_debug_symbols(
       !binary_emitter_define_symbol(emitter, context->runtime_end_label,
                                     BINARY_SYMBOL_LOCAL, text_section,
                                     function_offset + end_offset, 0)) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to define runtime function end label");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to define runtime function end label");
     return 0;
   }
 
@@ -131,10 +129,8 @@ int code_generator_binary_export_debug_symbols(
     if (!binary_emitter_define_symbol(emitter, entry->name, BINARY_SYMBOL_LOCAL,
                                       text_section,
                                       function_offset + entry->offset, 0)) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to define runtime location label");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to define runtime location label");
       return 0;
     }
   }
@@ -226,10 +222,8 @@ int code_generator_binary_emit_runtime_debug_tables(CodeGenerator *generator) {
   rdata_section = binary_emitter_get_or_create_section(
       emitter, ".rdata", BINARY_SECTION_RDATA, 0, 8);
   if (rdata_section == (size_t)-1) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to create .rdata section");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to create .rdata section");
     return 0;
   }
 
@@ -572,10 +566,8 @@ fail:
   free(trap_name_symbols);
   free(trap_file_symbols);
   if (!generator->has_error) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to emit runtime debug tables");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit runtime debug tables");
   }
   return 0;
 }
@@ -806,10 +798,8 @@ int code_generator_binary_emit_dwarf_debug_sections(CodeGenerator *generator) {
       !binary_debug_append_section(emitter, ".debug_line", &debug_line) ||
       !binary_debug_append_section(emitter, ".debug_str", &debug_str) ||
       !binary_debug_append_section(emitter, ".debug_frame", &debug_frame)) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to emit DWARF debug sections");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit DWARF debug sections");
     goto cleanup;
   }
 
@@ -855,10 +845,8 @@ static int code_generator_binary_emit_elf_pointer_array_entry(
                                    &entry_offset) ||
       !binary_emitter_add_relocation(emitter, section_index, entry_offset,
                                      BINARY_RELOCATION_ADDR64, symbol_name, 0)) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to emit ELF runtime hook section");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit ELF runtime hook section");
     return 0;
   }
 
@@ -962,19 +950,15 @@ int code_generator_binary_emit_crash_startup(CodeGenerator *generator) {
   text_section = binary_emitter_get_or_create_section(
       emitter, ".text", BINARY_SECTION_TEXT, 0, BINARY_TEXT_SECTION_ALIGNMENT);
   if (text_section == (size_t)-1) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to create .text section");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to create .text section");
     goto fail;
   }
 
   if (!binary_emitter_align_section(emitter, text_section,
                                     BINARY_TEXT_SECTION_ALIGNMENT, 0x90)) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to align .text section");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to align .text section");
     goto fail;
   }
 
@@ -992,10 +976,8 @@ int code_generator_binary_emit_crash_startup(CodeGenerator *generator) {
                                     function_offset, code.size) ||
       !binary_emitter_append_bytes(emitter, text_section, code.data, code.size,
                                    NULL)) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to emit crash startup function");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit crash startup function");
     goto fail;
   }
 
@@ -1010,10 +992,8 @@ int code_generator_binary_emit_crash_startup(CodeGenerator *generator) {
             emitter, text_section,
             function_offset + relocation->displacement_offset,
             BINARY_RELOCATION_REL32, relocation->symbol_name, 0)) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to record crash startup relocation");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to record crash startup relocation");
       goto fail;
     }
   }

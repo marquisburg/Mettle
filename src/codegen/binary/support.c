@@ -553,3 +553,11 @@ void binary_function_context_destroy(BinaryFunctionContext *context) {
   free(context->debug_export_labels.items);
 }
 
+int code_generator_binary_emitter_error(CodeGenerator *generator,
+                                        BinaryEmitter *emitter,
+                                        const char *fallback) {
+  const char *reported = emitter ? binary_emitter_get_error(emitter) : NULL;
+
+  code_generator_set_error(generator, "%s", reported ? reported : fallback);
+  return 0;
+}

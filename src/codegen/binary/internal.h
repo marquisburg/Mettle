@@ -692,6 +692,7 @@ int binary_emit_ucomiss_xmm_xmm(BinaryCodeBuffer *buffer, BinaryXmmRegister lhs,
 int binary_emit_unary_reg(BinaryCodeBuffer *buffer, unsigned char subopcode, BinaryGpRegister reg);
 int binary_emit_xor_reg_imm32(BinaryCodeBuffer *buffer, BinaryGpRegister reg, uint32_t immediate);
 int binary_emit_xor_reg_reg32(BinaryCodeBuffer *buffer, BinaryGpRegister reg);
+int code_generator_binary_emitter_error( CodeGenerator *generator, BinaryEmitter *emitter, const char *fallback);
 void binary_function_context_destroy(BinaryFunctionContext *context);
 int code_generator_binary_emit_unsigned_int_to_float(BinaryFunctionContext *context, int float_bits, BinaryXmmRegister destination, BinaryGpRegister source, BinaryGpRegister work, BinaryGpRegister odd);
 int code_generator_binary_emit_float_to_unsigned_int(BinaryFunctionContext *context, int float_bits, BinaryGpRegister destination, BinaryXmmRegister source, BinaryGpRegister work, BinaryXmmRegister scratch);

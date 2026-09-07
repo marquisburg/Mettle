@@ -203,10 +203,8 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
   rdata_section = binary_emitter_get_or_create_section(
       emitter, ".rdata", BINARY_SECTION_RDATA, 0, 8);
   if (rdata_section == (size_t)-1) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to create .rdata section");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to create .rdata section");
     goto fail;
   }
 
@@ -217,10 +215,8 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
           generator, emitter, rdata_section, "mettle_profile_files",
           profile_files, function_count, file_symbols)) {
     if (!generator->has_error) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to emit profile string tables");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit profile string tables");
     }
     goto fail;
   }
@@ -235,10 +231,8 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
                                       BINARY_SYMBOL_GLOBAL, rdata_section,
                                       lines_offset,
                                       function_count * sizeof(uint64_t))) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to emit profile line table");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit profile line table");
       goto fail;
     }
   }
@@ -246,10 +240,8 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
   data_section = binary_emitter_get_or_create_section(
       emitter, ".data", BINARY_SECTION_DATA, 0, 8);
   if (data_section == (size_t)-1) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to create .data section");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to create .data section");
     goto fail;
   }
 
@@ -262,10 +254,8 @@ int code_generator_binary_emit_profile_tables(CodeGenerator *generator) {
         !binary_emitter_define_symbol(emitter, "mettle_profile_name_count",
                                       BINARY_SYMBOL_GLOBAL, data_section,
                                       count_offset, sizeof(count_value))) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to emit profile name count");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit profile name count");
       goto fail;
     }
   }

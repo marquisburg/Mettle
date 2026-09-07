@@ -1419,92 +1419,92 @@ static int mir_clobber_index_ensure(const MirFunction *fn) {
   return 1;
 }
 
-static int mir_reg_clobbered_in_range(const MirFunction *fn,
-                                      BinaryGpRegister reg, int s, int e) {
-  int constrained = (reg == BINARY_GP_RAX || reg == BINARY_GP_RCX ||
-                     reg == BINARY_GP_RDX);
+static int mir_reg_is_pinned(BinaryGpRegister reg) {
+  return reg == BINARY_GP_RAX || reg == BINARY_GP_RCX || reg == BINARY_GP_RDX;
+}
 
-  if ((int)reg >= 0 && (int)reg < 16 && mir_clobber_index_ensure(fn)) {
-    const MirClobberIndex *ix = &g_mir_clobber_index;
-    if (mir_clobber_list_hit(&ix->explicit_fixed[reg], s, e)) {
-      return 1;
-    }
-    if (!constrained) {
-      return 0;
-    }
-    if (reg == BINARY_GP_RAX) {
-      return mir_clobber_list_hit(&ix->rax_implicit, s, e);
-    }
-    if (reg == BINARY_GP_RCX) {
-      return mir_clobber_list_hit(&ix->rcx_implicit, s, e);
-    }
+static int mir_reg_clobbered_by_index(const MirFunction *fn,
+                                      BinaryGpRegister reg, int s, int e,
+                                      int *answered) {
+  const MirClobberIndex *ix = &g_mir_clobber_index;
+
+  *answered = 0;
+  if ((int)reg < 0 || (int)reg >= 16 || !mir_clobber_index_ensure(fn)) {
+    return 0;
+  }
+  *answered = 1;
+  if (mir_clobber_list_hit(&ix->explicit_fixed[reg], s, e)) {
+    return 1;
+  }
+  if (reg == BINARY_GP_RAX) {
+    return mir_clobber_list_hit(&ix->rax_implicit, s, e);
+  }
+  if (reg == BINARY_GP_RCX) {
+    return mir_clobber_list_hit(&ix->rcx_implicit, s, e);
+  }
+  if (reg == BINARY_GP_RDX) {
     return mir_clobber_list_hit(&ix->rdx_implicit, s, e);
   }
+  return 0;
+}
 
-  /* Fallback: index unavailable; scan the interval as before. */
-  for (int k = s + 1; k < e; k++) {
-    const MirInst *in = &fn->insns[k];
-    /* This physical register carrying a fixed value here, as the destination
-     * (return value into RAX, ABI argument setup, hidden-return pointer, ...)
-     * or as a source (capturing the divide's remainder out of RDX). Either way
-     * a vreg cannot also be living in it across this point. Mirrors the index
-     * build above. */
-    const MirOperand *fixed[3] = {&in->dst, &in->a, &in->b};
-    for (int f = 0; f < 3; f++) {
-      if (fixed[f]->kind == MIR_OPK_PHYS && fixed[f]->rclass == MIR_RC_GP &&
-          fixed[f]->phys == (int)reg) {
-        return 1;
-      }
-    }
-    /* Callee-saved registers an inline kernel writes without preserving (see
-     * the index build above); unlike the cases below these are not limited to
-     * RAX/RCX/RDX, so they are checked before the `constrained` filter. */
-    if (in->op == MIR_IR_KERNEL && (int)reg >= 0 && (int)reg < 16) {
-      const MirKernelAux *ka = (const MirKernelAux *)in->aux;
-      const MirIrKernel *kern = ka ? mir_ir_kernel_at(ka->kernel_index) : NULL;
-      if (kern && (kern->gp_clobbers & (1u << (unsigned)reg))) {
-        return 1;
-      }
-    }
-    if (in->op == MIR_INLINE_ASM) {
+static int mir_inst_pins_reg(const MirInst *in, BinaryGpRegister reg) {
+  switch (in->op) {
+  case MIR_IDIV:
+  case MIR_DIV:
+  case MIR_MULHI:
+    return reg == BINARY_GP_RAX || reg == BINARY_GP_RDX;
+  case MIR_CQO:
+  case MIR_XOR_RDX:
+    return reg == BINARY_GP_RDX;
+  case MIR_SETCC:
+    return reg == BINARY_GP_RAX;
+  case MIR_FSETCC:
+    return reg == BINARY_GP_RAX ||
+           (reg == BINARY_GP_RCX && mir_fsetcc_unordered_cc(in->cc) >= 0);
+  case MIR_SHL:
+  case MIR_SHR:
+  case MIR_SAR:
+    return reg == BINARY_GP_RCX && in->b.kind != MIR_OPK_IMM;
+  default:
+    return 0;
+  }
+}
+
+static int mir_inst_clobbers_reg(const MirInst *in, BinaryGpRegister reg) {
+  const MirOperand *fixed[3] = {&in->dst, &in->a, &in->b};
+
+  for (int f = 0; f < 3; f++) {
+    if (fixed[f]->kind == MIR_OPK_PHYS && fixed[f]->rclass == MIR_RC_GP &&
+        fixed[f]->phys == (int)reg) {
       return 1;
     }
-    if (!constrained) {
-      continue;
+  }
+  if (in->op == MIR_IR_KERNEL && (int)reg >= 0 && (int)reg < 16) {
+    const MirKernelAux *aux = (const MirKernelAux *)in->aux;
+    const MirIrKernel *kernel = aux ? mir_ir_kernel_at(aux->kernel_index)
+                                    : NULL;
+    if (kernel && (kernel->gp_clobbers & (1u << (unsigned)reg))) {
+      return 1;
     }
-    switch (in->op) {
-    case MIR_IDIV:
-    case MIR_DIV:
-    case MIR_MULHI:
-      if (reg == BINARY_GP_RAX || reg == BINARY_GP_RDX) {
-        return 1;
-      }
-      break;
-    case MIR_CQO:
-    case MIR_XOR_RDX:
-      if (reg == BINARY_GP_RDX) {
-        return 1;
-      }
-      break;
-    case MIR_SETCC:
-    case MIR_FSETCC:
-      if (reg == BINARY_GP_RAX) {
-        return 1;
-      }
-      if (in->op == MIR_FSETCC && reg == BINARY_GP_RCX &&
-          mir_fsetcc_unordered_cc(in->cc) >= 0) {
-        return 1;
-      }
-      break;
-    case MIR_SHL:
-    case MIR_SHR:
-    case MIR_SAR:
-      if (reg == BINARY_GP_RCX && in->b.kind != MIR_OPK_IMM) {
-        return 1;
-      }
-      break;
-    default:
-      break;
+  }
+  if (in->op == MIR_INLINE_ASM) {
+    return 1;
+  }
+  return mir_reg_is_pinned(reg) && mir_inst_pins_reg(in, reg);
+}
+
+static int mir_reg_clobbered_in_range(const MirFunction *fn,
+                                      BinaryGpRegister reg, int s, int e) {
+  int answered = 0;
+  int indexed = mir_reg_clobbered_by_index(fn, reg, s, e, &answered);
+
+  if (answered) {
+    return indexed;
+  }
+  for (int k = s + 1; k < e; k++) {
+    if (mir_inst_clobbers_reg(&fn->insns[k], reg)) {
+      return 1;
     }
   }
   return 0;
@@ -1768,6 +1768,63 @@ static const char *mir_ra_trace_name(void) {
   return g_mir_ra_trace_name ? g_mir_ra_trace_name : "?";
 }
 
+static void mir_color_spill_costs(const MirFunction *fn,
+                                  const int *colorable, int *cost,
+                                  unsigned char *use_depth, size_t count) {
+  unsigned char *loop_depth = mir_build_loop_depths(fn);
+
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    const MirInst *in = &fn->insns[i];
+    const MirOperand *ops[3] = {&in->dst, &in->a, &in->b};
+    unsigned char depth = loop_depth ? loop_depth[i] : 0;
+    int weight = 1;
+
+    for (int k = 0; k < depth; k++) {
+      weight *= 10;
+    }
+    for (int k = 0; k < 3; k++) {
+      const MirOperand *op = ops[k];
+      MirVregId ids[2] = {MIR_VREG_NONE, MIR_VREG_NONE};
+
+      mir_note_operand_depth(op, depth, use_depth, count);
+      if (op->kind == MIR_OPK_VREG) {
+        ids[0] = op->vreg;
+      } else if (op->kind == MIR_OPK_MEM) {
+        ids[0] = op->mem.base;
+        ids[1] = op->mem.index;
+      }
+      for (int j = 0; j < 2; j++) {
+        MirVregId id = ids[j];
+        if (id >= 0 && (size_t)id < count && colorable[id]) {
+          cost[id] = mir_scale_cost(cost[id] + weight, 1);
+        }
+      }
+    }
+  }
+  free(loop_depth);
+  for (size_t i = 0; i < fn->iconst_count; i++) {
+    MirVregId v = fn->iconsts[i].vreg;
+    if (v >= 0 && (size_t)v < count && colorable[v]) {
+      cost[v] = mir_scale_cost(cost[v], 64);
+    }
+  }
+  for (size_t i = 0; i < fn->fconst_count; i++) {
+    MirVregId v = fn->fconsts[i].vreg;
+    if (v >= 0 && (size_t)v < count && colorable[v]) {
+      cost[v] = mir_scale_cost(cost[v], 32);
+    }
+  }
+  for (size_t i = 0; i < fn->insn_count; i++) {
+    const MirInst *in = &fn->insns[i];
+    if (in->op == MIR_LEA_FUNC && in->dst.kind == MIR_OPK_VREG) {
+      MirVregId v = in->dst.vreg;
+      if (v >= 0 && (size_t)v < count && colorable[v]) {
+        cost[v] = mir_scale_cost(cost[v], 128);
+      }
+    }
+  }
+}
+
 static int mir_color_graph(MirFunction *fn, const BinaryGpRegister *gp_leaf_pool,
                            size_t gp_leaf_n,
                            const BinaryGpRegister *gp_cross_pool,
@@ -1843,63 +1900,14 @@ static int mir_color_graph(MirFunction *fn, const BinaryGpRegister *gp_leaf_pool
     reg_count[v] = __builtin_popcount(mask[v]);
     cost[v] = 1;
   }
-  unsigned char *loop_depth = mir_build_loop_depths(fn);
   unsigned char *use_depth = (unsigned char *)calloc(N, sizeof(*use_depth));
   if (!use_depth) {
-    free(loop_depth);
     free(inter); free(mask); free(degree); free(cost); free(colorable);
     free(removed); free(reg_count); free(metric); free(stack);
     free(narrow_src);
     return 0;
   }
-  for (size_t i = 0; i < fn->insn_count; i++) {
-    const MirInst *in = &fn->insns[i];
-    const MirOperand *ops[3] = {&in->dst, &in->a, &in->b};
-    unsigned char d = loop_depth ? loop_depth[i] : 0;
-    int weight = 1;
-    for (int k = 0; k < d; k++) {
-      weight *= 10;
-    }
-    for (int k = 0; k < 3; k++) {
-      const MirOperand *op = ops[k];
-      MirVregId ids[2] = {MIR_VREG_NONE, MIR_VREG_NONE};
-      mir_note_operand_depth(op, d, use_depth, N);
-      if (op->kind == MIR_OPK_VREG) {
-        ids[0] = op->vreg;
-      } else if (op->kind == MIR_OPK_MEM) {
-        ids[0] = op->mem.base;
-        ids[1] = op->mem.index;
-      }
-      for (int j = 0; j < 2; j++) {
-        MirVregId id = ids[j];
-        if (id >= 0 && (size_t)id < N && colorable[id]) {
-          cost[id] = mir_scale_cost(cost[id] + weight, 1);
-        }
-      }
-    }
-  }
-  free(loop_depth);
-  for (size_t i = 0; i < fn->iconst_count; i++) {
-    MirVregId v = fn->iconsts[i].vreg;
-    if (v >= 0 && (size_t)v < N && colorable[v]) {
-      cost[v] = mir_scale_cost(cost[v], 64);
-    }
-  }
-  for (size_t i = 0; i < fn->fconst_count; i++) {
-    MirVregId v = fn->fconsts[i].vreg;
-    if (v >= 0 && (size_t)v < N && colorable[v]) {
-      cost[v] = mir_scale_cost(cost[v], 32);
-    }
-  }
-  for (size_t i = 0; i < fn->insn_count; i++) {
-    const MirInst *in = &fn->insns[i];
-    if (in->op == MIR_LEA_FUNC && in->dst.kind == MIR_OPK_VREG) {
-      MirVregId v = in->dst.vreg;
-      if (v >= 0 && (size_t)v < N && colorable[v]) {
-        cost[v] = mir_scale_cost(cost[v], 128);
-      }
-    }
-  }
+  mir_color_spill_costs(fn, colorable, cost, use_depth, N);
 
   /* Build interference from the control-flow liveness sets. The old interval
    * graph made every value between its first and last textual use overlap. In a

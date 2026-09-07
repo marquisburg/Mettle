@@ -293,19 +293,15 @@ static int code_generator_binary_emit_global_aggregate_image(
   data_section = binary_emitter_get_or_create_section(
       emitter, ".data", BINARY_SECTION_DATA, 0, alignment);
   if (data_section == (size_t)-1) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to create .data section");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to create .data section");
     return 0;
   }
   if (!binary_emitter_align_section(emitter, data_section, alignment, 0) ||
       !binary_emitter_append_bytes(emitter, data_section, sym->init_bytes,
                                    sym->init_bytes_size, &image_offset)) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to emit aggregate global image");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit aggregate global image");
     return 0;
   }
 
@@ -340,10 +336,8 @@ static int code_generator_binary_emit_global_aggregate_image(
           !binary_emitter_define_symbol(emitter, chars_label,
                                         BINARY_SYMBOL_LOCAL, rdata_section,
                                         chars_offset, length + 1)) {
-        code_generator_set_error(generator, "%s",
-                                 binary_emitter_get_error(emitter)
-                                     ? binary_emitter_get_error(emitter)
-                                     : "Failed to emit aggregate string bytes");
+        code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit aggregate string bytes");
         free(chars_label);
         return 0;
       }
@@ -386,10 +380,8 @@ static int code_generator_binary_emit_global_aggregate_image(
     if (!binary_emitter_add_relocation(emitter, data_section,
                                        image_offset + reloc->offset,
                                        BINARY_RELOCATION_ADDR64, target, 0)) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to emit aggregate relocation");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit aggregate relocation");
       free(chars_label);
       return 0;
     }
@@ -399,10 +391,8 @@ static int code_generator_binary_emit_global_aggregate_image(
   if (!binary_emitter_define_symbol(emitter, link_name, BINARY_SYMBOL_GLOBAL,
                                     data_section, image_offset,
                                     sym->init_bytes_size)) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to define aggregate global symbol");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to define aggregate global symbol");
     return 0;
   }
   return 1;
@@ -505,35 +495,27 @@ int code_generator_emit_binary_global_variable(CodeGenerator *generator,
     aggregate_section = binary_emitter_get_or_create_section(
         emitter, ".bss", BINARY_SECTION_BSS, 0, aggregate_alignment);
     if (aggregate_section == (size_t)-1) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to create global aggregate section");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to create global aggregate section");
       return 0;
     }
     if (!binary_emitter_align_section(emitter, aggregate_section,
                                       aggregate_alignment, 0)) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to align global aggregate section");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to align global aggregate section");
       return 0;
     }
     if (!binary_emitter_append_zeros(emitter, aggregate_section, aggregate_size,
                                      &aggregate_offset)) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to reserve global aggregate storage");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to reserve global aggregate storage");
       return 0;
     }
     if (!binary_emitter_define_symbol(emitter, link_name, BINARY_SYMBOL_GLOBAL,
                                       aggregate_section, aggregate_offset,
                                       aggregate_size)) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to define global aggregate symbol");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to define global aggregate symbol");
       return 0;
     }
     return 1;
@@ -569,34 +551,26 @@ int code_generator_emit_binary_global_variable(CodeGenerator *generator,
     ref_section = binary_emitter_get_or_create_section(
         emitter, ".data", BINARY_SECTION_DATA, 0, 8);
     if (ref_section == (size_t)-1) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to create .data section");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to create .data section");
       return 0;
     }
     if (!binary_emitter_align_section(emitter, ref_section, 8, 0) ||
         !binary_emitter_append_zeros(emitter, ref_section, 8, &ref_offset)) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to reserve global pointer storage");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to reserve global pointer storage");
       return 0;
     }
     if (!binary_emitter_add_relocation(emitter, ref_section, ref_offset,
                                        BINARY_RELOCATION_ADDR64, target, 0)) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to emit global pointer relocation");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit global pointer relocation");
       return 0;
     }
     if (!binary_emitter_define_symbol(emitter, link_name, BINARY_SYMBOL_GLOBAL,
                                       ref_section, ref_offset, 8)) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to define global pointer symbol");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to define global pointer symbol");
       return 0;
     }
     return 1;
@@ -642,18 +616,14 @@ int code_generator_emit_binary_global_variable(CodeGenerator *generator,
   section_index = binary_emitter_get_or_create_section(
       emitter, section_name, section_kind, 0, alignment);
   if (section_index == (size_t)-1) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to create global variable section");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to create global variable section");
     return 0;
   }
 
   if (!binary_emitter_align_section(emitter, section_index, alignment, 0)) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to align global variable section");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to align global variable section");
     return 0;
   }
 
@@ -698,27 +668,21 @@ int code_generator_emit_binary_global_variable(CodeGenerator *generator,
 
     if (!binary_emitter_append_bytes(emitter, section_index, bytes, (size_t)size,
                                      &value_offset)) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to emit global initializer");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to emit global initializer");
       return 0;
     }
   } else if (!binary_emitter_append_zeros(emitter, section_index, (size_t)size,
                                           &value_offset)) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to reserve global storage");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to reserve global storage");
     return 0;
   }
 
   if (!binary_emitter_define_symbol(emitter, link_name, BINARY_SYMBOL_GLOBAL,
                                     section_index, value_offset, (size_t)size)) {
-    code_generator_set_error(generator, "%s",
-                             binary_emitter_get_error(emitter)
-                                 ? binary_emitter_get_error(emitter)
-                                 : "Failed to define global variable symbol");
+    code_generator_binary_emitter_error(
+        generator, emitter, "Failed to define global variable symbol");
     return 0;
   }
 
@@ -984,10 +948,8 @@ int code_generator_declare_binary_externs(CodeGenerator *generator) {
     }
 
     if (!binary_emitter_declare_external(emitter, extern_name)) {
-      code_generator_set_error(generator, "%s",
-                               binary_emitter_get_error(emitter)
-                                   ? binary_emitter_get_error(emitter)
-                                   : "Failed to declare external symbol");
+      code_generator_binary_emitter_error(
+        generator, emitter, "Failed to declare external symbol");
       return 0;
     }
   }

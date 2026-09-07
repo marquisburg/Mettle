@@ -141,15 +141,6 @@ static int binary_emit_function_code(CodeGenerator *generator,
   return 1;
 }
 
-static int binary_emitter_failed(CodeGenerator *generator,
-                                 BinaryEmitter *emitter,
-                                 const char *fallback_message) {
-  const char *reported = binary_emitter_get_error(emitter);
-  code_generator_set_error(generator, "%s",
-                           reported ? reported : fallback_message);
-  return 0;
-}
-
 static size_t binary_function_text_section(
     BinaryEmitter *emitter, const IRFunction *ir_function,
     const BinaryFunctionContext *context) {
@@ -196,7 +187,7 @@ static int binary_record_function_relocations(
             emitter, text_section, function_offset + relocation->offset,
             (BinaryRelocationKind)relocation->kind, relocation->symbol_name,
             relocation->addend)) {
-      return binary_emitter_failed(generator, emitter,
+      return code_generator_binary_emitter_error(generator, emitter,
                                    "Failed to record an asm relocation");
     }
   }
@@ -207,7 +198,7 @@ static int binary_record_function_relocations(
             emitter, text_section,
             function_offset + relocation->displacement_offset,
             BINARY_RELOCATION_REL32, relocation->symbol_name, 0)) {
-      return binary_emitter_failed(generator, emitter,
+      return code_generator_binary_emitter_error(generator, emitter,
                                    "Failed to record function relocation");
     }
   }
@@ -228,7 +219,7 @@ static int binary_append_function(CodeGenerator *generator,
   }
   text_section = binary_function_text_section(emitter, ir_function, context);
   if (text_section == (size_t)-1) {
-    return binary_emitter_failed(generator, emitter,
+    return code_generator_binary_emitter_error(generator, emitter,
                                  "Failed to create .text section");
   }
   if (!binary_emitter_align_section(emitter, text_section,
@@ -236,7 +227,7 @@ static int binary_append_function(CodeGenerator *generator,
                                         ? (int)BINARY_LOOP_ALIGN_BIG
                                         : BINARY_TEXT_SECTION_ALIGNMENT,
                                     0x90)) {
-    return binary_emitter_failed(generator, emitter,
+    return code_generator_binary_emitter_error(generator, emitter,
                                  "Failed to align .text section");
   }
   section = binary_emitter_get_section(emitter, text_section);
@@ -251,7 +242,7 @@ static int binary_append_function(CodeGenerator *generator,
           function_offset, context->code.size) ||
       !binary_emitter_append_bytes(emitter, text_section, context->code.data,
                                    context->code.size, NULL)) {
-    return binary_emitter_failed(generator, emitter,
+    return code_generator_binary_emitter_error(generator, emitter,
                                  "Failed to emit function machine code");
   }
   if (!binary_record_function_relocations(generator, emitter, context,
