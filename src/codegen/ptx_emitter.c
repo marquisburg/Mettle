@@ -6836,6 +6836,11 @@ static void ptx_emit_device(IRProgram *program, IRFunction *func, PtxFn *fn,
                         const IRInstruction *in, size_t *ii, char **error,
                         int target_arch, int returns_void, const char *ename,
                         int *handled) {
+  (void)ename;
+  (void)returns_void;
+  (void)target_arch;
+  (void)program;
+  (void)error;
   switch (in->op) {
   case IR_OP_NOP:
   case IR_OP_ADDRESS_SPACE_ALLOC:
@@ -6937,6 +6942,12 @@ static void ptx_emit_control(IRProgram *program, IRFunction *func, PtxFn *fn,
                         const IRInstruction *in, size_t *ii, char **error,
                         int target_arch, int returns_void, const char *ename,
                         int *handled) {
+  (void)ii;
+  (void)ename;
+  (void)returns_void;
+  (void)func;
+  (void)program;
+  (void)error;
   switch (in->op) {
   case IR_OP_LABEL: {
     char lbl[256];
@@ -7015,6 +7026,13 @@ static void ptx_emit_assign(IRProgram *program, IRFunction *func, PtxFn *fn,
                         const IRInstruction *in, size_t *ii, char **error,
                         int target_arch, int returns_void, const char *ename,
                         int *handled) {
+  (void)ii;
+  (void)ename;
+  (void)returns_void;
+  (void)target_arch;
+  (void)func;
+  (void)program;
+  (void)error;
   switch (in->op) {
   case IR_OP_ASSIGN: {
     if (!in->dest.name) {
@@ -7093,6 +7111,13 @@ static void ptx_emit_memory(IRProgram *program, IRFunction *func, PtxFn *fn,
                         const IRInstruction *in, size_t *ii, char **error,
                         int target_arch, int returns_void, const char *ename,
                         int *handled) {
+  (void)ii;
+  (void)ename;
+  (void)returns_void;
+  (void)target_arch;
+  (void)func;
+  (void)program;
+  (void)error;
   switch (in->op) {
   case IR_OP_LOAD: {
     /* A load from a string literal is the frontend taking a format string's
@@ -7261,6 +7286,12 @@ static void ptx_emit_arith(IRProgram *program, IRFunction *func, PtxFn *fn,
                         const IRInstruction *in, size_t *ii, char **error,
                         int target_arch, int returns_void, const char *ename,
                         int *handled) {
+  (void)ii;
+  (void)ename;
+  (void)returns_void;
+  (void)func;
+  (void)program;
+  (void)error;
   switch (in->op) {
   case IR_OP_BINARY:
     emit_binary(fn, in);
@@ -7357,6 +7388,8 @@ static void ptx_emit_arith(IRProgram *program, IRFunction *func, PtxFn *fn,
 static void ptx_emit_general_call(IRProgram *program, IRFunction *func,
                                   PtxFn *fn, const IRInstruction *in,
                                   char **error, const char *ename) {
+  (void)error;
+  (void)ename;
   const char *callee = in->text;
   MtlcIntrinsic intrinsic = in->intrinsic;
 
@@ -8149,6 +8182,9 @@ static void ptx_emit_call(IRProgram *program, IRFunction *func, PtxFn *fn,
                         const IRInstruction *in, size_t *ii, char **error,
                         int target_arch, int returns_void, const char *ename,
                         int *handled) {
+  (void)ii;
+  (void)returns_void;
+  (void)target_arch;
   switch (in->op) {
   case IR_OP_CALL: {
     const char *callee = in->text;
@@ -8492,6 +8528,11 @@ static void ptx_emit_result(IRProgram *program, IRFunction *func, PtxFn *fn,
                         const IRInstruction *in, size_t *ii, char **error,
                         int target_arch, int returns_void, const char *ename,
                         int *handled) {
+  (void)ii;
+  (void)handled;
+  (void)target_arch;
+  (void)program;
+  (void)error;
   switch (in->op) {
   case IR_OP_RETURN:
     if (func->is_kernel || returns_void) {
