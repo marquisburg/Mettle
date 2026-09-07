@@ -782,6 +782,79 @@ static int mir_name_is_global_aggregate(CodeGenerator *g,
                                         const IRFunction *irf,
                                         const char *name);
 
+static int mir_operand_names_temp(const IROperand *op, const char *name) {
+  return op->kind == IR_OPERAND_TEMP && op->name &&
+         strcmp(op->name, name) == 0;
+}
+
+static int mir_struct_temp_size_from_call(CodeGenerator *g,
+                                          const IRInstruction *in,
+                                          const char *name) {
+  const CgSym *callee = in->text ? code_generator_lookup_symbol(g, in->text)
+                                 : NULL;
+
+  if (!callee || callee->kind != CG_SYM_FUNCTION) {
+    return 0;
+  }
+  if (mir_operand_names_temp(&in->dest, name)) {
+    const MtlcType *returned = callee->data.function.return_type
+                                   ? callee->data.function.return_type
+                                   : callee->type;
+    int home = mir_indirect_type_home_bytes(g, returned);
+    if (home) {
+      return home;
+    }
+  }
+  if (!callee->data.function.parameter_types) {
+    return 0;
+  }
+  for (size_t a = 0;
+       a < in->argument_count && a < callee->data.function.parameter_count;
+       a++) {
+    if (mir_operand_names_temp(&in->arguments[a], name)) {
+      int home = mir_indirect_type_home_bytes(
+          g, callee->data.function.parameter_types[a]);
+      if (home) {
+        return home;
+      }
+    }
+  }
+  return 0;
+}
+
+static int mir_struct_temp_size_from_assign(CodeGenerator *g,
+                                            const IRFunction *irf,
+                                            const IRInstruction *in,
+                                            const char *name) {
+  const IROperand *other = NULL;
+  int home = 0;
+
+  if (mir_operand_names_temp(&in->dest, name)) {
+    other = &in->lhs;
+  } else if (mir_operand_names_temp(&in->lhs, name)) {
+    other = &in->dest;
+  }
+  if (!other) {
+    return 0;
+  }
+  if (other == &in->lhs && other->kind == IR_OPERAND_STRING) {
+    return 16;
+  }
+  if (other->kind != IR_OPERAND_SYMBOL || !other->name) {
+    return 0;
+  }
+  home = mir_indirect_type_home_bytes(
+      g, mir_local_or_param_type(g, irf, other->name, NULL));
+  if (home) {
+    return home;
+  }
+  if (mir_name_is_global_aggregate(g, irf, other->name)) {
+    const CgSym *global = code_generator_lookup_symbol(g, other->name);
+    home = global ? mir_indirect_type_home_bytes(g, global->type) : 0;
+  }
+  return home;
+}
+
 static int mir_struct_temp_size(CodeGenerator *g, const IRFunction *irf,
                                 const char *name) {
   if (!g || !irf || !name || !g->ir_program) {
@@ -789,64 +862,15 @@ static int mir_struct_temp_size(CodeGenerator *g, const IRFunction *irf,
   }
   for (size_t i = 0; i < irf->instruction_count; i++) {
     const IRInstruction *in = &irf->instructions[i];
-    if (in->op == IR_OP_CALL && in->text) {
-      const CgSym *cal = code_generator_lookup_symbol(g, in->text);
-      if (cal && cal->kind == CG_SYM_FUNCTION) {
-        /* defined by a struct-returning call */
-        if (in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
-            strcmp(in->dest.name, name) == 0) {
-          const MtlcType *r = cal->data.function.return_type ? cal->data.function.return_type
-                                                   : cal->type;
-          int hb = mir_indirect_type_home_bytes(g, r);
-          if (hb) {
-            return hb;
-          }
-        }
-        /* consumed as a struct-by-value argument */
-        if (cal->data.function.parameter_types) {
-          for (size_t a = 0; a < in->argument_count &&
-                             a < cal->data.function.parameter_count;
-               a++) {
-            if (in->arguments[a].kind == IR_OPERAND_TEMP &&
-                in->arguments[a].name &&
-                strcmp(in->arguments[a].name, name) == 0) {
-              int hb = mir_indirect_type_home_bytes(
-                  g, cal->data.function.parameter_types[a]);
-              if (hb) {
-                return hb;
-              }
-            }
-          }
-        }
-      }
+    int home = 0;
+
+    if (in->op == IR_OP_CALL) {
+      home = mir_struct_temp_size_from_call(g, in, name);
+    } else if (in->op == IR_OP_ASSIGN) {
+      home = mir_struct_temp_size_from_assign(g, irf, in, name);
     }
-    if (in->op == IR_OP_ASSIGN) {
-      const IROperand *other = NULL;
-      if (in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
-          strcmp(in->dest.name, name) == 0) {
-        other = &in->lhs;
-      } else if (in->lhs.kind == IR_OPERAND_TEMP && in->lhs.name &&
-                 strcmp(in->lhs.name, name) == 0) {
-        other = &in->dest;
-      }
-      if (other && other->kind == IR_OPERAND_SYMBOL && other->name) {
-        MtlcType *t = mir_local_or_param_type(g, irf, other->name, NULL);
-        int hb = mir_indirect_type_home_bytes(g, t);
-        if (hb) {
-          return hb;
-        }
-      }
-      if (other == &in->lhs && other->kind == IR_OPERAND_STRING) {
-        return 16;
-      }
-      if (other && other->kind == IR_OPERAND_SYMBOL && other->name &&
-          mir_name_is_global_aggregate(g, irf, other->name)) {
-        const CgSym *gs = code_generator_lookup_symbol(g, other->name);
-        int hb = gs ? mir_indirect_type_home_bytes(g, gs->type) : 0;
-        if (hb) {
-          return hb;
-        }
-      }
+    if (home) {
+      return home;
     }
   }
   return 0;
@@ -1197,9 +1221,134 @@ static IRFunction *mir_find_ir_function_named(CodeGenerator *g,
   return f;
 }
 
+static int mir_float_slot_is_encoder_scratch(const BinaryAbi *abi,
+                                             size_t index) {
+  return abi && abi->float_param_registers && index < abi->float_param_count &&
+         mir_xmm_is_encoder_scratch(abi->float_param_registers[index]);
+}
+
+static int mir_arg_kind_is_value(const IROperand *arg, int allow_float,
+                                 int allow_string) {
+  switch (arg->kind) {
+  case IR_OPERAND_TEMP:
+  case IR_OPERAND_SYMBOL:
+  case IR_OPERAND_INT:
+    return 1;
+  case IR_OPERAND_FLOAT:
+    return allow_float;
+  case IR_OPERAND_STRING:
+    return allow_string;
+  default:
+    return 0;
+  }
+}
+
+static int mir_indirect_dest_kind_supported(const IRInstruction *in) {
+  return in->dest.kind == IR_OPERAND_NONE ||
+         in->dest.kind == IR_OPERAND_TEMP ||
+         in->dest.kind == IR_OPERAND_SYMBOL;
+}
+
+static int mir_untyped_indirect_is_supported(CodeGenerator *g,
+                                             const IRFunction *ir_function,
+                                             const IRInstruction *in) {
+  const BinaryAbi *abi = code_generator_binary_active_abi();
+  size_t float_slot = 0;
+
+  if (in->lhs.kind == IR_OPERAND_TEMP &&
+      mir_temp_is_float(g, (IRFunction *)ir_function, in->lhs.name, 0)) {
+    mir_call_trace("indirect_no_type");
+    return 0;
+  }
+  for (size_t a = 0; a < in->argument_count; a++) {
+    const IROperand *arg = &in->arguments[a];
+    if (!mir_arg_kind_is_value(arg, 1, 0)) {
+      mir_call_trace("indirect_untyped_arg_kind");
+      return 0;
+    }
+    if (mir_arg_float_bits(g, ir_function, arg) != 0 ||
+        (arg->kind == IR_OPERAND_TEMP &&
+         mir_temp_is_float(g, (IRFunction *)ir_function, arg->name, 0))) {
+      size_t slot = abi->counts_classes_separately ? float_slot++ : a;
+      if (mir_float_slot_is_encoder_scratch(abi, slot)) {
+        mir_call_trace("indirect_untyped_arg_float_scratch_register");
+        return 0;
+      }
+      continue;
+    }
+    if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
+        (mir_name_is_global_aggregate(g, ir_function, arg->name) ||
+         mir_name_is_indirect_aggregate(g, ir_function, arg->name)) &&
+        !mir_indirect_source_is_supported(g, ir_function, arg)) {
+      mir_call_trace("indirect_untyped_arg_aggregate");
+      return 0;
+    }
+  }
+  if (!mir_indirect_dest_kind_supported(in)) {
+    mir_call_trace("indirect_dest_kind");
+    return 0;
+  }
+  return 1;
+}
+
+static int mir_typed_indirect_arg_is_supported(CodeGenerator *g,
+                                               const IRFunction *ir_function,
+                                               const IROperand *arg,
+                                               MtlcType *pt,
+                                               const BinaryAbi *abi,
+                                               size_t index,
+                                               size_t *float_slot) {
+  int is_float;
+
+  if (!pt) {
+    mir_call_trace("indirect_arg_no_type");
+    return 0;
+  }
+  if (!code_generator_binary_resolved_type_is_abi_supported(pt, 0)) {
+    mir_call_trace("indirect_arg_unsupported");
+    return 0;
+  }
+  if (code_generator_type_is_aggregate(pt) ||
+      code_generator_binary_type_is_string(pt) ||
+      code_generator_abi_classify(pt) == ABI_PASS_INDIRECT) {
+    mir_call_trace("indirect_arg_aggregate");
+    return 0;
+  }
+  is_float = code_generator_binary_resolved_type_float_bits(pt) != 0;
+  if (is_float) {
+    size_t slot =
+        abi && abi->counts_classes_separately ? (*float_slot)++ : index;
+    if (mir_float_slot_is_encoder_scratch(abi, slot)) {
+      mir_call_trace("indirect_arg_float_scratch_register");
+      return 0;
+    }
+  }
+  if (!mir_arg_kind_is_value(arg, is_float, !is_float)) {
+    mir_call_trace(is_float ? "indirect_arg_float_operand_kind"
+                            : "indirect_arg_operand_kind");
+    return 0;
+  }
+  if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
+      mir_name_is_global_aggregate(g, ir_function, arg->name)) {
+    mir_call_trace("indirect_arg_aggregate_value");
+    return 0;
+  }
+  if (arg->kind == IR_OPERAND_STRING &&
+      !code_generator_binary_type_is_cstring(pt)) {
+    mir_call_trace("indirect_arg_string_non_cstring");
+    return 0;
+  }
+  return 1;
+}
+
 static int mir_call_indirect_is_supported(CodeGenerator *g,
                                           const IRFunction *ir_function,
                                           const IRInstruction *in) {
+  const BinaryAbi *abi = NULL;
+  size_t float_slot = 0;
+  MtlcType *ft = NULL;
+  MtlcType *ret = NULL;
+
   if (!in ||
       (in->lhs.kind != IR_OPERAND_SYMBOL && in->lhs.kind != IR_OPERAND_TEMP) ||
       !in->lhs.name) {
@@ -1210,66 +1359,18 @@ static int mir_call_indirect_is_supported(CodeGenerator *g,
     mir_call_trace("indirect_args>max");
     return 0;
   }
-  MtlcType *ft = mir_indirect_call_type(g, ir_function, in);
+  ft = mir_indirect_call_type(g, ir_function, in);
   if (ft && mir_indirect_call_uses_own_types(ft, in)) {
     ft = NULL;
   }
   if (!ft) {
-    /* Callee through a TEMP (closure thunks): the fn-ptr type is unknown, so
-     * classify every argument as GP -- exactly what the fallback does with a
-     * NULL callee type. Anything float-valued or aggregate-valued must defer,
-     * since the GP marshalling can't carry it. */
-    if (in->lhs.kind == IR_OPERAND_TEMP &&
-        mir_temp_is_float(g, (IRFunction *)ir_function, in->lhs.name, 0)) {
-      mir_call_trace("indirect_no_type");
-      return 0;
-    }
-    {
-      const BinaryAbi *untyped_abi = code_generator_binary_active_abi();
-      size_t untyped_float_slot = 0;
-      for (size_t a = 0; a < in->argument_count; a++) {
-        const IROperand *arg = &in->arguments[a];
-        if (arg->kind != IR_OPERAND_TEMP && arg->kind != IR_OPERAND_SYMBOL &&
-            arg->kind != IR_OPERAND_INT && arg->kind != IR_OPERAND_FLOAT) {
-          mir_call_trace("indirect_untyped_arg_kind");
-          return 0;
-        }
-        if (mir_arg_float_bits(g, ir_function, arg) != 0 ||
-            (arg->kind == IR_OPERAND_TEMP &&
-             mir_temp_is_float(g, (IRFunction *)ir_function, arg->name, 0))) {
-          size_t slot = untyped_abi->counts_classes_separately
-                            ? untyped_float_slot++
-                            : a;
-          if (untyped_abi->float_param_registers &&
-              slot < untyped_abi->float_param_count &&
-              mir_xmm_is_encoder_scratch(
-                  untyped_abi->float_param_registers[slot])) {
-            mir_call_trace("indirect_untyped_arg_float_scratch_register");
-            return 0;
-          }
-          continue;
-        }
-        if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
-            (mir_name_is_global_aggregate(g, ir_function, arg->name) ||
-             mir_name_is_indirect_aggregate(g, ir_function, arg->name)) &&
-            !mir_indirect_source_is_supported(g, ir_function, arg)) {
-          mir_call_trace("indirect_untyped_arg_aggregate");
-          return 0;
-        }
-      }
-    }
-    if (in->dest.kind != IR_OPERAND_NONE && in->dest.kind != IR_OPERAND_TEMP &&
-        in->dest.kind != IR_OPERAND_SYMBOL) {
-      mir_call_trace("indirect_dest_kind");
-      return 0;
-    }
-    return 1;
+    return mir_untyped_indirect_is_supported(g, ir_function, in);
   }
   if (in->argument_count != ft->fn_param_count) {
     mir_call_trace("indirect_arity_mismatch");
     return 0;
   }
-  MtlcType *ret = ft->fn_return_type;
+  ret = ft->fn_return_type;
   if (!code_generator_binary_resolved_type_is_abi_supported(ret, 1)) {
     mir_call_trace("indirect_ret_unsupported");
     return 0;
@@ -1279,66 +1380,16 @@ static int mir_call_indirect_is_supported(CodeGenerator *g,
     mir_call_trace("indirect_ret_aggregate");
     return 0;
   }
-  if (in->dest.kind != IR_OPERAND_NONE && in->dest.kind != IR_OPERAND_TEMP &&
-      in->dest.kind != IR_OPERAND_SYMBOL) {
+  if (!mir_indirect_dest_kind_supported(in)) {
     mir_call_trace("indirect_dest_kind");
     return 0;
   }
-
-  const BinaryAbi *call_abi = code_generator_binary_active_abi();
-  size_t indirect_float_slot = 0;
+  abi = code_generator_binary_active_abi();
   for (size_t a = 0; a < in->argument_count; a++) {
-    MtlcType *pt = ft->fn_param_types ? ft->fn_param_types[a] : NULL;
-    const IROperand *arg = &in->arguments[a];
-    if (!pt) {
-      mir_call_trace("indirect_arg_no_type");
-      return 0;
-    }
-    if (!code_generator_binary_resolved_type_is_abi_supported(pt, 0)) {
-      mir_call_trace("indirect_arg_unsupported");
-      return 0;
-    }
-    if (code_generator_type_is_aggregate(pt) ||
-        code_generator_binary_type_is_string(pt) ||
-        code_generator_abi_classify(pt) == ABI_PASS_INDIRECT) {
-      mir_call_trace("indirect_arg_aggregate");
-      return 0;
-    }
-    if (code_generator_binary_resolved_type_float_bits(pt) != 0) {
-      size_t slot = call_abi && call_abi->counts_classes_separately
-                        ? indirect_float_slot++
-                        : a;
-      if (call_abi && call_abi->float_param_registers &&
-          slot < call_abi->float_param_count &&
-          mir_xmm_is_encoder_scratch(call_abi->float_param_registers[slot])) {
-        mir_call_trace("indirect_arg_float_scratch_register");
-        return 0;
-      }
-      if (arg->kind != IR_OPERAND_TEMP && arg->kind != IR_OPERAND_SYMBOL &&
-          arg->kind != IR_OPERAND_INT && arg->kind != IR_OPERAND_FLOAT) {
-        mir_call_trace("indirect_arg_float_operand_kind");
-        return 0;
-      }
-      if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
-          mir_name_is_global_aggregate(g, ir_function, arg->name)) {
-        mir_call_trace("indirect_arg_aggregate_value");
-        return 0;
-      }
-      continue;
-    }
-    if (arg->kind != IR_OPERAND_TEMP && arg->kind != IR_OPERAND_SYMBOL &&
-        arg->kind != IR_OPERAND_INT && arg->kind != IR_OPERAND_STRING) {
-      mir_call_trace("indirect_arg_operand_kind");
-      return 0;
-    }
-    if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
-        mir_name_is_global_aggregate(g, ir_function, arg->name)) {
-      mir_call_trace("indirect_arg_aggregate_value");
-      return 0;
-    }
-    if (arg->kind == IR_OPERAND_STRING &&
-        !code_generator_binary_type_is_cstring(pt)) {
-      mir_call_trace("indirect_arg_string_non_cstring");
+    if (!mir_typed_indirect_arg_is_supported(
+            g, ir_function, &in->arguments[a],
+            ft->fn_param_types ? ft->fn_param_types[a] : NULL, abi, a,
+            &float_slot)) {
       return 0;
     }
   }
@@ -2678,6 +2729,87 @@ static void mir_scan_global_write(CodeGenerator *generator,
   }
 }
 
+static int mir_name_is_defined(const MirNameMap *defined, const char *name) {
+  for (size_t j = 0; j < defined->count; j++) {
+    if (strcmp(defined->items[j].name, name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int mir_global_aggregate_read_ok(CodeGenerator *generator,
+                                        const IRFunction *ir_function,
+                                        const IRInstruction *in,
+                                        const IROperand *read) {
+  if (!mir_name_is_global_aggregate(generator, ir_function, read->name)) {
+    return 0;
+  }
+  if (read == &in->lhs &&
+      (in->op == IR_OP_LOAD || in->op == IR_OP_PREFETCH ||
+       in->op == IR_OP_RETURN)) {
+    return 1;
+  }
+  if (in->op == IR_OP_BINARY && in->value_type &&
+      in->value_type->kind == MTLC_TYPE_STRING) {
+    return 1;
+  }
+  if (in->op != IR_OP_ASSIGN || read != &in->lhs) {
+    return 0;
+  }
+  return mir_operand_struct_home_size(generator, ir_function, &in->dest) > 0 ||
+         (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+          mir_name_is_global_aggregate(generator, ir_function, in->dest.name));
+}
+
+static int mir_scan_global_reads(CodeGenerator *generator,
+                                 const IRFunction *ir_function,
+                                 const IRInstruction *in,
+                                 const MirNameMap *defined) {
+  const IROperand *reads[2] = {&in->lhs, &in->rhs};
+
+  for (int k = 0; k < 2; k++) {
+    const IROperand *read = reads[k];
+    if (in->op == IR_OP_ADDRESS_OF && read == &in->lhs) {
+      continue;
+    }
+    if (read->kind != IR_OPERAND_SYMBOL || !read->name ||
+        mir_name_is_defined(defined, read->name) ||
+        mir_name_is_global_scalar(generator, read->name) ||
+        mir_name_is_volatile_global_scalar(generator, read->name)) {
+      continue;
+    }
+    if (!mir_global_aggregate_read_ok(generator, ir_function, in, read)) {
+      mir_call_trace_named("global_read", read->name);
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int mir_scan_global_arguments(CodeGenerator *generator,
+                                     const IRFunction *ir_function,
+                                     const IRInstruction *in,
+                                     const MirNameMap *defined) {
+  int is_call = in->op == IR_OP_CALL || in->op == IR_OP_CALL_INDIRECT;
+
+  for (size_t a = 0; a < in->argument_count; a++) {
+    const IROperand *arg = &in->arguments[a];
+    if (arg->kind != IR_OPERAND_SYMBOL || !arg->name ||
+        mir_name_is_defined(defined, arg->name) ||
+        mir_name_is_global_scalar(generator, arg->name) ||
+        mir_name_is_volatile_global_scalar(generator, arg->name)) {
+      continue;
+    }
+    if (!is_call ||
+        !mir_name_is_global_aggregate(generator, ir_function, arg->name)) {
+      mir_call_trace_named("global_arg", arg->name);
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static void mir_scan_global_operands(CodeGenerator *generator,
                                      const IRFunction *ir_function,
                                      MirNameMap *defined, int *globals_ok,
@@ -2685,80 +2817,18 @@ static void mir_scan_global_operands(CodeGenerator *generator,
                                      int *gw_overflow) {
   const char *gw_names[64];
   size_t gw_count = 0;
+
   for (size_t i = 0; i < ir_function->instruction_count && *globals_ok; i++) {
     const IRInstruction *in = &ir_function->instructions[i];
     if (in->op == IR_OP_CALL || in->op == IR_OP_CALL_INDIRECT) {
       *has_call = 1;
     }
     mir_scan_global_write(generator, ir_function, in, defined, globals_ok,
-                          has_global_write, gw_overflow, gw_names,
-                          &gw_count);
-    /* An undefined SYMBOL read must be a global scalar. */
-    const IROperand *reads[2] = {&in->lhs, &in->rhs};
-    for (int k = 0; k < 2; k++) {
-      if (in->op == IR_OP_ADDRESS_OF && reads[k] == &in->lhs) {
-        continue; /* &symbol names an address target, not a by-value read. */
-      }
-      if (reads[k]->kind == IR_OPERAND_SYMBOL && reads[k]->name) {
-        int found = 0;
-        for (size_t j = 0; j < defined->count; j++) {
-          if (strcmp(defined->items[j].name, reads[k]->name) == 0) {
-            found = 1;
-            break;
-          }
-        }
-        if (!found && !mir_name_is_global_scalar(generator, reads[k]->name) &&
-            !mir_name_is_volatile_global_scalar(generator, reads[k]->name)) {
-          /* A global AGGREGATE name is usable in the positions where the
-           * lowering materializes its RIP-relative address instead of a
-           * cached value: a LOAD/PREFETCH address (`*@g [w]`), or the source
-           * of a whole-struct ASSIGN into a LEA-able home. */
-          int agg_ok =
-              mir_name_is_global_aggregate(generator, ir_function,
-                                           reads[k]->name) &&
-              (((in->op == IR_OP_LOAD || in->op == IR_OP_PREFETCH ||
-                 in->op == IR_OP_RETURN) &&
-                reads[k] == &in->lhs) ||
-               (in->op == IR_OP_BINARY && in->value_type &&
-                in->value_type->kind == MTLC_TYPE_STRING) ||
-               (in->op == IR_OP_ASSIGN && reads[k] == &in->lhs &&
-                (mir_operand_struct_home_size(generator, ir_function,
-                                              &in->dest) > 0 ||
-                 (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
-                  mir_name_is_global_aggregate(generator, ir_function,
-                                               in->dest.name)))));
-          if (!agg_ok) {
-            mir_call_trace_named("global_read", reads[k]->name);
-            *globals_ok = 0;
-            break;
-          }
-        }
-      }
-    }
-    /* Undefined SYMBOL call arguments are global reads too (e.g. f(g)). They
-     * must be scalar globals so the entry-load pass can cache them, or global
-     * aggregates a CALL copies from by address (mir_call_is_supported vets the
-     * parameter match; CALL_INDIRECT rejects aggregate args in its own gate). */
-    for (size_t a = 0; a < in->argument_count && *globals_ok; a++) {
-      const IROperand *arg = &in->arguments[a];
-      if (arg->kind != IR_OPERAND_SYMBOL || !arg->name) {
-        continue;
-      }
-      int found = 0;
-      for (size_t j = 0; j < defined->count; j++) {
-        if (strcmp(defined->items[j].name, arg->name) == 0) {
-          found = 1;
-          break;
-        }
-      }
-      if (!found && !mir_name_is_global_scalar(generator, arg->name) &&
-          !mir_name_is_volatile_global_scalar(generator, arg->name) &&
-          !((in->op == IR_OP_CALL || in->op == IR_OP_CALL_INDIRECT) &&
-            mir_name_is_global_aggregate(generator, ir_function, arg->name))) {
-        mir_call_trace_named("global_arg", arg->name);
-        *globals_ok = 0;
-        break;
-      }
+                          has_global_write, gw_overflow, gw_names, &gw_count);
+    if (*globals_ok &&
+        (!mir_scan_global_reads(generator, ir_function, in, defined) ||
+         !mir_scan_global_arguments(generator, ir_function, in, defined))) {
+      *globals_ok = 0;
     }
   }
 }
@@ -2822,65 +2892,91 @@ static int mir_gate_globals(CodeGenerator *generator,
   return 1;
 }
 
+static int mir_name_holds_record_pointer(CodeGenerator *generator,
+                                         const IRFunction *ir_function,
+                                         const char *name) {
+  return mir_name_is_string_local(generator, ir_function, name) ||
+         mir_name_is_indirect_param(generator, ir_function, name);
+}
+
+static int mir_indirect_is_declared_or_addressed(const IRInstruction *in,
+                                                 const IROperand *o) {
+  return (in->op == IR_OP_DECLARE_LOCAL && o == &in->dest) ||
+         (in->op == IR_OP_ADDRESS_OF && o == &in->lhs);
+}
+
+static int mir_indirect_is_call_struct_dest(CodeGenerator *generator,
+                                            const IRFunction *ir_function,
+                                            const IRInstruction *in,
+                                            const IROperand *o) {
+  return (in->op == IR_OP_CALL || in->op == IR_OP_CALL_INDIRECT) &&
+         o == &in->dest &&
+         mir_name_is_indirect_struct_local(generator, ir_function, o->name);
+}
+
+static int mir_indirect_is_whole_struct_assign(CodeGenerator *generator,
+                                               const IRFunction *ir_function,
+                                               const IRInstruction *in,
+                                               const IROperand *o) {
+  int lea_able =
+      mir_operand_struct_home_size(generator, ir_function, &in->dest) > 0 ||
+      (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
+       mir_name_is_global_aggregate(generator, ir_function, in->dest.name));
+
+  return in->op == IR_OP_ASSIGN && (o == &in->dest || o == &in->lhs) &&
+         lea_able &&
+         mir_indirect_source_is_supported(generator, ir_function, &in->lhs);
+}
+
+static int mir_indirect_moves_record_pointer(CodeGenerator *generator,
+                                             const IRFunction *ir_function,
+                                             const IRInstruction *in,
+                                             const IROperand *o) {
+  int pointer_sized =
+      in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 8;
+  int at_value_end = (in->op == IR_OP_STORE && o == &in->lhs) ||
+                     (in->op == IR_OP_LOAD && o == &in->dest);
+
+  return pointer_sized && at_value_end &&
+         mir_name_holds_record_pointer(generator, ir_function, o->name);
+}
+
+static int mir_indirect_is_memory_address(CodeGenerator *generator,
+                                          const IRFunction *ir_function,
+                                          const IRInstruction *in,
+                                          const IROperand *o) {
+  int addressing = (in->op == IR_OP_LOAD && o == &in->lhs) ||
+                   (in->op == IR_OP_STORE && o == &in->dest);
+
+  return addressing &&
+         mir_name_holds_record_pointer(generator, ir_function, o->name);
+}
+
+static int mir_indirect_operand_allowed(CodeGenerator *generator,
+                                        const IRFunction *ir_function,
+                                        const IRInstruction *in,
+                                        const IROperand *o) {
+  return mir_indirect_is_declared_or_addressed(in, o) ||
+         (in->op == IR_OP_RETURN && o == &in->lhs &&
+          mir_indirect_source_is_supported(generator, ir_function, &in->lhs)) ||
+         mir_indirect_is_call_struct_dest(generator, ir_function, in, o) ||
+         mir_indirect_is_whole_struct_assign(generator, ir_function, in, o) ||
+         mir_indirect_moves_record_pointer(generator, ir_function, in, o) ||
+         mir_indirect_is_memory_address(generator, ir_function, in, o);
+}
+
 static int mir_gate_indirect_operands(CodeGenerator *generator,
                                       const IRFunction *ir_function,
                                       const IRInstruction *in) {
   const IROperand *whole[3] = {&in->dest, &in->lhs, &in->rhs};
+
   for (int k = 0; k < 3; k++) {
     const IROperand *o = whole[k];
     if (o->kind != IR_OPERAND_SYMBOL || !o->name ||
         !mir_name_is_indirect_aggregate(generator, ir_function, o->name)) {
       continue;
     }
-    int allowed =
-        (in->op == IR_OP_DECLARE_LOCAL && o == &in->dest) ||
-        (in->op == IR_OP_ADDRESS_OF && o == &in->lhs) ||
-        /* RETURN copies from any supported indirect source: a local or
-         * temp home, a by-ref param's pointee, or a global aggregate. */
-        (in->op == IR_OP_RETURN && o == &in->lhs &&
-         mir_indirect_source_is_supported(generator, ir_function,
-                                          &in->lhs)) ||
-        /* `@local = f()` for a struct-returning callee: the call writes the
-         * struct directly into the dest local's home via the hidden return
-         * pointer (mir_call_is_supported validates the callee returns
-         * INDIRECT). */
-        (in->op == IR_OP_CALL && o == &in->dest &&
-         mir_name_is_indirect_struct_local(generator, ir_function, o->name)) ||
-        (in->op == IR_OP_CALL_INDIRECT && o == &in->dest &&
-         mir_name_is_indirect_struct_local(generator, ir_function, o->name)) ||
-        /* Whole-struct ASSIGN into a LEA-able struct home (rep-movsb): the
-         * source may be another home, a by-ref param (copy through its
-         * pointer), or a string literal (copy from its .rdata record). */
-        (in->op == IR_OP_ASSIGN && (o == &in->dest || o == &in->lhs) &&
-         (mir_operand_struct_home_size(generator, ir_function, &in->dest) >
-              0 ||
-          (in->dest.kind == IR_OPERAND_SYMBOL && in->dest.name &&
-           mir_name_is_global_aggregate(generator, ir_function,
-                                        in->dest.name))) &&
-         mir_indirect_source_is_supported(generator, ir_function,
-                                          &in->lhs)) ||
-        /* An 8-byte string VALUE is a record pointer: storing a string
-         * local stores its home's address, storing a by-ref param stores
-         * the pointer it holds (both mirror emit_operand_load). */
-        (in->op == IR_OP_STORE && o == &in->lhs &&
-         in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 8 &&
-         (mir_name_is_string_local(generator, ir_function, o->name) ||
-          mir_name_is_indirect_param(generator, ir_function, o->name))) ||
-        /* `@s <- *addr [8]` with a string dest: the loaded pointer is
-         * deref-copied into the local's home (a by-ref param dest just
-         * takes the pointer as its new value). */
-        (in->op == IR_OP_LOAD && o == &in->dest &&
-         in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value == 8 &&
-         (mir_name_is_string_local(generator, ir_function, o->name) ||
-          mir_name_is_indirect_param(generator, ir_function, o->name))) ||
-        /* `*@s [w]` / `*@s <- v [w]`: the name used as a memory ADDRESS.
-         * A string local's address is its home (mir_address_operand leas
-         * it); a by-ref param's value already is the address. */
-        (((in->op == IR_OP_LOAD && o == &in->lhs) ||
-          (in->op == IR_OP_STORE && o == &in->dest)) &&
-         (mir_name_is_string_local(generator, ir_function, o->name) ||
-          mir_name_is_indirect_param(generator, ir_function, o->name)));
-    if (!allowed) {
+    if (!mir_indirect_operand_allowed(generator, ir_function, in, o)) {
       mir_call_trace_named("byname", o->name);
       return mir_trace_bail(ir_function, "indirect_agg_byname");
     }
@@ -3624,10 +3720,6 @@ static int mir_ir_function_may_write_global(CodeGenerator *g,
     }
   }
   return 0;
-}
-
-static int mir_operand_names_temp(const IROperand *op, const char *name) {
-  return op->kind == IR_OPERAND_TEMP && op->name && strcmp(op->name, name) == 0;
 }
 
 static int mir_address_only_feeds_calls(const IRFunction *irf,
@@ -7967,8 +8059,6 @@ static long mir_fold_index_constant_offset(const IRFunction *f,
   return pi;
 }
 
-/* If `p` scales an index by a legal SIB factor (`idx << k`, k in 0..3, or
- * `idx * c`, c in {1,2,4,8}), fill *index/*scale and return 1. */
 static int mir_decode_scale(const IRInstruction *p, IROperand *index,
                             int *scale) {
   if (p->op != IR_OP_BINARY || p->is_float || !p->text) {

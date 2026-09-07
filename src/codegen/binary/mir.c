@@ -228,97 +228,100 @@ MirOperand mir_op_mem_vreg(MirVregId base, MirVregId index, int scale,
 
 /* ---- dump --------------------------------------------------------------- */
 
+static const char *const MIR_OPCODE_NAMES[MIR_OPCODE_COUNT] = {
+    [MIR_NOP] = "nop",
+    [MIR_MOV] = "mov",
+    [MIR_LEA] = "lea",
+    [MIR_LEA_LOCAL] = "lea_local",
+    [MIR_LEA_GLOBAL] = "lea_global",
+    [MIR_LEA_FUNC] = "lea_func",
+    [MIR_LEA_CSTR] = "lea_cstr",
+    [MIR_LEA_STRLIT] = "lea_strlit",
+    [MIR_POPCNT] = "popcnt",
+    [MIR_HEAP_NEW] = "heap_new",
+    [MIR_MOVZX] = "movzx",
+    [MIR_MOVSX] = "movsx",
+    [MIR_LOAD_GLOBAL] = "ldglobal",
+    [MIR_STORE_GLOBAL] = "stglobal",
+    [MIR_PREFETCH] = "prefetch",
+    [MIR_CMOV] = "cmov",
+    [MIR_ADD] = "add",
+    [MIR_SUB] = "sub",
+    [MIR_AND] = "and",
+    [MIR_OR] = "or",
+    [MIR_XOR] = "xor",
+    [MIR_IMUL] = "imul",
+    [MIR_NEG] = "neg",
+    [MIR_NOT] = "not",
+    [MIR_SHL] = "shl",
+    [MIR_SHR] = "shr",
+    [MIR_SAR] = "sar",
+    [MIR_CQO] = "cqo",
+    [MIR_XOR_RDX] = "xor_rdx",
+    [MIR_IDIV] = "idiv",
+    [MIR_DIV] = "div",
+    [MIR_MULHI] = "mulhi",
+    [MIR_CMP] = "cmp",
+    [MIR_TEST] = "test",
+    [MIR_SETCC] = "setcc",
+    [MIR_CMOVCC] = "cmovcc",
+    [MIR_JMP] = "jmp",
+    [MIR_JCC] = "jcc",
+    [MIR_CMPBR] = "cmpbr",
+    [MIR_JMP_TABLE] = "jmp_table",
+    [MIR_LABEL] = "label",
+    [MIR_CALL] = "call",
+    [MIR_CALL_INDIRECT] = "call_indirect",
+    [MIR_REP_MOVSB] = "rep_movsb",
+    [MIR_REP_STOSB] = "rep_stosb",
+    [MIR_SYSCALL] = "syscall",
+    [MIR_STORE_OUTARG] = "store_outarg",
+    [MIR_LEA_OUTARG] = "lea_outarg",
+    [MIR_TRAP] = "trap",
+    [MIR_INLINE_ASM] = "inline_asm",
+    [MIR_RET] = "ret",
+    [MIR_FADD] = "fadd",
+    [MIR_FSUB] = "fsub",
+    [MIR_FXOR] = "fxor",
+    [MIR_FMUL] = "fmul",
+    [MIR_FDIV] = "fdiv",
+    [MIR_FDUP] = "fdup",
+    [MIR_FEXTHI] = "fexthi",
+    [MIR_CVTSI2F] = "cvtsi2f",
+    [MIR_CVTF2SI] = "cvtf2si",
+    [MIR_CVTF2F] = "cvtf2f",
+    [MIR_UCOMIS] = "ucomis",
+    [MIR_FSETCC] = "fsetcc",
+    [MIR_FCMPBR] = "fcmpbr",
+    [MIR_MOVD_TO_XMM] = "movd2xmm",
+    [MIR_MOVD_TO_GP] = "movd2gp",
+    [MIR_CVTPH2PS] = "cvtph2ps",
+    [MIR_CVTPS2PH] = "cvtps2ph",
+    [MIR_VADD] = "vadd",
+    [MIR_VSUB] = "vsub",
+    [MIR_VMUL] = "vmul",
+    [MIR_VDIV] = "vdiv",
+    [MIR_VCVTSI2F] = "vcvtsi2f",
+    [MIR_VCVTF2SI] = "vcvtf2si",
+    [MIR_VLOAD] = "vload",
+    [MIR_VSTORE] = "vstore",
+    [MIR_VBROADCAST] = "vbroadcast",
+    [MIR_VIOTA] = "viota",
+    [MIR_VHREDUCE] = "vhreduce",
+    [MIR_SIMD_SLP_MAC] = "simd_slp_mac",
+    [MIR_SIMD_FILL] = "simd_fill",
+    [MIR_SIMD_AFFINE_MAP_F32] = "simd_affine_map_f32",
+    [MIR_SIMD_AFFINE_MAP_F64] = "simd_affine_map_f64",
+    [MIR_SIMD_SILU_F32] = "simd_silu_f32",
+    [MIR_SIMD_VLOOP] = "simd_vloop",
+    [MIR_IR_KERNEL] = "ir_kernel",
+};
+
 const char *mir_opcode_name(MirOpcode op) {
-  switch (op) {
-  case MIR_NOP: return "nop";
-  case MIR_MOV: return "mov";
-  case MIR_LEA: return "lea";
-  case MIR_LEA_LOCAL: return "lea_local";
-  case MIR_LEA_GLOBAL: return "lea_global";
-  case MIR_LEA_FUNC: return "lea_func";
-  case MIR_LEA_CSTR: return "lea_cstr";
-  case MIR_LEA_STRLIT: return "lea_strlit";
-  case MIR_POPCNT: return "popcnt";
-  case MIR_HEAP_NEW: return "heap_new";
-  case MIR_MOVZX: return "movzx";
-  case MIR_MOVSX: return "movsx";
-  case MIR_LOAD_GLOBAL: return "ldglobal";
-  case MIR_STORE_GLOBAL: return "stglobal";
-  case MIR_PREFETCH: return "prefetch";
-  case MIR_CMOV: return "cmov";
-  case MIR_ADD: return "add";
-  case MIR_SUB: return "sub";
-  case MIR_AND: return "and";
-  case MIR_OR: return "or";
-  case MIR_XOR: return "xor";
-  case MIR_IMUL: return "imul";
-  case MIR_NEG: return "neg";
-  case MIR_NOT: return "not";
-  case MIR_SHL: return "shl";
-  case MIR_SHR: return "shr";
-  case MIR_SAR: return "sar";
-  case MIR_CQO: return "cqo";
-  case MIR_XOR_RDX: return "xor_rdx";
-  case MIR_IDIV: return "idiv";
-  case MIR_DIV: return "div";
-  case MIR_MULHI: return "mulhi";
-  case MIR_CMP: return "cmp";
-  case MIR_TEST: return "test";
-  case MIR_SETCC: return "setcc";
-  case MIR_CMOVCC: return "cmovcc";
-  case MIR_JMP: return "jmp";
-  case MIR_JCC: return "jcc";
-  case MIR_CMPBR: return "cmpbr";
-  case MIR_JMP_TABLE: return "jmp_table";
-  case MIR_LABEL: return "label";
-  case MIR_CALL: return "call";
-  case MIR_CALL_INDIRECT: return "call_indirect";
-  case MIR_REP_MOVSB: return "rep_movsb";
-  case MIR_REP_STOSB: return "rep_stosb";
-  case MIR_SYSCALL: return "syscall";
-  case MIR_STORE_OUTARG: return "store_outarg";
-  case MIR_LEA_OUTARG: return "lea_outarg";
-  case MIR_TRAP: return "trap";
-  case MIR_INLINE_ASM: return "inline_asm";
-  case MIR_RET: return "ret";
-  case MIR_FADD: return "fadd";
-  case MIR_FSUB: return "fsub";
-  case MIR_FXOR: return "fxor";
-  case MIR_FMUL: return "fmul";
-  case MIR_FDIV: return "fdiv";
-  case MIR_FDUP: return "fdup";
-  case MIR_FEXTHI: return "fexthi";
-  case MIR_CVTSI2F: return "cvtsi2f";
-  case MIR_CVTF2SI: return "cvtf2si";
-  case MIR_CVTF2F: return "cvtf2f";
-  case MIR_UCOMIS: return "ucomis";
-  case MIR_FSETCC: return "fsetcc";
-  case MIR_FCMPBR: return "fcmpbr";
-  case MIR_MOVD_TO_XMM: return "movd2xmm";
-  case MIR_MOVD_TO_GP: return "movd2gp";
-  case MIR_CVTPH2PS: return "cvtph2ps";
-  case MIR_CVTPS2PH: return "cvtps2ph";
-  case MIR_VADD: return "vadd";
-  case MIR_VSUB: return "vsub";
-  case MIR_VMUL: return "vmul";
-  case MIR_VDIV: return "vdiv";
-  case MIR_VCVTSI2F: return "vcvtsi2f";
-  case MIR_VCVTF2SI: return "vcvtf2si";
-  case MIR_VLOAD: return "vload";
-  case MIR_VSTORE: return "vstore";
-  case MIR_VBROADCAST: return "vbroadcast";
-  case MIR_VIOTA: return "viota";
-  case MIR_VHREDUCE: return "vhreduce";
-  case MIR_SIMD_SLP_MAC: return "simd_slp_mac";
-  case MIR_SIMD_FILL: return "simd_fill";
-  case MIR_SIMD_AFFINE_MAP_F32: return "simd_affine_map_f32";
-  case MIR_SIMD_AFFINE_MAP_F64: return "simd_affine_map_f64";
-  case MIR_SIMD_SILU_F32: return "simd_silu_f32";
-  case MIR_SIMD_VLOOP: return "simd_vloop";
-  case MIR_IR_KERNEL: return "ir_kernel";
-  case MIR_OPCODE_COUNT: break;
-  }
-  return "?";
+  const char *name = (unsigned)op < (unsigned)MIR_OPCODE_COUNT
+                         ? MIR_OPCODE_NAMES[op]
+                         : NULL;
+  return name ? name : "?";
 }
 
 int mir_op_is_inline_kernel(MirOpcode op) {

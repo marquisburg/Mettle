@@ -388,47 +388,51 @@ static void render_operand(const MirFunction *fn, const MirOperand *op, int widt
 
 /* ---- instruction rendering ---------------------------------------------- */
 
-/* Pick a mnemonic for the common scalar opcodes; SIMD/float kernels fall back
- * to a lowercased opcode name. att=1 appends a size suffix on integer ops. */
+static const char *const MIR_SCALAR_MNEMONICS[MIR_OPCODE_COUNT] = {
+    [MIR_MOV] = "mov",
+    [MIR_ADD] = "add",
+    [MIR_SUB] = "sub",
+    [MIR_AND] = "and",
+    [MIR_OR] = "or",
+    [MIR_XOR] = "xor",
+    [MIR_IMUL] = "imul",
+    [MIR_NEG] = "neg",
+    [MIR_NOT] = "not",
+    [MIR_SHL] = "shl",
+    [MIR_SHR] = "shr",
+    [MIR_SAR] = "sar",
+    [MIR_CMP] = "cmp",
+    [MIR_TEST] = "test",
+    [MIR_LEA] = "lea",
+    [MIR_LEA_LOCAL] = "lea",
+    [MIR_LEA_GLOBAL] = "lea",
+    [MIR_MOVZX] = "movzx",
+    [MIR_MOVSX] = "movsx",
+    [MIR_JMP] = "jmp",
+    [MIR_CALL] = "call",
+    [MIR_CALL_INDIRECT] = "call",
+    [MIR_REP_MOVSB] = "rep movsb",
+    [MIR_REP_STOSB] = "rep stosb",
+    [MIR_RET] = "ret",
+    [MIR_CQO] = "cqo",
+    [MIR_FXOR] = "xorpd",
+    [MIR_LOAD_GLOBAL] = "mov",
+    [MIR_STORE_GLOBAL] = "mov",
+};
+
 static const char *scalar_mnemonic(const MirInst *in) {
   switch (in->op) {
-  case MIR_MOV: return "mov";
-  case MIR_ADD: return "add";
-  case MIR_SUB: return "sub";
-  case MIR_AND: return "and";
-  case MIR_OR: return "or";
-  case MIR_XOR: return "xor";
-  case MIR_IMUL: return "imul";
-  case MIR_NEG: return "neg";
-  case MIR_NOT: return "not";
   case MIR_IDIV: return in->is_unsigned ? "div" : "idiv";
   case MIR_MULHI: return in->is_unsigned ? "mul" : "imul";
-  case MIR_SHL: return "shl";
-  case MIR_SHR: return "shr";
-  case MIR_SAR: return "sar";
-  case MIR_CMP: return "cmp";
-  case MIR_TEST: return "test";
-  case MIR_LEA:
-  case MIR_LEA_LOCAL:
-  case MIR_LEA_GLOBAL: return "lea";
-  case MIR_MOVZX: return "movzx";
-  case MIR_MOVSX: return "movsx";
-  case MIR_JMP: return "jmp";
-  case MIR_CALL:
-  case MIR_CALL_INDIRECT: return "call";
-  case MIR_REP_MOVSB: return "rep movsb";
-  case MIR_REP_STOSB: return "rep stosb";
-  case MIR_RET: return "ret";
-  case MIR_CQO: return "cqo";
   case MIR_FADD: return in->width == 4 ? "addss" : "addsd";
   case MIR_FSUB: return in->width == 4 ? "subss" : "subsd";
-  case MIR_FXOR: return "xorpd";
   case MIR_FMUL: return in->width == 4 ? "mulss" : "mulsd";
   case MIR_FDIV: return in->width == 4 ? "divss" : "divsd";
   case MIR_UCOMIS: return in->width == 4 ? "ucomiss" : "ucomisd";
-  case MIR_LOAD_GLOBAL:
-  case MIR_STORE_GLOBAL: return "mov";
-  default: return NULL;
+  default:
+    return (unsigned)in->op < (unsigned)MIR_OPCODE_COUNT
+               ? MIR_SCALAR_MNEMONICS[in->op]
+               : NULL;
   }
 }
 
@@ -615,154 +619,209 @@ static void press_even(int *press, unsigned mask, int centi) {
     if (mask & (1u << r)) press[r] += each;
 }
 
-/* Fill the per-instruction cost estimate. press[] is added to (zeroed by the
- * caller). The numbers approximate a Skylake-class core; latency in cycles,
- * rthru in centicycles (0.01c). */
-static void cost_model(const MirFunction *fn, const MirInst *in, int *lat,
-                       int press[RES_COUNT], int *flex, int *rthru,
-                       const char **kind, const char **ports, int *is_kernel) {
-  *lat = 1;
-  *flex = 0;
-  *is_kernel = 0;
-  *kind = "alu";
-  *ports = "p0156";
-  int centi = 25; /* default ALU reciprocal throughput: 0.25c */
-  unsigned mask = M_ALU4;
+typedef struct {
+  const char *kind;
+  const char *ports;
+  unsigned mask;
+  int centi;
+  int lat;
+  signed char store;
+  signed char load;
+} MirOpCost;
 
-  int load = op_is_mem(fn, &in->a) || op_is_mem(fn, &in->b);
-  int store = 0;
+static const MirOpCost MIR_OP_COSTS[MIR_OPCODE_COUNT] = {
+    [MIR_MOV] = {"mov", "p0156", M_ALU4, 25, 1, 0, 0},
+    [MIR_LOAD_GLOBAL] = {"mov", "p0156", M_ALU4, 25, 1, 0, 0},
+    [MIR_STORE_GLOBAL] = {"mov", "p0156", M_ALU4, 25, 1, 0, 0},
+    [MIR_ADD] = {"alu", NULL, M_ALU4, 25, 1, 0, 0},
+    [MIR_SUB] = {"alu", NULL, M_ALU4, 25, 1, 0, 0},
+    [MIR_AND] = {"alu", NULL, M_ALU4, 25, 1, 0, 0},
+    [MIR_OR] = {"alu", NULL, M_ALU4, 25, 1, 0, 0},
+    [MIR_XOR] = {"alu", NULL, M_ALU4, 25, 1, 0, 0},
+    [MIR_NEG] = {"alu", NULL, M_ALU4, 25, 1, 0, 0},
+    [MIR_NOT] = {"alu", NULL, M_ALU4, 25, 1, 0, 0},
+    [MIR_CQO] = {"alu", NULL, M_ALU4, 25, 1, 0, 0},
+    [MIR_XOR_RDX] = {"alu", NULL, M_ALU4, 25, 1, 0, 0},
+    [MIR_CMP] = {"cmp", NULL, M_ALU4, 25, 1, 0, 0},
+    [MIR_TEST] = {"cmp", NULL, M_ALU4, 25, 1, 0, 0},
+    [MIR_SHL] = {"shift", "p06", M_P06, 50, 1, 0, 0},
+    [MIR_SHR] = {"shift", "p06", M_P06, 50, 1, 0, 0},
+    [MIR_SAR] = {"shift", "p06", M_P06, 50, 1, 0, 0},
+    [MIR_IMUL] = {"mul", "p1", M_P1, 100, 3, 0, 0},
+    [MIR_MULHI] = {"mul", "p1", M_P1, 100, 4, 0, 0},
+    [MIR_IDIV] = {"div", "p0", M_P0, 800, 20, 0, 0},
+    [MIR_DIV] = {"div", "p0", M_P0, 800, 20, 0, 0},
+    [MIR_LEA] = {"lea", "p15", M_P15, 50, 1, 0, -1},
+    [MIR_LEA_LOCAL] = {"lea", "p15", M_P15, 50, 1, 0, -1},
+    [MIR_LEA_GLOBAL] = {"lea", "p15", M_P15, 50, 1, 0, -1},
+    [MIR_LEA_FUNC] = {"lea", "p15", M_P15, 50, 1, 0, -1},
+    [MIR_LEA_CSTR] = {"lea", "p15", M_P15, 50, 1, 0, -1},
+    [MIR_LEA_STRLIT] = {"lea", "p15", M_P15, 50, 1, 0, -1},
+    [MIR_LEA_OUTARG] = {"lea", "p15", M_P15, 50, 1, 0, -1},
+    [MIR_MOVZX] = {"alu", NULL, M_ALU4, 25, 1, 0, 0},
+    [MIR_MOVSX] = {"alu", NULL, M_ALU4, 25, 1, 0, 0},
+    [MIR_SETCC] = {"setcc", "p06", M_P06, 50, 1, 0, 0},
+    [MIR_CMOVCC] = {"cmov", "p06", M_P06, 50, 1, 0, 0},
+    [MIR_JMP] = {"branch", "p6", M_P6, 50, 1, 0, 0},
+    [MIR_JCC] = {"branch", "p6", M_P6, 50, 1, 0, 0},
+    [MIR_CMPBR] = {"branch", "p06", M_P06, 75, 1, 0, 0},
+    [MIR_FCMPBR] = {"branch", "p06", M_P06, 75, 3, 0, 0},
+    [MIR_CALL] = {"call", "p6", M_P6, 100, 3, 0, 0},
+    [MIR_CALL_INDIRECT] = {"call", "p6", M_P6, 100, 3, 0, 0},
+    [MIR_RET] = {"branch", "p6", M_P6, 100, 1, 0, 0},
+    [MIR_TRAP] = {"other", NULL, 0, 0, 1, 0, 0},
+    [MIR_INLINE_ASM] = {"other", NULL, 0, 0, 1, 0, 0},
+    [MIR_STORE_OUTARG] = {"store", "store", 0, 0, 1, 1, 0},
+    [MIR_FADD] = {"float", "p01", M_P01, 50, 4, 0, 0},
+    [MIR_FSUB] = {"float", "p01", M_P01, 50, 4, 0, 0},
+    [MIR_FXOR] = {"float", "p01", M_P01, 50, 4, 0, 0},
+    [MIR_FMUL] = {"float", "p01", M_P01, 50, 4, 0, 0},
+    [MIR_FDIV] = {"float", "p0", M_P0, 400, 14, 0, 0},
+    [MIR_UCOMIS] = {"float", "p0", M_P0, 100, 2, 0, 0},
+    [MIR_CVTSI2F] = {"float", "p01", M_P01, 100, 5, 0, 0},
+    [MIR_CVTF2SI] = {"float", "p01", M_P01, 100, 5, 0, 0},
+    [MIR_CVTF2F] = {"float", "p01", M_P01, 100, 5, 0, 0},
+    [MIR_CVTPH2PS] = {"float", "p01", M_P01, 100, 5, 0, 0},
+    [MIR_CVTPS2PH] = {"float", "p01", M_P01, 100, 5, 0, 0},
+    [MIR_FSETCC] = {"float", "p0", M_P0, 100, 4, 0, 0},
+    [MIR_MOVD_TO_XMM] = {"float", "p5", M_P5, 100, 2, 0, 0},
+    [MIR_MOVD_TO_GP] = {"float", "p5", M_P5, 100, 2, 0, 0},
+    [MIR_VADD] = {"vec", "p01", M_P01, 50, 4, 0, 0},
+    [MIR_VSUB] = {"vec", "p01", M_P01, 50, 4, 0, 0},
+    [MIR_VMUL] = {"vec", "p01", M_P01, 50, 4, 0, 0},
+    [MIR_VDIV] = {"vec", "p0", M_P0, 1600, 21, 0, 0},
+    [MIR_VLOAD] = {"load", "load", 0, 0, 7, 0, 1},
+    [MIR_VSTORE] = {"store", "store", 0, 0, 1, 1, -1},
+    [MIR_VBROADCAST] = {"vec", "p5", M_P5, 100, 3, 0, 0},
+    [MIR_VIOTA] = {"vec", "p015", M_P0 | M_P1 | M_P5, 100, 3, 0, 0},
+    [MIR_VHREDUCE] = {"vec", "p015", M_P0 | M_P1 | M_P5, 300, 8, 0, 0},
+    [MIR_VCVTSI2F] = {"vec", "p01", M_P01, 100, 5, 0, 0},
+    [MIR_VCVTF2SI] = {"vec", "p01", M_P01, 100, 5, 0, 0},
+    [MIR_NOP] = {"other", NULL, 0, 0, 0, 0, 0},
+    [MIR_LABEL] = {"other", NULL, 0, 0, 0, 0, 0},
+};
+
+static void cost_of_move(const MirFunction *fn, const MirInst *in,
+                         MirOpCost *cost, int load) {
+  int to_memory = op_is_mem(fn, &in->dst) || in->op == MIR_STORE_GLOBAL;
+  int from_memory = load || in->op == MIR_LOAD_GLOBAL;
+
+  if (!to_memory && !from_memory) {
+    return;
+  }
+  cost->mask = 0;
+  cost->centi = 0;
+  cost->kind = to_memory ? "store" : "load";
+  cost->ports = to_memory ? (from_memory ? "load+store" : "store") : "load";
+  cost->store = (signed char)(to_memory ? 1 : 0);
+  cost->load = (signed char)(to_memory && !from_memory ? -1 : 0);
+  cost->lat = from_memory ? 5 : 1;
+}
+
+static void cost_of_kernel(MirOpCost *cost) {
+  cost->kind = "kernel";
+  cost->ports = "kernel";
+  cost->mask = 0;
+  cost->centi = 0;
+  cost->lat = 0;
+  cost->load = -1;
+}
+
+static MirOpCost cost_of_instruction(const MirFunction *fn, const MirInst *in,
+                                     int load, int *is_kernel) {
+  MirOpCost cost = {"other", NULL, M_ALU4, 25, 1, 0, 0};
+  int wide = in->width > 4;
+
+  if ((unsigned)in->op < (unsigned)MIR_OPCODE_COUNT &&
+      MIR_OP_COSTS[in->op].kind) {
+    cost = MIR_OP_COSTS[in->op];
+  } else if (mir_op_is_inline_kernel(in->op)) {
+    *is_kernel = 1;
+    cost_of_kernel(&cost);
+    return cost;
+  } else {
+    return cost;
+  }
 
   switch (in->op) {
   case MIR_MOV:
   case MIR_LOAD_GLOBAL:
-  case MIR_STORE_GLOBAL: {
-    int dmem = op_is_mem(fn, &in->dst) || in->op == MIR_STORE_GLOBAL;
-    int smem = load || in->op == MIR_LOAD_GLOBAL;
-    if (dmem && !smem) {
-      *kind = "store"; *ports = "store"; mask = 0; centi = 0;
-      store = 1; load = 0;
-    } else if (smem && !dmem) {
-      *kind = "load"; *ports = "load"; mask = 0; centi = 0; *lat = 5;
-    } else if (dmem && smem) {
-      *kind = "store"; *ports = "load+store"; mask = 0; centi = 0;
-      store = 1; *lat = 5;
-    } else {
-      *kind = "mov"; *ports = "p0156"; mask = M_ALU4; centi = 25;
+  case MIR_STORE_GLOBAL:
+    cost_of_move(fn, in, &cost, load);
+    break;
+  case MIR_LEA:
+  case MIR_LEA_LOCAL:
+  case MIR_LEA_GLOBAL:
+  case MIR_LEA_FUNC:
+  case MIR_LEA_CSTR:
+  case MIR_LEA_STRLIT:
+  case MIR_LEA_OUTARG:
+    if (in->a.kind == MIR_OPK_MEM && in->a.mem.index != MIR_VREG_NONE) {
+      cost.ports = "p1";
+      cost.mask = M_P1;
+      cost.centi = 100;
+      cost.lat = 3;
     }
     break;
-  }
-  case MIR_ADD: case MIR_SUB: case MIR_AND: case MIR_OR: case MIR_XOR:
-    *kind = "alu"; mask = M_ALU4; centi = 25; break;
-  case MIR_NEG: case MIR_NOT:
-    *kind = "alu"; mask = M_ALU4; centi = 25; break;
-  case MIR_CMP: case MIR_TEST:
-    *kind = "cmp"; mask = M_ALU4; centi = 25; break;
-  case MIR_SHL: case MIR_SHR: case MIR_SAR:
-    *kind = "shift"; *ports = "p06"; mask = M_P06; centi = 50; break;
-  case MIR_IMUL:
-    *kind = "mul"; *ports = "p1"; mask = M_P1; centi = 100; *lat = 3; break;
-  case MIR_MULHI:
-    *kind = "mul"; *ports = "p1"; mask = M_P1; centi = 100; *lat = 4; break;
-  case MIR_IDIV: case MIR_DIV:
-    *kind = "div"; *ports = "p0"; mask = M_P0;
-    centi = in->width <= 4 ? 800 : 2500; *lat = in->width <= 4 ? 20 : 40; break;
-  case MIR_CQO: case MIR_XOR_RDX:
-    *kind = "alu"; mask = M_ALU4; centi = 25; break;
-  case MIR_LEA: case MIR_LEA_LOCAL: case MIR_LEA_GLOBAL:
-  case MIR_LEA_FUNC: case MIR_LEA_CSTR: case MIR_LEA_STRLIT:
-  case MIR_LEA_OUTARG: {
-    int scaled = in->a.kind == MIR_OPK_MEM && in->a.mem.index != MIR_VREG_NONE;
-    *kind = "lea";
-    if (scaled) { *ports = "p1"; mask = M_P1; centi = 100; *lat = 3; }
-    else { *ports = "p15"; mask = M_P15; centi = 50; }
-    load = 0; /* lea computes an address; it does not dereference */
+  case MIR_MOVZX:
+  case MIR_MOVSX:
+    if (load) {
+      cost.kind = "load";
+      cost.mask = 0;
+      cost.centi = 0;
+      cost.lat = 5;
+    }
     break;
-  }
-  case MIR_MOVZX: case MIR_MOVSX:
-    *kind = load ? "load" : "alu"; mask = load ? 0 : M_ALU4;
-    centi = load ? 0 : 25; if (load) *lat = 5; break;
-  case MIR_SETCC:
-    *kind = "setcc"; *ports = "p06"; mask = M_P06; centi = 50; break;
-  case MIR_CMOVCC:
-    *kind = "cmov"; *ports = "p06"; mask = M_P06; centi = 50; break;
-  case MIR_JMP:
-    *kind = "branch"; *ports = "p6"; mask = M_P6; centi = 50; break;
-  case MIR_JCC:
-    *kind = "branch"; *ports = "p6"; mask = M_P6; centi = 50; break;
-  case MIR_CMPBR: case MIR_FCMPBR:
-    /* fused cmp + branch: a compare uop and a branch uop. */
-    *kind = "branch"; *ports = "p06"; mask = M_P06; centi = 75;
-    if (in->op == MIR_FCMPBR) *lat = 3;
+  case MIR_IDIV:
+  case MIR_DIV:
+    cost.centi = wide ? 2500 : 800;
+    cost.lat = wide ? 40 : 20;
     break;
-  case MIR_CALL: case MIR_CALL_INDIRECT:
-    *kind = "call"; *ports = "p6"; mask = M_P6; centi = 100; *lat = 3; break;
-  case MIR_RET:
-    *kind = "branch"; *ports = "p6"; mask = M_P6; centi = 100; break;
-  case MIR_TRAP: case MIR_INLINE_ASM:
-    *kind = "other"; mask = 0; centi = 0; break;
-  case MIR_STORE_OUTARG:
-    *kind = "store"; *ports = "store"; mask = 0; centi = 0; store = 1; break;
-  case MIR_FADD: case MIR_FSUB: case MIR_FXOR:
-    *kind = "float"; *ports = "p01"; mask = M_P01; centi = 50; *lat = 4; break;
-  case MIR_FMUL:
-    *kind = "float"; *ports = "p01"; mask = M_P01; centi = 50; *lat = 4; break;
   case MIR_FDIV:
-    *kind = "float"; *ports = "p0"; mask = M_P0;
-    centi = in->width == 4 ? 300 : 400; *lat = in->width == 4 ? 11 : 14; break;
-  case MIR_UCOMIS:
-    *kind = "float"; *ports = "p0"; mask = M_P0; centi = 100; *lat = 2; break;
-  case MIR_CVTSI2F: case MIR_CVTF2SI: case MIR_CVTF2F:
-  case MIR_CVTPH2PS: case MIR_CVTPS2PH:
-    *kind = "float"; *ports = "p01"; mask = M_P01; centi = 100; *lat = 5; break;
-  case MIR_FSETCC:
-    *kind = "float"; *ports = "p0"; mask = M_P0; centi = 100; *lat = 4; break;
-  case MIR_MOVD_TO_XMM: case MIR_MOVD_TO_GP:
-    *kind = "float"; *ports = "p5"; mask = M_P5; centi = 100; *lat = 2; break;
-  case MIR_VADD: case MIR_VSUB:
-    *kind = "vec"; *ports = "p01"; mask = M_P01; centi = 50; *lat = 4; break;
-  case MIR_VMUL:
-    *kind = "vec"; *ports = "p01"; mask = M_P01; centi = 50; *lat = 4; break;
-  case MIR_VDIV:
-    *kind = "vec"; *ports = "p0"; mask = M_P0; centi = 1600; *lat = 21; break;
-  case MIR_VLOAD:
-    *kind = "load"; *ports = "load"; mask = 0; centi = 0; *lat = 7; load = 1; break;
-  case MIR_VSTORE:
-    *kind = "store"; *ports = "store"; mask = 0; centi = 0; store = 1; load = 0; break;
-  case MIR_VBROADCAST:
-    *kind = "vec"; *ports = "p5"; mask = M_P5; centi = 100; *lat = 3; break;
-  case MIR_VIOTA:
-    *kind = "vec"; *ports = "p015"; mask = M_P0 | M_P1 | M_P5; centi = 100; *lat = 3;
+    cost.centi = in->width == 4 ? 300 : 400;
+    cost.lat = in->width == 4 ? 11 : 14;
     break;
-  case MIR_VHREDUCE:
-    *kind = "vec"; *ports = "p015"; mask = M_P0 | M_P1 | M_P5; centi = 300; *lat = 8;
-    break;
-  case MIR_VCVTSI2F: case MIR_VCVTF2SI:
-    *kind = "vec"; *ports = "p01"; mask = M_P01; centi = 100; *lat = 5; break;
-  case MIR_NOP: case MIR_LABEL:
-    *kind = "other"; mask = 0; centi = 0; *lat = 0; break;
   default:
-    /* Every inline kernel (the five with their own opcode plus the generic
-     * MIR_IR_KERNEL) is a whole loop, not a uop: the model has nothing useful
-     * to say about it and the annotator prints it as an opaque kernel. */
-    if (mir_op_is_inline_kernel(in->op)) {
-      *kind = "kernel"; *ports = "kernel"; mask = 0; centi = 0; *is_kernel = 1;
-      *lat = 0; load = 0; break;
+    break;
+  }
+  return cost;
+}
+
+static void cost_model(const MirFunction *fn, const MirInst *in, int *lat,
+                       int press[RES_COUNT], int *flex, int *rthru,
+                       const char **kind, const char **ports, int *is_kernel) {
+  int load = op_is_mem(fn, &in->a) || op_is_mem(fn, &in->b);
+  MirOpCost cost;
+
+  *flex = 0;
+  *is_kernel = 0;
+  cost = cost_of_instruction(fn, in, load, is_kernel);
+  if (cost.load) {
+    load = cost.load > 0;
+  }
+  *kind = cost.kind;
+  *ports = cost.ports ? cost.ports : "p0156";
+  *lat = cost.lat;
+
+  if (cost.mask == M_ALU4) {
+    *flex = cost.centi;
+  } else {
+    press_even(press, cost.mask, cost.centi);
+  }
+  if (load) {
+    press[RES_LD] += 50;
+    if (*lat < 5) {
+      *lat = 5;
     }
-    *kind = "other"; mask = M_ALU4; centi = 25; break;
+  }
+  if (cost.store) {
+    press[RES_ST] += 100;
   }
 
-  /* A 4-way-flexible ALU uop is NOT pinned to a port here; it is water-filled
-   * across p0/p1/p5/p6 per loop (see analyze_function) so it lands on whichever
-   * ALU ports the branch/mul/etc. left free. Pinning it (even-split) is what
-   * made p6 look universally hot. Narrower uops keep their fixed split. */
-  if (mask == M_ALU4) *flex = centi;
-  else press_even(press, mask, centi);
-  if (load) { press[RES_LD] += 50; if (*lat < 5) *lat = 5; }
-  if (store) press[RES_ST] += 100;
-
-  int total = *flex;
-  for (int r = 0; r < RES_COUNT; r++) total += press[r];
-  *rthru = total;
+  *rthru = *flex;
+  for (int r = 0; r < RES_COUNT; r++) {
+    *rthru += press[r];
+  }
 }
 
 /* ---- byte-accurate micro-op model --------------------------------------- *
