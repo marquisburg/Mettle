@@ -67,8 +67,12 @@ static const char *mir_bail_kind(const char *reason, int kind) {
   return joined;
 }
 
+static char g_mir_last_bail[64];
+
 static int mir_trace_bail(const IRFunction *fn, const char *reason) {
   g_mir_gate_reported = 1;
+  snprintf(g_mir_last_bail, sizeof(g_mir_last_bail), "%s",
+           reason ? reason : "?");
   if (mir_env_trace()) {
     fprintf(stderr, "MIR-BAIL\t%s\t%s\n", reason,
             (fn && fn->name) ? fn->name : "?");
@@ -1055,6 +1059,9 @@ static int mir_call_sysv_arg_class(CodeGenerator *g, const IRInstruction *in,
 static int mir_untyped_float_bits(CodeGenerator *g, const IRFunction *irf,
                                   const IROperand *op);
 
+static int mir_emit_string_literal_arg(MirFunction *fn, const IROperand *arg,
+                                       MtlcType *pt, MirOperand dst);
+
 static int mir_asm_next_binding(const char **cursor, char *name,
                                 size_t capacity) {
   const char *at = *cursor ? strchr(*cursor, '{') : NULL;
@@ -1713,12 +1720,14 @@ static int mir_call_is_supported(CodeGenerator *g,
       mir_call_trace("arg_aggregate_scalar_param");
       return 0;
     }
+    /* A string literal reaching a parameter that is not a `cstring` is passed
+     * as the address of its {chars,length} record, which the lowering below
+     * does emit. It stays on the baseline for now regardless: routing these
+     * functions here made `--safe` report a false provenance failure on
+     * crc32's main, so the origin the safety pass registers for a literal and
+     * the address a call hands over do not yet agree under the allocator. */
     if (arg->kind == IR_OPERAND_STRING &&
         !code_generator_binary_type_is_cstring(pt)) {
-      /* A string literal is only lowered to a bare cstring (char* in one GP
-       * register) when the parameter is itself a cstring, matching the fallback
-       * emitter (emit_call_argument_load). A `string` fat-pointer parameter
-       * ({chars,length}) needs the struct ABI, which MIR does not build yet. */
       mir_call_trace("arg_string_non_cstring");
       return 0;
     }
@@ -2963,13 +2972,31 @@ static int mir_gate_indirect_aggregate(CodeGenerator *generator,
 static int mir_function_is_eligible_inner(CodeGenerator *generator,
                                           IRFunction *ir_function);
 
+static int mir_env_strict(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    cached = getenv("METTLE_MIR_STRICT") ? 1 : 0;
+  }
+  return cached;
+}
+
 int mir_function_is_eligible(CodeGenerator *generator,
                              IRFunction *ir_function) {
   int eligible;
   g_mir_gate_reported = 0;
+  g_mir_last_bail[0] = '\0';
   eligible = mir_function_is_eligible_inner(generator, ir_function);
   if (!eligible && !g_mir_gate_reported) {
     mir_trace_bail(ir_function, "unreported");
+  }
+  /* METTLE_MIR_STRICT: prove nothing needs the baseline emitter any more. A
+   * declined function becomes a named error instead of quietly falling back,
+   * so a full test run either passes or says exactly which function and which
+   * gate still require the old path. */
+  if (!eligible && mir_env_strict() && !mir_env_mir() && !mir_env_skipfn()) {
+    code_generator_set_error(
+        generator, "METTLE_MIR_STRICT: '%s' declined by the register allocator (%s)",
+        ir_function->name ? ir_function->name : "?", g_mir_last_bail);
   }
   return eligible;
 }
@@ -5744,6 +5771,20 @@ static int mir_lower_syscall(MirFunction *fn, CodeGenerator *g,
   }
 }
 
+/* A string LITERAL argument. To a `cstring` parameter it hands over the address
+ * of the NUL-terminated chars; to a `string` parameter it hands over the address
+ * of the {chars,length} record, which is what an 8-byte string VALUE is under
+ * this backend's convention. Mirrors the baseline's emit_call_argument_load. */
+static int mir_emit_string_literal_arg(MirFunction *fn, const IROperand *arg,
+                                       MtlcType *pt, MirOperand dst) {
+  MirOperand lit = mir_op_symbol(arg->name ? arg->name : "");
+  if (code_generator_binary_type_is_cstring(pt)) {
+    return mir_emit1(fn, MIR_LEA_CSTR, dst, lit, mir_op_none(), 8, 0, 0);
+  }
+  lit.imm = (long long)ir_operand_string_length(arg);
+  return mir_emit1(fn, MIR_LEA_STRLIT, dst, lit, mir_op_none(), 8, 0, 0);
+}
+
 static int mir_marshal_stack_args(const MirCallArgs *c) {
   MirFunction *fn = c->fn;
   CodeGenerator *g = c->g;
@@ -5830,12 +5871,15 @@ static int mir_marshal_stack_args(const MirCallArgs *c) {
       }
       val = mir_op_vreg(t);
     } else if (in->arguments[a].kind == IR_OPERAND_STRING) {
-      /* Stage the cstring address in a temp, then store it to the slot. */
-      const char *s = in->arguments[a].name ? in->arguments[a].name : "";
+      MtlcType *spt = (call_callee && call_callee->kind == CG_SYM_FUNCTION &&
+                       call_callee->data.function.parameter_types &&
+                       a < call_callee->data.function.parameter_count)
+                          ? call_callee->data.function.parameter_types[a]
+                          : NULL;
       MirVregId t = mir_new_vreg(fn, MIR_RC_GP, 8);
       if (t == MIR_VREG_NONE ||
-          !mir_emit1(fn, MIR_LEA_CSTR, mir_op_vreg(t), mir_op_symbol(s),
-                     mir_op_none(), 8, 0, 0)) {
+          !mir_emit_string_literal_arg(fn, &in->arguments[a], spt,
+                                       mir_op_vreg(t))) {
         return 0;
       }
       val = mir_op_vreg(t);
@@ -5900,11 +5944,13 @@ static int mir_marshal_gp_args(const MirCallArgs *c) {
       continue;
     }
     if (in->arguments[a].kind == IR_OPERAND_STRING) {
-      /* A string-literal argument is passed as the address of its .rdata
-       * cstring (lea directly into the ABI argument register). */
-      const char *s = in->arguments[a].name ? in->arguments[a].name : "";
-      if (!mir_emit1(fn, MIR_LEA_CSTR, mir_op_phys(reg, MIR_RC_GP),
-                     mir_op_symbol(s), mir_op_none(), 8, 0, 0)) {
+      MtlcType *spt = (call_callee && call_callee->kind == CG_SYM_FUNCTION &&
+                       call_callee->data.function.parameter_types &&
+                       a < call_callee->data.function.parameter_count)
+                          ? call_callee->data.function.parameter_types[a]
+                          : NULL;
+      if (!mir_emit_string_literal_arg(fn, &in->arguments[a], spt,
+                                       mir_op_phys(reg, MIR_RC_GP))) {
         return 0;
       }
       continue;
