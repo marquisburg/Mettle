@@ -1052,6 +1052,8 @@ static int mir_call_is_runtime_hook(const IRInstruction *in);
 static int mir_runtime_hook_is_supported(const IRInstruction *in);
 static int mir_call_sysv_arg_class(CodeGenerator *g, const IRInstruction *in,
                                    size_t a, BinarySysvAggregate *agg);
+static int mir_untyped_float_bits(CodeGenerator *g, const IRFunction *irf,
+                                  const IROperand *op);
 
 static int mir_asm_next_binding(const char **cursor, char *name,
                                 size_t capacity) {
@@ -1549,8 +1551,45 @@ static int mir_call_is_supported(CodeGenerator *g,
   const CgSym *callee =
       g->ir_program ? code_generator_lookup_symbol(g, in->text) : NULL;
   if (!callee || callee->kind != CG_SYM_FUNCTION) {
-    mir_call_trace_named("not_known_function", in->text);
-    return 0;
+    const BinaryAbi *ua = code_generator_binary_active_abi();
+    size_t ufloat = 0;
+    for (size_t a = 0; a < in->argument_count; a++) {
+      const IROperand *arg = &in->arguments[a];
+      if (arg->kind != IR_OPERAND_TEMP && arg->kind != IR_OPERAND_SYMBOL &&
+          arg->kind != IR_OPERAND_INT && arg->kind != IR_OPERAND_FLOAT) {
+        mir_call_trace_named("unknown_arg_kind", in->text);
+        return 0;
+      }
+      if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
+          (mir_name_is_global_aggregate(g, ir_function, arg->name) ||
+           mir_name_is_indirect_aggregate(g, ir_function, arg->name))) {
+        mir_call_trace_named("unknown_arg_aggregate", in->text);
+        return 0;
+      }
+      if (mir_arg_float_bits(g, ir_function, arg) != 0 ||
+          (arg->kind == IR_OPERAND_TEMP &&
+           mir_temp_is_float(g, (IRFunction *)ir_function, arg->name, 0))) {
+        size_t slot = ua->counts_classes_separately ? ufloat++ : a;
+        if (ua->float_param_registers && slot < ua->float_param_count &&
+            mir_xmm_is_encoder_scratch(ua->float_param_registers[slot])) {
+          mir_call_trace_named("unknown_arg_float_scratch_register", in->text);
+          return 0;
+        }
+      }
+    }
+    if (in->dest.kind != IR_OPERAND_NONE && in->dest.kind != IR_OPERAND_TEMP &&
+        in->dest.kind != IR_OPERAND_SYMBOL) {
+      mir_call_trace_named("unknown_dest_kind", in->text);
+      return 0;
+    }
+    if (mir_operand_struct_home_size(g, ir_function, &in->dest) > 0 ||
+        (in->value_type && (code_generator_type_is_aggregate(in->value_type) ||
+                            code_generator_binary_type_is_string(
+                                in->value_type)))) {
+      mir_call_trace_named("unknown_ret_aggregate", in->text);
+      return 0;
+    }
+    return 1;
   }
   const MtlcType *ret = callee->data.function.return_type
                   ? callee->data.function.return_type
@@ -5768,7 +5807,9 @@ static int mir_marshal_stack_args(const MirCallArgs *c) {
                        call_callee->data.function.parameter_types)
                           ? call_callee->data.function.parameter_types[a]
                           : NULL;
-      int pfb = fpt ? code_generator_binary_resolved_type_float_bits(fpt) : 0;
+      int pfb = fpt ? code_generator_binary_resolved_type_float_bits(fpt)
+                    : mir_untyped_float_bits(g, fn->ir_function,
+                                             &in->arguments[a]);
       if (pfb != 32 && pfb != 64) {
         pfb = 64;
       }
@@ -5929,7 +5970,9 @@ static int mir_marshal_xmm_args(const MirCallArgs *c) {
                 call_callee->data.function.parameter_types)
                    ? call_callee->data.function.parameter_types[a]
                    : NULL;
-    int pfb = pt ? code_generator_binary_resolved_type_float_bits(pt) : 0;
+    int pfb = pt ? code_generator_binary_resolved_type_float_bits(pt)
+                 : mir_untyped_float_bits(g, fn->ir_function,
+                                          &in->arguments[a]);
     if (pfb != 32 && pfb != 64) {
       pfb = 64;
     }
@@ -6274,8 +6317,13 @@ static int mir_lower_call(MirFunction *fn, CodeGenerator *g,
                         a < fc->data.function.parameter_count)
                            ? fc->data.function.parameter_types[a]
                            : NULL;
+        const IROperand *ua = &in->arguments[a];
         arg_is_float[nlocs] =
-            pt && code_generator_binary_resolved_type_float_bits(pt) != 0;
+            pt ? code_generator_binary_resolved_type_float_bits(pt) != 0
+               : (mir_arg_float_bits(g, fn->ir_function, ua) != 0 ||
+                  (ua->kind == IR_OPERAND_TEMP &&
+                   mir_temp_is_float(g, (IRFunction *)fn->ir_function,
+                                     ua->name, 0)));
       }
       nlocs++;
     }
