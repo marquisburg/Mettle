@@ -1236,64 +1236,71 @@ static int type_name_is_numeric(const char *name) {
          (type_name_is_integer(name) || type_name_is_float(name));
 }
 
-char *error_reporter_suggest_for_type_mismatch(const char *expected,
-                                               const char *actual) {
-  if (!expected || !actual || strcmp(expected, actual) == 0)
-    return NULL;
-
-  char buf[256];
-
-  /* A string literal where a number belongs, and the reverse. These are
-     typos rather than conversions, so they get their own wording. */
+static char *hint_literal_quoting(const char *expected, const char *actual) {
   if (type_name_is_numeric(expected) && strcmp(actual, "string") == 0) {
-    return mettle_strdup("drop the quotes: a numeric literal is 42, not \"42\"");
+    return mettle_strdup("drop the quotes: a numeric literal is 42, not "
+                         "\"42\"");
   }
   if (strcmp(expected, "string") == 0 && type_name_is_numeric(actual)) {
     return mettle_strdup("quote it: a string literal is \"42\", not 42");
   }
+  return NULL;
+}
 
-  /* string and cstring differ in representation, not in what they hold. */
-  if ((strcmp(expected, "cstring") == 0 && strcmp(actual, "string") == 0) ||
-      (strcmp(expected, "string") == 0 && strcmp(actual, "cstring") == 0)) {
-    snprintf(buf, sizeof(buf), "cast between the two representations: (%s)value",
+static char *hint_string_representation(const char *expected,
+                                        const char *actual) {
+  char buf[256];
+
+  if ((strcmp(expected, "cstring") != 0 || strcmp(actual, "string") != 0) &&
+      (strcmp(expected, "string") != 0 || strcmp(actual, "cstring") != 0)) {
+    return NULL;
+  }
+  snprintf(buf, sizeof(buf),
+           "cast between the two representations: (%s)value", expected);
+  return mettle_strdup(buf);
+}
+
+static char *hint_numeric_cast(const char *expected, const char *actual) {
+  char buf[256];
+
+  if (!type_name_is_numeric(expected) || !type_name_is_numeric(actual)) {
+    return NULL;
+  }
+  if (type_name_is_float(actual) && type_name_is_integer(expected)) {
+    snprintf(buf, sizeof(buf),
+             "cast explicitly: (%s)value. The fraction is discarded, not "
+             "rounded",
              expected);
-    return mettle_strdup(buf);
+  } else if (type_name_is_integer(actual) && type_name_is_float(expected)) {
+    snprintf(buf, sizeof(buf), "cast explicitly: (%s)value", expected);
+  } else {
+    snprintf(buf, sizeof(buf),
+             "cast explicitly: (%s)value. Check the value fits, since a "
+             "narrowing cast wraps rather than trapping",
+             expected);
   }
+  return mettle_strdup(buf);
+}
 
-  /* Numeric to numeric: always a cast, since Mettle converts nothing on its
-     own. Say which direction loses information, because that is the part a
-     reader wants to think about before adding the cast. */
-  if (type_name_is_numeric(expected) && type_name_is_numeric(actual)) {
-    if (type_name_is_float(actual) && type_name_is_integer(expected)) {
-      snprintf(buf, sizeof(buf),
-               "cast explicitly: (%s)value. The fraction is discarded, not "
-               "rounded",
-               expected);
-    } else if (type_name_is_integer(actual) && type_name_is_float(expected)) {
-      snprintf(buf, sizeof(buf), "cast explicitly: (%s)value", expected);
-    } else {
-      snprintf(buf, sizeof(buf),
-               "cast explicitly: (%s)value. Check the value fits, since a "
-               "narrowing cast wraps rather than trapping",
-               expected);
-    }
-    return mettle_strdup(buf);
-  }
+static char *hint_boolean(const char *expected, const char *actual) {
+  char buf[256];
 
-  /* bool against a number: Mettle has no truthiness, so say what to compare. */
   if (strcmp(expected, "bool") == 0 && type_name_is_numeric(actual)) {
     return mettle_strdup("compare explicitly: `value != 0`");
   }
-  if (type_name_is_numeric(expected) && strcmp(actual, "bool") == 0) {
-    snprintf(buf, sizeof(buf), "cast the boolean: (%s)value, which is 0 or 1",
-             expected);
-    return mettle_strdup(buf);
+  if (!type_name_is_numeric(expected) || strcmp(actual, "bool") != 0) {
+    return NULL;
   }
+  snprintf(buf, sizeof(buf), "cast the boolean: (%s)value, which is 0 or 1",
+           expected);
+  return mettle_strdup(buf);
+}
 
-  /* Pointer against value: one `&` or one `*` apart is the common slip, so
-     check for it before falling back to the generic advice. */
+static char *hint_address_or_value(const char *expected, const char *actual) {
+  char pointee[128];
+  char buf[256];
+
   if (type_name_is_pointer(expected) && !type_name_is_pointer(actual)) {
-    char pointee[128];
     type_name_pointee(expected, pointee, sizeof(pointee));
     if (strcmp(pointee, actual) == 0) {
       return mettle_strdup("take the address: `&value`");
@@ -1304,72 +1311,96 @@ char *error_reporter_suggest_for_type_mismatch(const char *expected,
              expected);
     return mettle_strdup(buf);
   }
-  if (!type_name_is_pointer(expected) && type_name_is_pointer(actual)) {
-    char pointee[128];
-    type_name_pointee(actual, pointee, sizeof(pointee));
-    if (strcmp(pointee, expected) == 0) {
-      return mettle_strdup("read through the pointer: `*value` or `value[0]`");
-    }
+  if (type_name_is_pointer(expected) || !type_name_is_pointer(actual)) {
+    return NULL;
+  }
+  type_name_pointee(actual, pointee, sizeof(pointee));
+  if (strcmp(pointee, expected) == 0) {
+    return mettle_strdup("read through the pointer: `*value` or `value[0]`");
+  }
+  snprintf(buf, sizeof(buf),
+           "'%s' is a pointer and '%s' is not; dereference it, or change the "
+           "declared type to '%s'",
+           actual, expected, actual);
+  return mettle_strdup(buf);
+}
+
+static char *hint_element_layout(const char *expected, const char *actual) {
+  const char *expected_layout = strstr(expected, " layout ");
+  const char *actual_layout = strstr(actual, " layout ");
+  char buf[256];
+
+  if (!expected_layout && !actual_layout) {
+    return NULL;
+  }
+  if (expected_layout && actual_layout &&
+      strcmp(expected_layout, actual_layout) == 0) {
+    return NULL;
+  }
+  snprintf(buf, sizeof(buf),
+           "this wants elements laid out '%s' and these are laid out '%s'; "
+           "convert between the two where the change of order is meant, which "
+           "is a copy",
+           expected_layout ? expected_layout + 8 : "row",
+           actual_layout ? actual_layout + 8 : "row");
+  return mettle_strdup(buf);
+}
+
+static char *hint_device_space(const char *expected, const char *actual) {
+  const char *expected_space = type_name_device_space(expected);
+  const char *actual_space = type_name_device_space(actual);
+  char buf[256];
+
+  if (!type_name_is_pointer(expected) || !type_name_is_pointer(actual) ||
+      strcmp(expected_space, actual_space) == 0) {
+    return NULL;
+  }
+  if (strcmp(actual_space, "generic") == 0) {
     snprintf(buf, sizeof(buf),
-             "'%s' is a pointer and '%s' is not; dereference it, or change the "
-             "declared type to '%s'",
-             actual, expected, actual);
-    return mettle_strdup(buf);
-  }
-
-  /* Two views that differ only in how their elements are laid out. The layout
-     is what an instruction takes its operands in, so naming the one that was
-     wanted is the whole diagnosis. */
-  {
-    const char *expected_layout = strstr(expected, " layout ");
-    const char *actual_layout = strstr(actual, " layout ");
-    if ((expected_layout || actual_layout) &&
-        !(expected_layout && actual_layout &&
-          strcmp(expected_layout, actual_layout) == 0)) {
-      snprintf(buf, sizeof(buf),
-               "this wants elements laid out '%s' and these are laid out "
-               "'%s'; convert between the two where the change of order is "
-               "meant, which is a copy",
-               expected_layout ? expected_layout + 8 : "row",
-               actual_layout ? actual_layout + 8 : "row");
-      return mettle_strdup(buf);
-    }
-  }
-
-  /* Two device pointers that differ only in where their data lives. Naming
-     both spaces is the whole diagnosis: shared memory and global memory are
-     two different memories, and a pointer into one is not a pointer into the
-     other however the arithmetic that produced it looked. */
-  {
-    const char *expected_space = type_name_device_space(expected);
-    const char *actual_space = type_name_device_space(actual);
-    if (type_name_is_pointer(expected) && type_name_is_pointer(actual) &&
-        strcmp(expected_space, actual_space) != 0) {
-      if (strcmp(actual_space, "generic") == 0) {
-        snprintf(buf, sizeof(buf),
-                 "this address is %s and %s memory is wanted; say where it "
-                 "came from in its type, or claim it with (%s)value, which "
-                 "`mettle test` re-checks",
-                 actual_space, expected_space, expected);
-      } else {
-        snprintf(buf, sizeof(buf),
-                 "%s memory is wanted and this address is in %s memory; the "
-                 "two are different memories, so no cast makes one the other",
-                 expected_space, actual_space);
-      }
-      return mettle_strdup(buf);
-    }
-  }
-
-  /* Two pointers to different things: a cast is possible but rarely what the
-     writer meant, so lead with the likelier cause. */
-  if (type_name_is_pointer(expected) && type_name_is_pointer(actual)) {
+             "this address is %s and %s memory is wanted; say where it came "
+             "from in its type, or claim it with (%s)value, which `mettle "
+             "test` re-checks",
+             actual_space, expected_space, expected);
+  } else {
     snprintf(buf, sizeof(buf),
-             "these point at different types; check the declaration, or cast "
-             "deliberately with (%s)value",
-             expected);
-    return mettle_strdup(buf);
+             "%s memory is wanted and this address is in %s memory; the two "
+             "are different memories, so no cast makes one the other",
+             expected_space, actual_space);
   }
+  return mettle_strdup(buf);
+}
 
+static char *hint_pointer_targets(const char *expected, const char *actual) {
+  char buf[256];
+
+  if (!type_name_is_pointer(expected) || !type_name_is_pointer(actual)) {
+    return NULL;
+  }
+  snprintf(buf, sizeof(buf),
+           "these point at different types; check the declaration, or cast "
+           "deliberately with (%s)value",
+           expected);
+  return mettle_strdup(buf);
+}
+
+typedef char *(*TypeMismatchHint)(const char *expected, const char *actual);
+
+static const TypeMismatchHint TYPE_MISMATCH_HINTS[] = {
+    hint_literal_quoting, hint_string_representation, hint_numeric_cast,
+    hint_boolean,         hint_address_or_value,      hint_element_layout,
+    hint_device_space,    hint_pointer_targets};
+
+char *error_reporter_suggest_for_type_mismatch(const char *expected,
+                                               const char *actual) {
+  if (!expected || !actual || strcmp(expected, actual) == 0) {
+    return NULL;
+  }
+  for (size_t i = 0;
+       i < sizeof(TYPE_MISMATCH_HINTS) / sizeof(TYPE_MISMATCH_HINTS[0]); i++) {
+    char *hint = TYPE_MISMATCH_HINTS[i](expected, actual);
+    if (hint) {
+      return hint;
+    }
+  }
   return NULL;
 }

@@ -1842,92 +1842,117 @@ static void ledger_effects(Ctx *ctx) {
   }
 }
 
+static int effects_alloc_function(Ctx *ctx, size_t index) {
+  EFn *efn = &ctx->fns[index];
+
+  efn->fn = ctx->program->functions[index];
+  efn->sources = words_new(ctx);
+  efn->performs = words_new(ctx);
+  efn->needs = words_new(ctx);
+  efn->with = words_new(ctx);
+  efn->forbids = words_new(ctx);
+  efn->requires = words_new(ctx);
+  efn->provides = words_new(ctx);
+  efn->source_sites = malloc(ctx->bit_count * sizeof(size_t));
+  if (!efn->sources || !efn->performs || !efn->needs || !efn->with ||
+      !efn->forbids || !efn->requires || !efn->provides ||
+      !efn->source_sites) {
+    return 0;
+  }
+  for (size_t bit = 0; bit < ctx->bit_count; bit++) {
+    efn->source_sites[bit] = NO_SITE;
+  }
+  if (efn->fn && efn->fn->name) {
+    ctx->index[ctx->index_count].name = efn->fn->name;
+    ctx->index[ctx->index_count].index = index;
+    ctx->index_count++;
+  }
+  return 1;
+}
+
+static void effects_mark_groups(Ctx *ctx) {
+  int warp_bit = effect_bit(ctx, "Warp");
+  int block_bit = effect_bit(ctx, "Block");
+
+  if (warp_bit >= 0) {
+    bit_set(ctx->group_mask, (size_t)warp_bit);
+  }
+  if (block_bit >= 0) {
+    bit_set(ctx->group_mask, (size_t)block_bit);
+  }
+}
+
+static int effects_build(Ctx *ctx, const IREffectInput *input,
+                         IRProgram *program, ErrorReporter *reporter) {
+  memset(ctx, 0, sizeof(*ctx));
+  ctx->program = program;
+  ctx->input = input;
+  ctx->reporter = reporter;
+  ctx->bit_count = input->effect_count + 1;
+  ctx->words = (ctx->bit_count + 63) / 64;
+  ctx->fn_count = program->function_count;
+  ctx->fns = calloc(ctx->fn_count ? ctx->fn_count : 1, sizeof(EFn));
+  ctx->index = calloc(ctx->fn_count ? ctx->fn_count : 1, sizeof(NameEntry));
+  ctx->group_mask = words_new(ctx);
+  if (!ctx->fns || !ctx->index || !ctx->group_mask) {
+    return 0;
+  }
+  effects_mark_groups(ctx);
+  for (size_t i = 0; i < ctx->fn_count; i++) {
+    if (!effects_alloc_function(ctx, i)) {
+      return 0;
+    }
+  }
+  qsort(ctx->index, ctx->index_count, sizeof(NameEntry), name_entry_compare);
+  return 1;
+}
+
+static int effects_analyze(Ctx *ctx, const IREffectInput *input,
+                          IREffectResults **out_results) {
+  int ok = 1;
+
+  for (size_t i = 0; i < ctx->fn_count && ok; i++) {
+    if (!ctx->fns[i].fn) {
+      continue;
+    }
+    ok = scan_function(ctx, i) && scan_globals(ctx, i);
+  }
+  if (ok) {
+    propagate(ctx);
+    ok = !ctx->failed;
+  }
+  if (ok && !getenv("METTLE_TRUST_EFFECTS")) {
+    ok = check_forbids(ctx) && check_roots(ctx) && check_obligations(ctx) &&
+         check_races(ctx);
+  }
+  if (ok && ctx->errors == 0 && input->instrument) {
+    ok = instrument(ctx);
+  }
+  if (ok && out_results) {
+    *out_results = collect_results(ctx);
+    ok = *out_results != NULL;
+  }
+  return ok && ctx->errors == 0;
+}
+
 int ir_effects_run(IRProgram *program, const IREffectInput *input,
-                   ErrorReporter *reporter, IREffectResults **out_results,
+                   ErrorReporter *reporter,
+                   IREffectResults **out_results,
                    long long *out_steps) {
   Ctx ctx;
-  int ok = 1;
+  int ok;
+
   if (out_results) {
     *out_results = NULL;
   }
   if (!program || !input) {
     return 0;
   }
-  memset(&ctx, 0, sizeof(ctx));
-  ctx.program = program;
-  ctx.input = input;
-  ctx.reporter = reporter;
-  ctx.bit_count = input->effect_count + 1;
-  ctx.words = (ctx.bit_count + 63) / 64;
-  ctx.fn_count = program->function_count;
-  ctx.fns = calloc(ctx.fn_count ? ctx.fn_count : 1, sizeof(EFn));
-  ctx.index = calloc(ctx.fn_count ? ctx.fn_count : 1, sizeof(NameEntry));
-  ctx.group_mask = words_new(&ctx);
-  if (!ctx.fns || !ctx.index || !ctx.group_mask) {
+  if (!effects_build(&ctx, input, program, reporter)) {
     ctx_free(&ctx);
     return 0;
   }
-  {
-    int warp_bit = effect_bit(&ctx, "Warp");
-    int block_bit = effect_bit(&ctx, "Block");
-    if (warp_bit >= 0) {
-      bit_set(ctx.group_mask, (size_t)warp_bit);
-    }
-    if (block_bit >= 0) {
-      bit_set(ctx.group_mask, (size_t)block_bit);
-    }
-  }
-  for (size_t i = 0; i < ctx.fn_count; i++) {
-    EFn *efn = &ctx.fns[i];
-    efn->fn = program->functions[i];
-    efn->sources = words_new(&ctx);
-    efn->performs = words_new(&ctx);
-    efn->needs = words_new(&ctx);
-    efn->with = words_new(&ctx);
-    efn->forbids = words_new(&ctx);
-    efn->requires = words_new(&ctx);
-    efn->provides = words_new(&ctx);
-    efn->source_sites = malloc(ctx.bit_count * sizeof(size_t));
-    if (!efn->sources || !efn->performs || !efn->needs || !efn->with ||
-        !efn->forbids || !efn->requires || !efn->provides ||
-        !efn->source_sites) {
-      ctx_free(&ctx);
-      return 0;
-    }
-    for (size_t bit = 0; bit < ctx.bit_count; bit++) {
-      efn->source_sites[bit] = NO_SITE;
-    }
-    if (efn->fn && efn->fn->name) {
-      ctx.index[ctx.index_count].name = efn->fn->name;
-      ctx.index[ctx.index_count].index = i;
-      ctx.index_count++;
-    }
-  }
-  qsort(ctx.index, ctx.index_count, sizeof(NameEntry), name_entry_compare);
-  for (size_t i = 0; i < ctx.fn_count && ok; i++) {
-    if (!ctx.fns[i].fn) {
-      continue;
-    }
-    ok = scan_function(&ctx, i) && scan_globals(&ctx, i);
-  }
-  if (ok) {
-    propagate(&ctx);
-    ok = !ctx.failed;
-  }
-  if (ok && !getenv("METTLE_TRUST_EFFECTS")) {
-    ok = check_forbids(&ctx) && check_roots(&ctx) && check_obligations(&ctx) &&
-         check_races(&ctx);
-  }
-  if (ok && ctx.errors == 0 && input->instrument) {
-    ok = instrument(&ctx);
-  }
-  if (ok && out_results) {
-    *out_results = collect_results(&ctx);
-    ok = *out_results != NULL;
-  }
-  if (ok && ctx.errors > 0) {
-    ok = 0;
-  }
+  ok = effects_analyze(&ctx, input, out_results);
   if (input->report) {
     report_effects(&ctx, input->report);
   }

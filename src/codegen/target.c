@@ -393,12 +393,304 @@ static int convention_matches(const MtlcTargetDescription *d,
          d->shadow_space == builtin->shadow_space;
 }
 
+static int target_check_machine(const MtlcTargetDescription *description,
+                                const MtlcTargetDescription *builtin,
+                                char *error, size_t error_size) {
+  size_t i;
+
+  if (description->pointer_bits != builtin->pointer_bits) {
+    snprintf(error, error_size,
+             "`%s` code has %d-bit pointers; the description says %d",
+             description->arch, builtin->pointer_bits,
+             description->pointer_bits);
+    return 0;
+  }
+  if (strcmp(description->format, builtin->format) != 0) {
+    snprintf(error, error_size,
+             "`%s-%s` objects are `%s`; the description says `%s`",
+             description->arch, description->os, builtin->format,
+             description->format);
+    return 0;
+  }
+  if (description->stack_alignment != builtin->stack_alignment) {
+    snprintf(error, error_size,
+             "`%s` keeps the stack aligned to %d; the description says %d, "
+             "which no emitter honours",
+             description->arch, builtin->stack_alignment,
+             description->stack_alignment);
+    return 0;
+  }
+  if (description->width_count != builtin->width_count) {
+    snprintf(error, error_size,
+             "`%s` has %zu integer widths; the description lists %zu",
+             description->arch, builtin->width_count, description->width_count);
+    return 0;
+  }
+  for (i = 0; i < description->width_count; i++) {
+    if (description->widths[i] != builtin->widths[i]) {
+      snprintf(error, error_size,
+               "`%s` has no %d-bit integers in this position; the widths are "
+               "the machine's, not the description's",
+               description->arch, description->widths[i]);
+      return 0;
+    }
+  }
+  if (description->vector_width != builtin->vector_width) {
+    snprintf(error, error_size,
+             "the `%s` emitter vectorizes at %d bits and takes no other "
+             "width; the description says %d",
+             description->arch, builtin->vector_width,
+             description->vector_width);
+    return 0;
+  }
+  if (description->address_space_count != 0) {
+    snprintf(error, error_size,
+             "a CPU target has no named address spaces; those belong to the "
+             "GPU targets, which are not described this way");
+    return 0;
+  }
+  return 1;
+}
+
+static int target_apply_costs(const MtlcTargetDescription *description,
+                              const MtlcTargetDescription *builtin,
+                              char *error, size_t error_size) {
+  static const char *const cost_names[] = {
+      "cost_op",     "cost_load",         "cost_store",
+      "cost_branch", "cost_multiply",     "cost_multiply_float",
+      "cost_divide", "cost_divide_float", "cost_call",
+      "cost_allocate"};
+  MtlcTargetDescription *given = (MtlcTargetDescription *)description;
+  int *fields[10];
+  const int *defaults[10];
+  size_t c;
+  int any = 0;
+
+  fields[0] = &given->cost_op;
+  fields[1] = &given->cost_load;
+  fields[2] = &given->cost_store;
+  fields[3] = &given->cost_branch;
+  fields[4] = &given->cost_multiply;
+  fields[5] = &given->cost_multiply_float;
+  fields[6] = &given->cost_divide;
+  fields[7] = &given->cost_divide_float;
+  fields[8] = &given->cost_call;
+  fields[9] = &given->cost_allocate;
+  defaults[0] = &builtin->cost_op;
+  defaults[1] = &builtin->cost_load;
+  defaults[2] = &builtin->cost_store;
+  defaults[3] = &builtin->cost_branch;
+  defaults[4] = &builtin->cost_multiply;
+  defaults[5] = &builtin->cost_multiply_float;
+  defaults[6] = &builtin->cost_divide;
+  defaults[7] = &builtin->cost_divide_float;
+  defaults[8] = &builtin->cost_call;
+  defaults[9] = &builtin->cost_allocate;
+
+  for (c = 0; c < 10; c++) {
+    any |= *fields[c] != 0;
+  }
+  for (c = 0; c < 10; c++) {
+    if (!any) {
+      *fields[c] = *defaults[c];
+      continue;
+    }
+    if (*fields[c] < 1 || *fields[c] > 1000000) {
+      snprintf(error, error_size,
+               "`%s` is %d; an instruction costs between 1 and 1000000",
+               cost_names[c], *fields[c]);
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int target_gp_arg_is_allowed(BinaryGpRegister reg) {
+  return reg != BINARY_GP_RAX && reg != BINARY_GP_R10 &&
+         reg != BINARY_GP_R11 && reg != BINARY_GP_RBX &&
+         reg != BINARY_GP_RBP && reg != BINARY_GP_R12 &&
+         reg != BINARY_GP_R13 && reg != BINARY_GP_R14 && reg != BINARY_GP_R15;
+}
+
+static int target_check_x64_convention(const MtlcTargetDescription *description,
+                                       const MtlcTargetDescription *builtin,
+                                       const char *triple,
+                                       BinaryGpRegister *int_regs,
+                                       BinaryXmmRegister *float_regs,
+                                       BinaryGpRegister *indirect, char *error,
+                                       size_t error_size) {
+  size_t i;
+  size_t j;
+
+  if (description->int_arg_count == 0 || description->int_arg_count > 6) {
+    snprintf(error, error_size,
+             "an x86_64 convention passes between 1 and 6 integer arguments "
+             "in registers; the description lists %zu",
+             description->int_arg_count);
+    return 0;
+  }
+  if (description->float_arg_count == 0 || description->float_arg_count > 8) {
+    snprintf(error, error_size,
+             "an x86_64 convention passes between 1 and 8 float arguments in "
+             "registers; the description lists %zu",
+             description->float_arg_count);
+    return 0;
+  }
+  for (i = 0; i < description->int_arg_count; i++) {
+    if (!gp_register_by_name(description->int_args[i], &int_regs[i]) ||
+        !target_gp_arg_is_allowed(int_regs[i])) {
+      snprintf(error, error_size,
+               "`%s` cannot carry an integer argument: the argument registers "
+               "are drawn from rdi, rsi, rdx, rcx, r8 and r9",
+               description->int_args[i]);
+      return 0;
+    }
+    for (j = 0; j < i; j++) {
+      if (int_regs[j] == int_regs[i]) {
+        snprintf(error, error_size,
+                 "`%s` is listed twice among the integer argument registers",
+                 description->int_args[i]);
+        return 0;
+      }
+    }
+  }
+  for (i = 0; i < description->float_arg_count; i++) {
+    if (!xmm_register_by_name(description->float_args[i], &float_regs[i]) ||
+        float_regs[i] > BINARY_XMM7) {
+      snprintf(error, error_size,
+               "`%s` cannot carry a float argument: the argument registers "
+               "are drawn from xmm0 to xmm7",
+               description->float_args[i]);
+      return 0;
+    }
+    for (j = 0; j < i; j++) {
+      if (float_regs[j] == float_regs[i]) {
+        snprintf(error, error_size,
+                 "`%s` is listed twice among the float argument registers",
+                 description->float_args[i]);
+        return 0;
+      }
+    }
+  }
+  if (!gp_register_by_name(description->indirect_return, indirect) ||
+      *indirect != int_regs[0]) {
+    snprintf(error, error_size,
+             "the indirect return register is the first integer argument "
+             "register, `%s`; the description says `%s`",
+             description->int_args[0], description->indirect_return);
+    return 0;
+  }
+  if (description->shadow_space != 0 && description->shadow_space != 32) {
+    snprintf(error, error_size,
+             "shadow space is 0 or 32 bytes; the description says %d",
+             description->shadow_space);
+    return 0;
+  }
+  if (description->red_zone != builtin->red_zone) {
+    snprintf(error, error_size,
+             "`%s` has a red zone of %d bytes and the emitter does not vary "
+             "it; the description says %d",
+             triple, builtin->red_zone, description->red_zone);
+    return 0;
+  }
+  return 1;
+}
+
+static int target_check_arm64_convention(
+    const MtlcTargetDescription *description,
+    const MtlcTargetDescription *builtin, char *error, size_t error_size) {
+  Arm64Reg gp[MTLC_TARGET_DESC_MAX_REGS];
+  size_t i;
+  size_t j;
+
+  if (description->int_arg_count == 0 || description->int_arg_count > 8) {
+    snprintf(error, error_size,
+             "an aarch64 convention passes between 1 and 8 integer arguments "
+             "in registers; the description lists %zu",
+             description->int_arg_count);
+    return 0;
+  }
+  for (i = 0; i < description->int_arg_count; i++) {
+    const char *name = description->int_args[i];
+    int value = -1;
+
+    if (name[0] == 'x' && name[1] >= '0' && name[1] <= '7' && !name[2]) {
+      value = name[1] - '0';
+    }
+    if (value < 0) {
+      snprintf(error, error_size,
+               "`%s` cannot carry an integer argument: the argument registers "
+               "are drawn from x0 to x7",
+               name);
+      return 0;
+    }
+    gp[i] = (Arm64Reg)value;
+    for (j = 0; j < i; j++) {
+      if (gp[j] == gp[i]) {
+        snprintf(error, error_size,
+                 "`%s` is listed twice among the integer argument registers",
+                 name);
+        return 0;
+      }
+    }
+  }
+  if (!names_equal(description->float_args, description->float_arg_count,
+                   builtin->float_args, builtin->float_arg_count)) {
+    snprintf(error, error_size,
+             "the aarch64 emitter passes floats in v0 to v7 and does not vary "
+             "that; only the integer argument registers are chosen here");
+    return 0;
+  }
+  if (strcmp(description->indirect_return, builtin->indirect_return) != 0) {
+    snprintf(error, error_size,
+             "an aarch64 indirect return is `%s`, which the architecture "
+             "fixes; the description says `%s`",
+             builtin->indirect_return, description->indirect_return);
+    return 0;
+  }
+  if (!arm64_abi_set_gp_args(gp, (int)description->int_arg_count)) {
+    snprintf(error, error_size,
+             "the emitter would not take this integer argument order");
+    return 0;
+  }
+  return 1;
+}
+
+static void target_adopt_description(const MtlcTargetEntry *entry,
+                                     const MtlcTargetDescription *description,
+                                     const MtlcTargetDescription *builtin,
+                                     const BinaryGpRegister *int_regs,
+                                     const BinaryXmmRegister *float_regs,
+                                     BinaryGpRegister indirect) {
+  g_target.arch = entry->arch;
+  g_target.os = entry->os;
+  g_target.code_bits = entry->code_bits;
+  g_target.format = entry->format;
+  g_target.freestanding = entry->freestanding;
+  g_target.explicit_triple = 1;
+  snprintf(g_target.triple, sizeof(g_target.triple), "%s", description->name);
+  g_description = *description;
+  g_description.described_convention =
+      entry->arch == MTLC_TARGET_ARCH_X86_64 &&
+      !convention_matches(description, builtin);
+  g_description_valid = 1;
+  if (entry->arch == MTLC_TARGET_ARCH_X86_64) {
+    code_generator_binary_describe_abi(
+        int_regs, description->int_arg_count, float_regs,
+        description->float_arg_count, description->shadow_space, indirect,
+        description->separate_classes);
+  }
+}
+
 int mtlc_target_describe(const MtlcTargetDescription *description, char *error,
                          size_t error_size) {
   const MtlcTargetEntry *entry = NULL;
   MtlcTargetDescription builtin;
+  BinaryGpRegister int_regs[MTLC_TARGET_DESC_MAX_REGS];
+  BinaryXmmRegister float_regs[MTLC_TARGET_DESC_MAX_REGS];
+  BinaryGpRegister indirect = BINARY_GP_RDI;
   char triple[64];
-  size_t i;
+
   if (!description) {
     return 0;
   }
@@ -416,285 +708,39 @@ int mtlc_target_describe(const MtlcTargetDescription *description, char *error,
     return 0;
   }
   describe_entry(entry, triple, &builtin);
-  if (description->pointer_bits != builtin.pointer_bits) {
-    snprintf(error, error_size,
-             "`%s` code has %d-bit pointers; the description says %d",
-             description->arch, builtin.pointer_bits,
-             description->pointer_bits);
+  if (!target_check_machine(description, &builtin, error, error_size) ||
+      !target_apply_costs(description, &builtin, error, error_size)) {
     return 0;
   }
-  if (strcmp(description->format, builtin.format) != 0) {
+  if ((entry->os != MTLC_TARGET_OS_NONE ||
+       (entry->arch != MTLC_TARGET_ARCH_X86_64 &&
+        entry->arch != MTLC_TARGET_ARCH_AARCH64)) &&
+      !convention_matches(description, &builtin)) {
     snprintf(error, error_size,
-             "`%s-%s` objects are `%s`; the description says `%s`",
-             description->arch, description->os, builtin.format,
-             description->format);
+             entry->os != MTLC_TARGET_OS_NONE
+                 ? "a hosted target's calling convention is the platform's, "
+                   "and `%s` is hosted; describe a freestanding x86_64 target "
+                   "to choose one"
+                 : "the `%s` emitter takes only its own calling convention; "
+                   "describe a freestanding x86_64 target to choose one",
+             triple);
     return 0;
   }
-  if (description->stack_alignment != builtin.stack_alignment) {
-    snprintf(error, error_size,
-             "`%s` keeps the stack aligned to %d; the description says %d, "
-             "which no emitter honours",
-             description->arch, builtin.stack_alignment,
-             description->stack_alignment);
+  if (entry->arch == MTLC_TARGET_ARCH_X86_64 &&
+      !target_check_x64_convention(description, &builtin, triple, int_regs,
+                                   float_regs, &indirect, error, error_size)) {
     return 0;
   }
-  if (description->width_count != builtin.width_count) {
-    snprintf(error, error_size,
-             "`%s` has %zu integer widths; the description lists %zu",
-             description->arch, builtin.width_count, description->width_count);
-    return 0;
-  }
-  for (i = 0; i < description->width_count; i++) {
-    if (description->widths[i] != builtin.widths[i]) {
-      snprintf(error, error_size,
-               "`%s` has no %d-bit integers in this position; the widths are "
-               "the machine's, not the description's",
-               description->arch, description->widths[i]);
+  if (entry->arch == MTLC_TARGET_ARCH_AARCH64) {
+    if (!target_check_arm64_convention(description, &builtin, error,
+                                       error_size)) {
       return 0;
     }
+  } else {
+    arm64_abi_reset();
   }
-  if (description->vector_width != builtin.vector_width) {
-    snprintf(error, error_size,
-             "the `%s` emitter vectorizes at %d bits and takes no other "
-             "width; the description says %d",
-             description->arch, builtin.vector_width,
-             description->vector_width);
-    return 0;
-  }
-  if (description->address_space_count != 0) {
-    snprintf(error, error_size,
-             "a CPU target has no named address spaces; those belong to the "
-             "GPU targets, which are not described this way");
-    return 0;
-  }
-  {
-    /* A description that says nothing about costs keeps the machine's own.
-     * One that says anything has to say all of it, because a cost model with
-     * a hole in it would silently price an instruction at nothing. */
-    static const char *const cost_names[] = {
-        "cost_op",       "cost_load",   "cost_store",
-        "cost_branch",   "cost_multiply", "cost_multiply_float",
-        "cost_divide",   "cost_divide_float", "cost_call",
-        "cost_allocate"};
-    int *given[10];
-    const int *fallback[10];
-    MtlcTargetDescription *mutable_description =
-        (MtlcTargetDescription *)description;
-    size_t c;
-    int any = 0;
-    given[0] = &mutable_description->cost_op;
-    given[1] = &mutable_description->cost_load;
-    given[2] = &mutable_description->cost_store;
-    given[3] = &mutable_description->cost_branch;
-    given[4] = &mutable_description->cost_multiply;
-    given[5] = &mutable_description->cost_multiply_float;
-    given[6] = &mutable_description->cost_divide;
-    given[7] = &mutable_description->cost_divide_float;
-    given[8] = &mutable_description->cost_call;
-    given[9] = &mutable_description->cost_allocate;
-    fallback[0] = &builtin.cost_op;
-    fallback[1] = &builtin.cost_load;
-    fallback[2] = &builtin.cost_store;
-    fallback[3] = &builtin.cost_branch;
-    fallback[4] = &builtin.cost_multiply;
-    fallback[5] = &builtin.cost_multiply_float;
-    fallback[6] = &builtin.cost_divide;
-    fallback[7] = &builtin.cost_divide_float;
-    fallback[8] = &builtin.cost_call;
-    fallback[9] = &builtin.cost_allocate;
-    for (c = 0; c < 10; c++) {
-      any |= *given[c] != 0;
-    }
-    for (c = 0; c < 10; c++) {
-      if (!any) {
-        *given[c] = *fallback[c];
-        continue;
-      }
-      if (*given[c] < 1 || *given[c] > 1000000) {
-        snprintf(error, error_size,
-                 "`%s` is %d; an instruction costs between 1 and 1000000",
-                 cost_names[c], *given[c]);
-        return 0;
-      }
-    }
-  }
-  if (entry->os != MTLC_TARGET_OS_NONE ||
-      (entry->arch != MTLC_TARGET_ARCH_X86_64 &&
-       entry->arch != MTLC_TARGET_ARCH_AARCH64)) {
-    if (!convention_matches(description, &builtin)) {
-      snprintf(error, error_size,
-               entry->os != MTLC_TARGET_OS_NONE
-                   ? "a hosted target's calling convention is the platform's, "
-                     "and `%s` is hosted; describe a freestanding x86_64 "
-                     "target to choose one"
-                   : "the `%s` emitter takes only its own calling "
-                     "convention; describe a freestanding x86_64 target to "
-                     "choose one",
-               triple);
-      return 0;
-    }
-  }
-  {
-    BinaryGpRegister int_regs[MTLC_TARGET_DESC_MAX_REGS];
-    BinaryXmmRegister float_regs[MTLC_TARGET_DESC_MAX_REGS];
-    BinaryGpRegister indirect = BINARY_GP_RDI;
-    size_t j;
-    if (entry->arch == MTLC_TARGET_ARCH_X86_64) {
-      if (description->int_arg_count == 0 || description->int_arg_count > 6) {
-        snprintf(error, error_size,
-                 "an x86_64 convention passes between 1 and 6 integer "
-                 "arguments in registers; the description lists %zu",
-                 description->int_arg_count);
-        return 0;
-      }
-      if (description->float_arg_count == 0 ||
-          description->float_arg_count > 8) {
-        snprintf(error, error_size,
-                 "an x86_64 convention passes between 1 and 8 float "
-                 "arguments in registers; the description lists %zu",
-                 description->float_arg_count);
-        return 0;
-      }
-      for (i = 0; i < description->int_arg_count; i++) {
-        if (!gp_register_by_name(description->int_args[i], &int_regs[i]) ||
-            int_regs[i] == BINARY_GP_RAX || int_regs[i] == BINARY_GP_R10 ||
-            int_regs[i] == BINARY_GP_R11 || int_regs[i] == BINARY_GP_RBX ||
-            int_regs[i] == BINARY_GP_RBP || int_regs[i] == BINARY_GP_R12 ||
-            int_regs[i] == BINARY_GP_R13 || int_regs[i] == BINARY_GP_R14 ||
-            int_regs[i] == BINARY_GP_R15) {
-          snprintf(error, error_size,
-                   "`%s` cannot carry an integer argument: the argument "
-                   "registers are drawn from rdi, rsi, rdx, rcx, r8 and r9",
-                   description->int_args[i]);
-          return 0;
-        }
-        for (j = 0; j < i; j++) {
-          if (int_regs[j] == int_regs[i]) {
-            snprintf(error, error_size,
-                     "`%s` is listed twice among the integer argument "
-                     "registers",
-                     description->int_args[i]);
-            return 0;
-          }
-        }
-      }
-      for (i = 0; i < description->float_arg_count; i++) {
-        if (!xmm_register_by_name(description->float_args[i],
-                                  &float_regs[i]) ||
-            float_regs[i] > BINARY_XMM7) {
-          snprintf(error, error_size,
-                   "`%s` cannot carry a float argument: the argument "
-                   "registers are drawn from xmm0 to xmm7",
-                   description->float_args[i]);
-          return 0;
-        }
-        for (j = 0; j < i; j++) {
-          if (float_regs[j] == float_regs[i]) {
-            snprintf(error, error_size,
-                     "`%s` is listed twice among the float argument "
-                     "registers",
-                     description->float_args[i]);
-            return 0;
-          }
-        }
-      }
-      if (!gp_register_by_name(description->indirect_return, &indirect) ||
-          indirect != int_regs[0]) {
-        snprintf(error, error_size,
-                 "the indirect return register is the first integer "
-                 "argument register, `%s`; the description says `%s`",
-                 description->int_args[0], description->indirect_return);
-        return 0;
-      }
-      if (description->shadow_space != 0 && description->shadow_space != 32) {
-        snprintf(error, error_size,
-                 "shadow space is 0 or 32 bytes; the description says %d",
-                 description->shadow_space);
-        return 0;
-      }
-      if (description->red_zone != builtin.red_zone) {
-        snprintf(error, error_size,
-                 "`%s` has a red zone of %d bytes and the emitter does not "
-                 "vary it; the description says %d",
-                 triple, builtin.red_zone, description->red_zone);
-        return 0;
-      }
-    }
-    if (entry->arch == MTLC_TARGET_ARCH_AARCH64) {
-      Arm64Reg gp[MTLC_TARGET_DESC_MAX_REGS];
-      if (description->int_arg_count == 0 || description->int_arg_count > 8) {
-        snprintf(error, error_size,
-                 "an aarch64 convention passes between 1 and 8 integer "
-                 "arguments in registers; the description lists %zu",
-                 description->int_arg_count);
-        return 0;
-      }
-      for (i = 0; i < description->int_arg_count; i++) {
-        const char *name = description->int_args[i];
-        int value = -1;
-        if (name[0] == 'x' && name[1] >= '0' && name[1] <= '7' && !name[2]) {
-          value = name[1] - '0';
-        }
-        if (value < 0) {
-          snprintf(error, error_size,
-                   "`%s` cannot carry an integer argument: the argument "
-                   "registers are drawn from x0 to x7",
-                   name);
-          return 0;
-        }
-        gp[i] = (Arm64Reg)value;
-        for (j = 0; j < i; j++) {
-          if (gp[j] == gp[i]) {
-            snprintf(error, error_size,
-                     "`%s` is listed twice among the integer argument "
-                     "registers",
-                     name);
-            return 0;
-          }
-        }
-      }
-      if (!names_equal(description->float_args, description->float_arg_count,
-                       builtin.float_args, builtin.float_arg_count)) {
-        snprintf(error, error_size,
-                 "the aarch64 emitter passes floats in v0 to v7 and does not "
-                 "vary that; only the integer argument registers are chosen "
-                 "here");
-        return 0;
-      }
-      if (strcmp(description->indirect_return, builtin.indirect_return) != 0) {
-        snprintf(error, error_size,
-                 "an aarch64 indirect return is `%s`, which the architecture "
-                 "fixes; the description says `%s`",
-                 builtin.indirect_return, description->indirect_return);
-        return 0;
-      }
-      if (!arm64_abi_set_gp_args(gp, (int)description->int_arg_count)) {
-        snprintf(error, error_size,
-                 "the emitter would not take this integer argument order");
-        return 0;
-      }
-    } else {
-      arm64_abi_reset();
-    }
-    g_target.arch = entry->arch;
-    g_target.os = entry->os;
-    g_target.code_bits = entry->code_bits;
-    g_target.format = entry->format;
-    g_target.freestanding = entry->freestanding;
-    g_target.explicit_triple = 1;
-    snprintf(g_target.triple, sizeof(g_target.triple), "%s", description->name);
-    g_description = *description;
-    g_description.described_convention =
-        entry->arch == MTLC_TARGET_ARCH_X86_64 &&
-        !convention_matches(description, &builtin);
-    g_description_valid = 1;
-    if (entry->arch == MTLC_TARGET_ARCH_X86_64) {
-      code_generator_binary_describe_abi(
-          int_regs, description->int_arg_count, float_regs,
-          description->float_arg_count, description->shadow_space, indirect,
-          description->separate_classes);
-    }
-  }
+  target_adopt_description(entry, description, &builtin, int_regs, float_regs,
+                           indirect);
   return 1;
 }
 

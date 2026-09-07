@@ -512,148 +512,186 @@ static long long trips_for(Ctx *ctx, IRFunction *fn,
   return DEADLINE_UNBOUNDED;
 }
 
-static long long compute_cost(Ctx *ctx, IRFunction *fn, int *evidence,
-                              FILE *report) {
-  size_t count = 0;
-  const IRBasicBlock *blocks = NULL;
-  /* Rebuild rather than trust the cached graph. A pass that rewrote an
-   * instruction in place left cfg_valid set, and the block pointers went
-   * stale the moment one of them grew the instruction array. Costing a
-   * function through stale blocks reads instructions that are no longer
-   * there, which is how a checked build came to price a loop at nothing. */
-  ir_function_clear_cfg(fn);
-  blocks = ir_function_blocks(fn, &count);
-  long long *weight = NULL;
-  int *back = NULL;
-  char *member = NULL;
-  char *seen = NULL;
-  long long total = DEADLINE_UNBOUNDED;
-  if (!blocks || count == 0 || count > DEADLINE_MAX_BLOCKS) {
-    return DEADLINE_UNBOUNDED;
-  }
-  weight = calloc(count, sizeof(long long));
-  back = calloc(count * count, sizeof(int));
-  member = calloc(count, 1);
-  seen = calloc(count, 1);
-  if (!weight || !back || !member || !seen) {
-    free(weight);
-    free(back);
-    free(member);
-    free(seen);
-    return DEADLINE_UNBOUNDED;
-  }
+typedef struct {
+  long long *weight;
+  int *back;
+  char *member;
+  char *seen;
+} DeadlineWork;
+
+static void deadline_work_free(DeadlineWork *work) {
+  free(work->weight);
+  free(work->back);
+  free(work->member);
+  free(work->seen);
+}
+
+static int deadline_work_alloc(DeadlineWork *work, size_t count) {
+  work->weight = calloc(count, sizeof(long long));
+  work->back = calloc(count * count, sizeof(int));
+  work->member = calloc(count, 1);
+  work->seen = calloc(count, 1);
+  return work->weight && work->back && work->member && work->seen;
+}
+
+static int deadline_block_weights(Ctx *ctx, const IRBasicBlock *blocks,
+                                  size_t count, long long *weight) {
   for (size_t b = 0; b < count; b++) {
     for (size_t i = 0; i < blocks[b].instruction_count; i++) {
       const IRInstruction *insn = &blocks[b].instructions[i];
       long long one = insn->op == IR_OP_CALL ? call_cost(ctx, insn)
                                              : op_cost(ctx->costs, insn);
       if (one == DEADLINE_UNBOUNDED) {
-        free(weight);
-        free(back);
-        free(member);
-        free(seen);
-        return DEADLINE_UNBOUNDED;
+        return 0;
       }
       weight[b] += one;
     }
   }
-  mark_back_edges(blocks, count, back);
-  for (size_t rounds = 0; rounds < count; rounds++) {
-    size_t best_source = (size_t)-1;
-    size_t best_header = (size_t)-1;
-    size_t best_size = (size_t)-1;
-    for (size_t u = 0; u < count; u++) {
-      for (size_t h = 0; h < count; h++) {
-        size_t size = 1;
-        if (back[u * count + h] != 1) {
-          continue;
-        }
-        for (size_t b = 0; b < count; b++) {
-          if (b != h && reaches(blocks, count, b, u, h, seen)) {
-            size++;
-          }
-        }
-        if (best_size == (size_t)-1 || size < best_size) {
-          best_size = size;
-          best_source = u;
-          best_header = h;
+  return 1;
+}
+
+static int deadline_smallest_loop(const IRBasicBlock *blocks, size_t count,
+                                  const int *back, char *seen,
+                                  size_t *source_out, size_t *header_out) {
+  size_t best_size = (size_t)-1;
+
+  *source_out = (size_t)-1;
+  *header_out = (size_t)-1;
+  for (size_t u = 0; u < count; u++) {
+    for (size_t h = 0; h < count; h++) {
+      size_t size = 1;
+
+      if (back[u * count + h] != 1) {
+        continue;
+      }
+      for (size_t b = 0; b < count; b++) {
+        if (b != h && reaches(blocks, count, b, u, h, seen)) {
+          size++;
         }
       }
+      if (best_size == (size_t)-1 || size < best_size) {
+        best_size = size;
+        *source_out = u;
+        *header_out = h;
+      }
     }
-    if (best_source == (size_t)-1) {
+  }
+  return *source_out != (size_t)-1;
+}
+
+static int deadline_fold_loop(Ctx *ctx, IRFunction *fn,
+                              const IRBasicBlock *blocks, size_t count,
+                              DeadlineWork *work, size_t source, size_t header,
+                              int *evidence) {
+  SourceLocation at = blocks[header].instruction_count
+                          ? blocks[header].instructions[0].location
+                          : fn->location;
+  long long body;
+  long long trips;
+  int measured = 0;
+
+  memset(work->member, 0, count);
+  work->member[header] = 1;
+  for (size_t b = 0; b < count; b++) {
+    if (b != header && reaches(blocks, count, b, source, header, work->seen)) {
+      work->member[b] = 1;
+    }
+  }
+  body = longest_path(blocks, count, work->weight, work->back, work->member,
+                      header, source, NULL, NULL);
+  trips = trips_for(ctx, fn, blocks, count, work->member, header, at,
+                    &measured);
+  if (body == DEADLINE_UNBOUNDED || trips == DEADLINE_UNBOUNDED ||
+      (body > 0 && trips > (long long)1 << 40)) {
+    return 0;
+  }
+  if (measured) {
+    *evidence = 1;
+  }
+  if (getenv("METTLE_TRUST_DEADLINES")) {
+    trips = 1;
+  }
+  work->weight[header] += body * (trips - 1);
+  work->back[source * count + header] = 2;
+  return 1;
+}
+
+static void deadline_report_path(FILE *report, const IRFunction *fn,
+                                 const IRBasicBlock *blocks,
+                                 const long long *weight, const size_t *prev,
+                                 size_t last) {
+  size_t chain[DEADLINE_MAX_BLOCKS];
+  size_t depth = 0;
+  size_t at = last;
+
+  while (at != (size_t)-1 && depth < DEADLINE_MAX_BLOCKS) {
+    chain[depth++] = at;
+    if (at == 0) {
       break;
     }
-    {
-      long long body = 0;
-      long long trips = 0;
-      int measured = 0;
-      SourceLocation header = blocks[best_header].instruction_count
-                                  ? blocks[best_header].instructions[0].location
-                                  : fn->location;
-      memset(member, 0, count);
-      member[best_header] = 1;
-      for (size_t b = 0; b < count; b++) {
-        if (b != best_header &&
-            reaches(blocks, count, b, best_source, best_header, seen)) {
-          member[b] = 1;
-        }
-      }
-      body = longest_path(blocks, count, weight, back, member, best_header,
-                          best_source, NULL, NULL);
-      trips = trips_for(ctx, fn, blocks, count, member, best_header,
-                        header, &measured);
-      if (body == DEADLINE_UNBOUNDED || trips == DEADLINE_UNBOUNDED ||
-          (body > 0 && trips > (long long)1 << 40)) {
-        free(weight);
-        free(back);
-        free(member);
-        free(seen);
-        return DEADLINE_UNBOUNDED;
-      }
-      if (measured) {
-        *evidence = 1;
-      }
-      if (getenv("METTLE_TRUST_DEADLINES")) {
-        trips = 1;
-      }
-      weight[best_header] += body * (trips - 1);
-      back[best_source * count + best_header] = 2;
+    at = prev[at];
+  }
+  fprintf(report, "  longest path through %s:\n", fn->name ? fn->name : "?");
+  while (depth-- > 0) {
+    const IRBasicBlock *block = &blocks[chain[depth]];
+    size_t line = block->instruction_count
+                      ? block->instructions[0].location.line
+                      : fn->location.line;
+    fprintf(report, "    %s at line %zu costs %lld\n",
+            block->label ? block->label : "<anon>", line,
+            weight[chain[depth]]);
+  }
+}
+
+static long long deadline_longest_path(const IRBasicBlock *blocks,
+                                       size_t count, const DeadlineWork *work,
+                                       const IRFunction *fn, FILE *report) {
+  size_t *prev = calloc(count, sizeof(size_t));
+  size_t last = 0;
+  long long total = longest_path(blocks, count, work->weight, work->back, NULL,
+                                 0, (size_t)-1, prev, &last);
+
+  if (report && prev && total != DEADLINE_UNBOUNDED) {
+    deadline_report_path(report, fn, blocks, work->weight, prev, last);
+  }
+  free(prev);
+  return total;
+}
+
+static long long compute_cost(Ctx *ctx, IRFunction *fn, int *evidence,
+                              FILE *report) {
+  size_t count = 0;
+  const IRBasicBlock *blocks = NULL;
+  DeadlineWork work = {NULL, NULL, NULL, NULL};
+  long long total = DEADLINE_UNBOUNDED;
+
+  ir_function_clear_cfg(fn);
+  blocks = ir_function_blocks(fn, &count);
+  if (!blocks || count == 0 || count > DEADLINE_MAX_BLOCKS) {
+    return DEADLINE_UNBOUNDED;
+  }
+  if (!deadline_work_alloc(&work, count) ||
+      !deadline_block_weights(ctx, blocks, count, work.weight)) {
+    deadline_work_free(&work);
+    return DEADLINE_UNBOUNDED;
+  }
+  mark_back_edges(blocks, count, work.back);
+  for (size_t rounds = 0; rounds < count; rounds++) {
+    size_t source;
+    size_t header;
+
+    if (!deadline_smallest_loop(blocks, count, work.back, work.seen, &source,
+                                &header)) {
+      break;
+    }
+    if (!deadline_fold_loop(ctx, fn, blocks, count, &work, source, header,
+                            evidence)) {
+      deadline_work_free(&work);
+      return DEADLINE_UNBOUNDED;
     }
   }
-  {
-    size_t *prev = calloc(count, sizeof(size_t));
-    size_t last = 0;
-    total = longest_path(blocks, count, weight, back, NULL, 0, (size_t)-1,
-                         prev, &last);
-    if (report && prev && total != DEADLINE_UNBOUNDED) {
-      size_t chain[DEADLINE_MAX_BLOCKS];
-      size_t depth = 0;
-      size_t at = last;
-      while (at != (size_t)-1 && depth < DEADLINE_MAX_BLOCKS) {
-        chain[depth++] = at;
-        if (at == 0) {
-          break;
-        }
-        at = prev[at];
-      }
-      fprintf(report, "  longest path through %s:\n",
-              fn->name ? fn->name : "?");
-      while (depth-- > 0) {
-        const IRBasicBlock *block = &blocks[chain[depth]];
-        size_t line = block->instruction_count
-                          ? block->instructions[0].location.line
-                          : fn->location.line;
-        fprintf(report, "    %s at line %zu costs %lld\n",
-                block->label ? block->label : "<anon>", line,
-                weight[chain[depth]]);
-      }
-    }
-    free(prev);
-  }
-  free(weight);
-  free(back);
-  free(member);
-  free(seen);
+  total = deadline_longest_path(blocks, count, &work, fn, report);
+  deadline_work_free(&work);
   return total;
 }
 
