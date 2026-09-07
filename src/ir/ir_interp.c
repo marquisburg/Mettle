@@ -1852,127 +1852,134 @@ static int ii_mtlc_integer_width(const MtlcType *type, int *size,
   }
 }
 
+static int ii_cast_target_is_pointer_shaped(const char *type, size_t len) {
+  return (len > 0 && type[len - 1] == '*') || strcmp(type, "cstring") == 0 ||
+         strcmp(type, "rawptr") == 0 || strcmp(type, "string") == 0 ||
+         strncmp(type, "fn(", 3) == 0 || strncmp(type, "Fn(", 3) == 0;
+}
+
+static double ii_cast_source_as_double(const IRInstruction *insn,
+                                       const IRInterpValue *in) {
+  if (!in->is_float && insn->is_unsigned) {
+    return (double)(unsigned long long)in->i;
+  }
+  return ii_as_float(in);
+}
+
+static int ii_cast_to_half(const char *type, double value,
+                           IRInterpValue *out) {
+  float single = (float)value;
+  uint32_t bits;
+  uint16_t half;
+
+  memcpy(&bits, &single, (size_t)4);
+  if (strcmp(type, "float16") == 0) {
+    half = mettle_f32bits_to_f16bits(bits);
+    *out = ii_float_value((double)mettle_f16bits_to_f32(half));
+  } else {
+    half = mettle_f32bits_to_bf16bits(bits);
+    *out = ii_float_value((double)mettle_bf16bits_to_f32(half));
+  }
+  return 1;
+}
+
+static int ii_cast_declared_target(IRInterpMachine *machine,
+                                   const IRInstruction *insn,
+                                   const IRInterpValue *in, IRInterpValue *out,
+                                   int *size, int *target_unsigned) {
+  MtlcType *declared = insn->value_type;
+
+  if (!declared) {
+    ii_fail(machine, IR_INTERP_UNSUPPORTED, "cast target type");
+    return 0;
+  }
+  if (declared->kind == MTLC_TYPE_ENUM) {
+    *size = (declared->size == 1 || declared->size == 2 || declared->size == 8)
+                ? (int)declared->size
+                : 4;
+    return 1;
+  }
+  if (declared->kind == MTLC_TYPE_POINTER ||
+      declared->kind == MTLC_TYPE_FUNCTION_POINTER ||
+      declared->kind == MTLC_TYPE_STRING) {
+    *out = ii_int_value(ii_as_int(in));
+    return 2;
+  }
+  if (ii_mtlc_integer_width(declared, size, target_unsigned)) {
+    return 1;
+  }
+  if (declared->kind == MTLC_TYPE_FLOAT64 ||
+      declared->kind == MTLC_TYPE_FLOAT32) {
+    double value = ii_cast_source_as_double(insn, in);
+    *out = ii_float_value(declared->kind == MTLC_TYPE_FLOAT32
+                              ? (double)(float)value
+                              : value);
+    return 2;
+  }
+  if (declared->kind == MTLC_TYPE_BOOL) {
+    *out = ii_int_value(in->is_float ? in->f != 0.0 : in->i != 0);
+    return 2;
+  }
+  ii_fail(machine, IR_INTERP_UNSUPPORTED, "cast target type");
+  return 0;
+}
+
+static long long ii_cast_to_integer(const IRInterpValue *in, int size,
+                                    int target_unsigned) {
+  long long v;
+
+  if (!in->is_float) {
+    v = in->i;
+  } else if (size == 8 && target_unsigned) {
+    v = (in->f >= 0.0 && in->f < 18446744073709551616.0)
+            ? (long long)(unsigned long long)in->f
+            : LLONG_MIN;
+  } else if (in->f >= -9223372036854775808.0 &&
+             in->f < 9223372036854775808.0) {
+    v = (long long)in->f;
+  } else {
+    v = LLONG_MIN;
+  }
+  if (size < 8) {
+    int shift = 64 - size * 8;
+    v = target_unsigned ? (long long)(((unsigned long long)v << shift) >> shift)
+                        : (v << shift) >> shift;
+  }
+  return v;
+}
+
 static int ii_cast(IRInterpMachine *machine, const IRInstruction *insn,
                    const IRInterpValue *in, IRInterpValue *out) {
   const char *type = insn->text ? insn->text : "";
-  size_t len = strlen(type);
-  if (len > 0 && type[len - 1] == '*') {
-    /* Pointer cast: value-preserving. */
+  int size = 0;
+  int target_unsigned = 0;
+
+  if (ii_cast_target_is_pointer_shaped(type, strlen(type))) {
     *out = ii_int_value(ii_as_int(in));
     return 1;
   }
-  if (strcmp(type, "cstring") == 0 || strcmp(type, "rawptr") == 0 ||
-      strcmp(type, "string") == 0 || strncmp(type, "fn(", 3) == 0 ||
-      strncmp(type, "Fn(", 3) == 0) {
-    /* Pointer-shaped targets: value-preserving. */
-    *out = ii_int_value(ii_as_int(in));
-    return 1;
-  }
-  /* is_unsigned on a CAST says the SOURCE is an unsigned integer, so a value
-   * with bit 63 set is a large positive number and not a negative one. */
   if (strcmp(type, "float64") == 0 || strcmp(type, "float32") == 0) {
-    double d;
-    if (!in->is_float && insn->is_unsigned) {
-      d = (double)(unsigned long long)in->i;
-    } else {
-      d = ii_as_float(in);
-    }
-    *out = ii_float_value(strcmp(type, "float32") == 0 ? (double)(float)d : d);
+    double value = ii_cast_source_as_double(insn, in);
+    *out = ii_float_value(strcmp(type, "float32") == 0 ? (double)(float)value
+                                                       : value);
     return 1;
   }
   if (strcmp(type, "float16") == 0 || strcmp(type, "bfloat16") == 0) {
-    double d;
-    float f;
-    uint32_t b;
-    uint16_t h;
-    if (!in->is_float && insn->is_unsigned) {
-      d = (double)(unsigned long long)in->i;
-    } else {
-      d = ii_as_float(in);
-    }
-    f = (float)d;
-    memcpy(&b, &f, (size_t)4);
-    if (strcmp(type, "float16") == 0) {
-      h = mettle_f32bits_to_f16bits(b);
-      *out = ii_float_value((double)mettle_f16bits_to_f32(h));
-    } else {
-      h = mettle_f32bits_to_bf16bits(b);
-      *out = ii_float_value((double)mettle_bf16bits_to_f32(h));
-    }
-    return 1;
+    return ii_cast_to_half(type, ii_cast_source_as_double(insn, in), out);
   }
-  int size = 0, target_unsigned = 0;
   if (!ii_integer_cast_width(type, &size, &target_unsigned)) {
+    int resolved;
     if (strcmp(type, "bool") == 0) {
       *out = ii_int_value(in->is_float ? in->f != 0.0 : in->i != 0);
       return 1;
     }
-    if (insn->value_type && insn->value_type->kind == MTLC_TYPE_ENUM) {
-      size = (insn->value_type->size == 1 || insn->value_type->size == 2 ||
-              insn->value_type->size == 8)
-                 ? (int)insn->value_type->size
-                 : 4;
-    } else if (insn->value_type &&
-               (insn->value_type->kind == MTLC_TYPE_POINTER ||
-                insn->value_type->kind == MTLC_TYPE_FUNCTION_POINTER ||
-                insn->value_type->kind == MTLC_TYPE_STRING)) {
-      *out = ii_int_value(ii_as_int(in));
-      return 1;
-    } else if (ii_mtlc_integer_width(insn->value_type, &size,
-                                     &target_unsigned)) {
-      /* a declared type over an integer; the base carries the value */
-    } else if (insn->value_type &&
-               (insn->value_type->kind == MTLC_TYPE_FLOAT64 ||
-                insn->value_type->kind == MTLC_TYPE_FLOAT32)) {
-      double d = (!in->is_float && insn->is_unsigned)
-                     ? (double)(unsigned long long)in->i
-                     : ii_as_float(in);
-      *out = ii_float_value(insn->value_type->kind == MTLC_TYPE_FLOAT32
-                                ? (double)(float)d
-                                : d);
-      return 1;
-    } else if (insn->value_type && insn->value_type->kind == MTLC_TYPE_BOOL) {
-      *out = ii_int_value(in->is_float ? in->f != 0.0 : in->i != 0);
-      return 1;
-    } else {
-      ii_fail(machine, IR_INTERP_UNSUPPORTED, "cast target type");
-      return 0;
+    resolved = ii_cast_declared_target(machine, insn, in, out, &size,
+                                       &target_unsigned);
+    if (resolved != 1) {
+      return resolved == 2;
     }
   }
-
-  long long v;
-  if (in->is_float) {
-    /* Float -> int: truncate toward zero; x86 cvtt sentinel on overflow/NaN.
-     * The machine always truncates at 64 bits and narrows afterwards, so only
-     * the 64-bit range has a sentinel. Checking a 4-byte target against the
-     * int32 range instead answered 0x80000000 for `(uint32)4e9`, where the
-     * hardware gives 4000000000. */
-    double d = in->f;
-    if (size == 8 && target_unsigned) {
-      /* A uint64 target reaches 2^64, and the backend biases the value down
-       * rather than letting the signed truncation answer its sentinel. */
-      if (!(d >= 0.0 && d < 18446744073709551616.0)) {
-        v = LLONG_MIN;
-      } else {
-        v = (long long)(unsigned long long)d;
-      }
-    } else if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0)) {
-      v = LLONG_MIN;
-    } else {
-      v = (long long)d;
-    }
-  } else {
-    v = in->i;
-  }
-  if (size < 8) {
-    int shift = 64 - size * 8;
-    if (target_unsigned) {
-      v = (long long)(((unsigned long long)v << shift) >> shift);
-    } else {
-      v = (v << shift) >> shift;
-    }
-  }
-  *out = ii_int_value(v);
+  *out = ii_int_value(ii_cast_to_integer(in, size, target_unsigned));
   return 1;
 }
 
@@ -2532,18 +2539,11 @@ static int ii_effects_call(IRInterpMachine *machine, const char *name,
   return 1;
 }
 
-static int ii_extern_call(IRInterpMachine *machine, const char *name,
-                          const IRInterpValue *args, size_t arg_count,
-                          IRInterpValue *result) {
-  *result = ii_int_value(0);
+#define II_EXTERN_UNHANDLED (-2)
 
-  {
-    const IRModuleSymbol *sym = ii_symbol(machine, name);
-    if (sym && sym->link_name && sym->link_name[0]) {
-      name = sym->link_name;
-    }
-  }
-
+static int ii_extern_allocate(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   if ((strcmp(name, "malloc") == 0 && arg_count == 1) ||
       (strcmp(name, "calloc") == 0 && arg_count == 2)) {
     long long size = ii_as_int(&args[0]);
@@ -2614,6 +2614,12 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     }
   }
 
+  return II_EXTERN_UNHANDLED;
+}
+
+static int ii_extern_stream(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   if (strcmp(name, "fwrite") == 0 || strcmp(name, "write") == 0 ||
       strcmp(name, "putchar") == 0 || strcmp(name, "fputc") == 0 ||
       strcmp(name, "putc") == 0 || strcmp(name, "puts") == 0 ||
@@ -2655,6 +2661,12 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     return 1;
   }
 
+  return II_EXTERN_UNHANDLED;
+}
+
+static int ii_extern_swap(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   if (arg_count >= 2 && strcmp(name, "mettle_swap_stage") == 0) {
     unsigned long long slot = (unsigned long long)ii_as_int(&args[0]);
     unsigned long long replacement = (unsigned long long)ii_as_int(&args[1]);
@@ -2704,6 +2716,12 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     return 1;
   }
 
+  return II_EXTERN_UNHANDLED;
+}
+
+static int ii_extern_socket(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   /* A machine with sockets and no peers, which is what the compile host is
      from the program's point of view. Creating and closing one succeeds;
      anything needing a peer fails and reports why. No operating system is
@@ -2746,6 +2764,12 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     return 1;
   }
 
+  return II_EXTERN_UNHANDLED;
+}
+
+static int ii_extern_thread(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   if (arg_count >= 2 && (strcmp(name, "posix_cas_i32") == 0 ||
                          strcmp(name, "posix_atomic_exchange_i32") == 0 ||
                          strcmp(name, "posix_atomic_add_i32") == 0)) {
@@ -2813,6 +2837,12 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     return 1;
   }
 
+  return II_EXTERN_UNHANDLED;
+}
+
+static int ii_extern_process(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   if (arg_count >= 1 && (strcmp(name, "CreateMutexA") == 0 ||
                          strcmp(name, "mettle_mutex_create") == 0)) {
     machine->next_thread_handle++;
@@ -2854,6 +2884,12 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     return 1;
   }
 
+  return II_EXTERN_UNHANDLED;
+}
+
+static int ii_extern_handle(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   if (strcmp(name, "GetCurrentThreadId") == 0 ||
       strcmp(name, "mettle_thread_current_id") == 0 ||
       strcmp(name, "pthread_self") == 0) {
@@ -2888,6 +2924,14 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     return 1;
   }
 
+  return II_EXTERN_UNHANDLED;
+}
+
+
+
+static int ii_extern_memory(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   if ((strcmp(name, "mmap") == 0 && arg_count >= 2) ||
       (strcmp(name, "VirtualAlloc") == 0 && arg_count >= 2)) {
     long long size = ii_as_int(&args[1]);
@@ -2962,6 +3006,12 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     *result = ii_int_value((long long)addr);
     return 1;
   }
+  return II_EXTERN_UNHANDLED;
+}
+
+static int ii_extern_block(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   if ((strcmp(name, "memcpy") == 0 || strcmp(name, "memmove") == 0) &&
       arg_count == 3) {
     unsigned long long dst = (unsigned long long)ii_as_int(&args[0]);
@@ -3005,6 +3055,13 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     return 1;
   }
 
+  return II_EXTERN_UNHANDLED;
+}
+
+
+static int ii_extern_byte_order(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   if (arg_count == 1 && (strcmp(name, "htons") == 0 ||
                          strcmp(name, "ntohs") == 0 ||
                          strcmp(name, "htonl") == 0 ||
@@ -3068,6 +3125,12 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     }
   }
 
+  return II_EXTERN_UNHANDLED;
+}
+
+static int ii_extern_string(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   if (strcmp(name, "strlen") == 0 && arg_count == 1) {
     unsigned long long addr = (unsigned long long)ii_as_int(&args[0]);
     long long offset = 0;
@@ -3116,6 +3179,12 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     *result = ii_int_value(r);
     return 1;
   }
+  return II_EXTERN_UNHANDLED;
+}
+
+static int ii_extern_compare(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   if ((strcmp(name, "strcpy") == 0 && arg_count == 2) ||
       (strcmp(name, "strncpy") == 0 && arg_count == 3) ||
       (strcmp(name, "strcat") == 0 && arg_count == 2)) {
@@ -3160,6 +3229,13 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     *result = ii_int_value((long long)dst_addr);
     return 1;
   }
+  return II_EXTERN_UNHANDLED;
+}
+
+
+static int ii_extern_scan(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   if ((strcmp(name, "strchr") == 0 || strcmp(name, "memchr") == 0) &&
       (arg_count == 2 || arg_count == 3)) {
     unsigned long long base = (unsigned long long)ii_as_int(&args[0]);
@@ -3203,6 +3279,13 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     }
     return 1;
   }
+  return II_EXTERN_UNHANDLED;
+}
+
+
+static int ii_extern_runtime_check(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   if (strcmp(name, "mettle_heap_zeroed") == 0 && arg_count == 1) {
     /* The lowered form of `new T`: zeroed heap storage. */
     long long size = ii_as_int(&args[0]);
@@ -3281,6 +3364,12 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     return -1;
   }
 
+  return II_EXTERN_UNHANDLED;
+}
+
+static int ii_extern_string_runtime(IRInterpMachine *machine, const char *name,
+                        const IRInterpValue *args, size_t arg_count,
+                        IRInterpValue *result) {
   /* The string runtime, modeled so interpreted string programs mean what they
    * mean natively. mettle_string_from_f64 mirrors the Mettle implementation in
    * src/runtime/string.mettle operation for operation; a change there without
@@ -3405,6 +3494,54 @@ static int ii_extern_call(IRInterpMachine *machine, const char *name,
     return 1;
   }
 
+  return II_EXTERN_UNHANDLED;
+}
+
+typedef int (*IIExternHandler)(IRInterpMachine *machine,
+                               const char *name,
+                               const IRInterpValue *args,
+                               size_t arg_count,
+                               IRInterpValue *result);
+
+static const IIExternHandler II_EXTERN_HANDLERS[] = {
+    ii_extern_allocate,
+    ii_extern_stream,
+    ii_extern_swap,
+    ii_extern_socket,
+    ii_extern_thread,
+    ii_extern_process,
+    ii_extern_handle,
+    ii_extern_memory,
+    ii_extern_block,
+    ii_extern_byte_order,
+    ii_extern_string,
+    ii_extern_compare,
+    ii_extern_scan,
+    ii_extern_runtime_check,
+    ii_extern_string_runtime,
+};
+
+static int ii_extern_call(IRInterpMachine *machine, const char *name,
+                          const IRInterpValue *args, size_t arg_count,
+                          IRInterpValue *result) {
+  *result = ii_int_value(0);
+
+  {
+    const IRModuleSymbol *sym = ii_symbol(machine, name);
+    if (sym && sym->link_name && sym->link_name[0]) {
+      name = sym->link_name;
+    }
+  }
+
+  for (size_t h = 0;
+       h < sizeof(II_EXTERN_HANDLERS) / sizeof(II_EXTERN_HANDLERS[0]);
+       h++) {
+    int handled =
+        II_EXTERN_HANDLERS[h](machine, name, args, arg_count, result);
+    if (handled != II_EXTERN_UNHANDLED) {
+      return handled;
+    }
+  }
   {
     IRInterpValue math_result = ii_float_value(0.0);
     if (ii_extern_math(name, args, arg_count, &math_result)) {
@@ -5976,18 +6113,86 @@ static int ii_declare_string_local(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
+static int ii_local_address_is_taken(const IRFunction *fn, const char *name) {
+  for (size_t i = 0; i < fn->instruction_count; i++) {
+    const IRInstruction *scan = &fn->instructions[i];
+    if (scan->op == IR_OP_ADDRESS_OF && scan->lhs.kind == IR_OPERAND_SYMBOL &&
+        scan->lhs.name && strcmp(scan->lhs.name, name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int ii_local_alias_class(const char *text, const MtlcType *vt) {
+  if (text && strncmp(text, "bfloat16", 8) == 0) {
+    return IR_ALIAS_CLASS_BF16;
+  }
+  if (text && strncmp(text, "float16", 7) == 0) {
+    return IR_ALIAS_CLASS_F16;
+  }
+  if (vt && vt->kind == MTLC_TYPE_BFLOAT16) {
+    return IR_ALIAS_CLASS_BF16;
+  }
+  if (vt && vt->kind == MTLC_TYPE_FLOAT16) {
+    return IR_ALIAS_CLASS_F16;
+  }
+  return 0;
+}
+
+static void ii_poison_local(IIVar *var, int is_float) {
+  var->value = ii_poison_value();
+  var->slotted = 0;
+  if (is_float) {
+    var->value.is_float = 1;
+    var->value.f = -6510615.5;
+    var->value.i = 0;
+  }
+}
+
+static int ii_local_scalar_shape(IRInterpMachine *machine,
+                                 const IRInstruction *insn, const MtlcType *vt,
+                                 int *elem_size, long long *count,
+                                 int *is_float, int *is_unsigned) {
+  if (ii_parse_local_type(insn->text, elem_size, count, is_float,
+                          is_unsigned)) {
+    return 1;
+  }
+  if (vt && ii_scalar_from_mtlc(vt, elem_size, is_float, is_unsigned)) {
+    return 1;
+  }
+  if (!vt || !(vt->kind == MTLC_TYPE_STRUCT || vt->kind == MTLC_TYPE_ARRAY ||
+               vt->kind == MTLC_TYPE_TAGGED_ENUM) ||
+      vt->size == 0) {
+    char what[96];
+    snprintf(what, sizeof(what), "local type '%s'",
+             insn->text ? insn->text : "?");
+    ii_fail(machine, IR_INTERP_UNSUPPORTED, what);
+    return -1;
+  }
+  return 0;
+}
+
 static int ii_op_declare_local(IRInterpMachine *machine, IIFrame *frame,
                                IRFunction *fn, const IRInstruction *insn) {
+  const MtlcType *vt = NULL;
+  IIVar *var = NULL;
+  int elem_size = 8;
+  int is_float = 0;
+  int is_unsigned = 0;
+  long long count = 1;
+  int shape;
+
   if (insn->dest.kind != IR_OPERAND_SYMBOL || !insn->dest.name) {
     ii_fail(machine, IR_INTERP_UNSUPPORTED, "local declaration form");
     return 0;
   }
-  IIVar *var = ii_env_upsert(&frame->env, insn->dest.name);
+  var = ii_env_upsert(&frame->env, insn->dest.name);
   if (!var) {
     ii_fail(machine, IR_INTERP_TRAP, "out of memory");
     return 0;
   }
-  const MtlcType *vt = insn->value_type;
+  vt = insn->value_type;
   if (!vt && insn->text && machine->program) {
     vt = ir_program_lookup_type(machine->program, insn->text);
   }
@@ -5995,75 +6200,26 @@ static int ii_op_declare_local(IRInterpMachine *machine, IIFrame *frame,
       (vt && vt->kind == MTLC_TYPE_STRING)) {
     return ii_declare_string_local(machine, frame, var);
   }
-  int elem_size = 8, is_float = 0, is_unsigned = 0;
-  long long count = 1;
-  int parsed = ii_parse_local_type(insn->text, &elem_size, &count,
-                                   &is_float, &is_unsigned);
-  var->is_cstring = (insn->text && (strcmp(insn->text, "cstring") == 0 ||
-                                    strcmp(insn->text, "rawptr") == 0))
-                        ? 1
-                        : 0;
-  if (!parsed && vt &&
-      ii_scalar_from_mtlc(vt, &elem_size, &is_float, &is_unsigned)) {
-    /* Enum, pointer, or closure local behind a named type. */
-    parsed = 1;
+  var->is_cstring = insn->text && (strcmp(insn->text, "cstring") == 0 ||
+                                   strcmp(insn->text, "rawptr") == 0);
+  shape = ii_local_scalar_shape(machine, insn, vt, &elem_size, &count,
+                                &is_float, &is_unsigned);
+  if (shape < 0) {
+    return 0;
   }
-  if (!parsed && vt &&
-      (vt->kind == MTLC_TYPE_STRUCT || vt->kind == MTLC_TYPE_ARRAY ||
-       vt->kind == MTLC_TYPE_TAGGED_ENUM) &&
-      vt->size > 0) {
+  if (shape == 0) {
     return ii_declare_aggregate_local(machine, frame, var,
                                       (long long)vt->size);
   }
-  if (!parsed) {
-    char what[96];
-    snprintf(what, sizeof(what), "local type '%s'",
-             insn->text ? insn->text : "?");
-    ii_fail(machine, IR_INTERP_UNSUPPORTED, what);
-    return 0;
-  }
-  /* Arrays always get storage; scalars only when their address is
-   * taken somewhere in the function (aliasing must be observable). */
-  int need_slot = count > 1;
-  if (!need_slot) {
-    for (size_t i = 0; i < fn->instruction_count; i++) {
-      const IRInstruction *scan = &fn->instructions[i];
-      if (scan->op == IR_OP_ADDRESS_OF &&
-          scan->lhs.kind == IR_OPERAND_SYMBOL && scan->lhs.name &&
-          strcmp(scan->lhs.name, insn->dest.name) == 0) {
-        need_slot = 1;
-        break;
-      }
-    }
-  }
-  if (need_slot) {
+  if (count > 1 || ii_local_address_is_taken(fn, insn->dest.name)) {
     if (!ii_give_local_storage(machine, frame, var, count, elem_size, is_float,
                                is_unsigned)) {
       return 0;
     }
-    var->slot_alias = 0;
-    if (insn->text && strncmp(insn->text, "bfloat16", 8) == 0) {
-      var->slot_alias = IR_ALIAS_CLASS_BF16;
-    } else if (insn->text && strncmp(insn->text, "float16", 7) == 0) {
-      var->slot_alias = IR_ALIAS_CLASS_F16;
-    } else if (vt && vt->kind == MTLC_TYPE_BFLOAT16) {
-      var->slot_alias = IR_ALIAS_CLASS_BF16;
-    } else if (vt && vt->kind == MTLC_TYPE_FLOAT16) {
-      var->slot_alias = IR_ALIAS_CLASS_F16;
-    }
+    var->slot_alias = ii_local_alias_class(insn->text, vt);
   } else {
-    var->value = ii_poison_value();
-    var->slotted = 0;
-    if (is_float) {
-      var->value.is_float = 1;
-      var->value.f = -6510615.5; /* deterministic float poison */
-      var->value.i = 0;
-    }
+    ii_poison_local(var, is_float);
   }
-  /* Remember the declared integer width even when the local lives in a
-   * "register" here, so a write wraps at the width the program asked for.
-   * Pointers are already 8 bytes; a float32 home rounds writes to single
-   * precision (the -4 marker). */
   var->value_size = is_float ? (elem_size == 4 ? -4 : 0) : elem_size;
   var->value_is_unsigned = is_unsigned;
   return 1;
@@ -6238,6 +6394,103 @@ static int ii_bind_parameters(IRInterpMachine *machine, IIFrame *frame,
   return 1;
 }
 
+static int ii_value_hook_reports(IROpcode op) {
+  switch (op) {
+  case IR_OP_ASSIGN:
+  case IR_OP_BINARY:
+  case IR_OP_UNARY:
+  case IR_OP_CAST:
+  case IR_OP_LOAD:
+  case IR_OP_CALL:
+  case IR_OP_ROTATE_ADD:
+  case IR_OP_NEW:
+    return 1;
+  default:
+    return 0;
+  }
+}
+
+static void ii_report_value(IRInterpMachine *machine, IIFrame *frame,
+                            const IRInstruction *insn) {
+  IRInterpValue value;
+  IIVar *var;
+
+  if (!machine->value_hook || frame->fn != machine->value_hook_fn ||
+      insn->location.line <= 0 || !insn->dest.name ||
+      (insn->dest.kind != IR_OPERAND_TEMP &&
+       insn->dest.kind != IR_OPERAND_SYMBOL) ||
+      !ii_value_hook_reports(insn->op)) {
+    return;
+  }
+  var = ii_env_find(&frame->env, insn->dest.name);
+  if (!var && insn->dest.kind == IR_OPERAND_SYMBOL) {
+    var = ii_env_find(&machine->globals, insn->dest.name);
+  }
+  if (var && ii_var_read(machine, var, &value)) {
+    machine->value_hook(machine->value_hook_ctx, insn->location.line,
+                        insn->dest.name, value, insn->expansion_note);
+  }
+}
+
+typedef struct {
+  const char *saved_fn;
+  int saved_declared;
+  int entered;
+} IIPureFrame;
+
+static IIPureFrame ii_enter_pure(IRInterpMachine *machine,
+                                 const IRFunction *fn) {
+  IIPureFrame pure;
+
+  pure.saved_fn = machine->pure_fn;
+  pure.saved_declared = machine->pure_declared;
+  pure.entered = fn->is_pure || (machine->recheck_inferred_purity &&
+                                 fn->is_readonly_inferred);
+  if (pure.entered) {
+    machine->pure_fn = fn->name;
+    machine->pure_declared = fn->is_pure;
+    machine->pure_depth++;
+  }
+  return pure;
+}
+
+static void ii_leave_pure(IRInterpMachine *machine, const IIPureFrame *pure) {
+  if (!pure->entered) {
+    return;
+  }
+  machine->pure_depth--;
+  machine->pure_fn = pure->saved_fn;
+  machine->pure_declared = pure->saved_declared;
+}
+
+static int ii_open_frame(IRInterpMachine *machine, IIFrame *frame,
+                         IRFunction *fn, const IRInterpValue *args,
+                         size_t arg_count) {
+  return ii_bind_parameters(machine, frame, fn, args, arg_count) &&
+         ii_build_label_table(machine, frame, fn) &&
+         ii_home_addressed_parameters(machine, frame, fn);
+}
+
+static void ii_close_frame(IRInterpMachine *machine, IIFrame *frame,
+                           unsigned long long returned_address) {
+  for (size_t i = 0; i < frame->owned_count; i++) {
+    size_t index = frame->owned[i];
+    IIBuffer *buf = &machine->buffers[index];
+
+    if (buf->freed) {
+      continue;
+    }
+    if (returned_address && buf->base == returned_address) {
+      buf->escaped_local = 1;
+      continue;
+    }
+    ii_reclaim_buffer(machine, index);
+  }
+  free(frame->owned);
+  free(frame->labels);
+  ii_env_free(&frame->env);
+}
+
 static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
                             const IRInterpValue *args, size_t arg_count,
                             IRInterpValue *result) {
@@ -6251,16 +6504,7 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
                     fn->location.column, (long long)machine->depth);
   }
 
-  const char *saved_pure_fn = machine->pure_fn;
-  int saved_pure_declared = machine->pure_declared;
-  int pure_frame =
-      fn->is_pure ||
-      (machine->recheck_inferred_purity && fn->is_readonly_inferred);
-  if (pure_frame) {
-    machine->pure_fn = fn->name;
-    machine->pure_declared = fn->is_pure;
-    machine->pure_depth++;
-  }
+  IIPureFrame pure = ii_enter_pure(machine, fn);
 
   /* A work item resuming after a barrier brings its frame back with it; a
      fresh call builds one. Everything below is the same loop either way. */
@@ -6278,17 +6522,9 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
 
   int ok = 0;
 
-  if (!resumed) {
-    if (!ii_bind_parameters(machine, &frame, fn, args, arg_count)) {
-      goto done;
-    }
-
-    if (!ii_build_label_table(machine, &frame, fn)) {
-      goto done;
-    }
-    if (!ii_home_addressed_parameters(machine, &frame, fn)) {
-      goto done;
-    }
+  if (!resumed &&
+      !ii_open_frame(machine, &frame, fn, args, arg_count)) {
+    goto done;
   }
 
   long long *exec_counts = ii_counts_for(machine, fn);
@@ -6616,36 +6852,7 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
       exec_counts[executed_pc]++;
     }
 
-    /* Value tracing: report the executed instruction's named result. */
-    if (machine->value_hook && frame.fn == machine->value_hook_fn &&
-        insn->location.line > 0 &&
-        (insn->dest.kind == IR_OPERAND_TEMP ||
-         insn->dest.kind == IR_OPERAND_SYMBOL) &&
-        insn->dest.name) {
-      switch (insn->op) {
-      case IR_OP_ASSIGN:
-      case IR_OP_BINARY:
-      case IR_OP_UNARY:
-      case IR_OP_CAST:
-      case IR_OP_LOAD:
-      case IR_OP_CALL:
-      case IR_OP_ROTATE_ADD:
-      case IR_OP_NEW: {
-        IIVar *var = ii_env_find(&frame.env, insn->dest.name);
-        if (!var && insn->dest.kind == IR_OPERAND_SYMBOL) {
-          var = ii_env_find(&machine->globals, insn->dest.name);
-        }
-        IRInterpValue value;
-        if (var && ii_var_read(machine, var, &value)) {
-          machine->value_hook(machine->value_hook_ctx, insn->location.line,
-                              insn->dest.name, value, insn->expansion_note);
-        }
-        break;
-      }
-      default:
-        break;
-      }
-    }
+    ii_report_value(machine, &frame, insn);
   }
 
   /* Fell off the end: void return. */
@@ -6653,11 +6860,7 @@ static int ii_exec_function(IRInterpMachine *machine, IRFunction *fn,
   ok = 1;
 
 done:
-  if (pure_frame) {
-    machine->pure_depth--;
-    machine->pure_fn = saved_pure_fn;
-    machine->pure_declared = saved_pure_declared;
-  }
+  ii_leave_pure(machine, &pure);
   /* A work item stopped at a barrier keeps everything: its locals are still
      live, and the phase after the barrier reads them. */
   if (resume && resume->suspended) {
@@ -6667,25 +6870,9 @@ done:
   /* This frame's local storage dies with it, except a buffer the function
    * returned the address of: an aggregate return travels that way and stays
    * alive until the caller's aggregate assignment consumes it. */
-  {
-    unsigned long long kept =
-        (ok && !result->is_float) ? (unsigned long long)result->i : 0;
-    for (size_t i = 0; i < frame.owned_count; i++) {
-      size_t index = frame.owned[i];
-      IIBuffer *buf = &machine->buffers[index];
-      if (buf->freed) {
-        continue;
-      }
-      if (kept && buf->base == kept) {
-        buf->escaped_local = 1;
-        continue;
-      }
-      ii_reclaim_buffer(machine, index);
-    }
-  }
-  free(frame.owned);
-  free(frame.labels);
-  ii_env_free(&frame.env);
+  ii_close_frame(machine, &frame,
+                 (ok && !result->is_float) ? (unsigned long long)result->i
+                                           : 0);
   machine->depth--;
   return ok;
 }
