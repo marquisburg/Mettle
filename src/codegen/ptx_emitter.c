@@ -6832,6 +6832,1725 @@ static int ptx_type_is_void(const MtlcType *type, const char *fallback_name) {
          (!type && fallback_name && strcmp(fallback_name, "void") == 0);
 }
 
+static void ptx_emit_device(IRProgram *program, IRFunction *func, PtxFn *fn,
+                        const IRInstruction *in, size_t *ii, char **error,
+                        int target_arch, int returns_void, const char *ename,
+                        int *handled) {
+  switch (in->op) {
+  case IR_OP_NOP:
+  case IR_OP_ADDRESS_SPACE_ALLOC:
+  case IR_OP_DECLARE_LOCAL: {
+    if (in->op == IR_OP_DECLARE_LOCAL && in->dest.name) {
+      /* pre-allocate a register for the local so refs resolve; aggregates or
+       * address-taken locals are unsupported and will surface as errors. */
+      PtxVal d = in->value_type ? descriptor_from_type(in->value_type)
+                                : descriptor_from_typename(in->text);
+      if (d.cls == PC_NONE) {
+        fn_error(fn, "PTX: local '%s' has unsupported type '%s'",
+                 in->dest.name, in->text ? in->text : "?");
+        break;
+      }
+      if (!find_binding(fn, in->dest.name)) {
+        d.idx = new_reg(fn, d.cls);
+        bind_value(fn, in->dest.name, d);
+      }
+    }
+    break;
+  }
+  case IR_OP_BARRIER:
+    if (!ptx_workgroup_barrier_contract(in)) {
+      fn_error(fn, "PTX: invalid workgroup barrier memory contract");
+    } else {
+      /* bar.sync is a full CTA execution/memory barrier. It safely
+       * strengthens acquire/release-only contracts and covers both shared
+       * and global accesses made by participating work-items. */
+      sb_puts(&fn->body, "\tbar.sync 0;\n");
+    }
+    break;
+  case IR_OP_ASYNC_COPY:
+    ptx_emit_async_copy(fn, in);
+    break;
+  case IR_OP_ASYNC_COMMIT:
+    ptx_emit_async_commit(fn);
+    break;
+  case IR_OP_ASYNC_WAIT:
+    ptx_emit_async_wait(fn, in);
+    break;
+  case IR_OP_TENSOR_TRANSFER:
+    ptx_emit_tensor_transfer(fn, in);
+    break;
+  case IR_OP_TENSOR_MMA: {
+    size_t epilogue_index = 0;
+    const IRInstruction *epilogue =
+        ptx_following_tensor_epilogue(func, (*ii), &epilogue_index);
+    if (epilogue &&
+        ptx_try_emit_tensor_mma_resident_epilogue(fn, in, epilogue)) {
+      (*ii) = epilogue_index;
+    } else {
+      ptx_emit_tensor_mma(fn, in);
+    }
+    break;
+  }
+  case IR_OP_TENSOR_MATMUL:
+    ptx_emit_tensor_matmul(fn, in);
+    break;
+  case IR_OP_TENSOR_EPILOGUE:
+    if (!ptx_tensor_epilogue_was_consumed(fn, in))
+      ptx_emit_tensor_epilogue(fn, in);
+    break;
+  case IR_OP_TENSOR_COMMIT: {
+    size_t epilogue_index = 0;
+    const IRInstruction *epilogue =
+        ptx_following_tensor_epilogue(func, (*ii), &epilogue_index);
+    int deferred_loop_exit = 0;
+    if (!epilogue) {
+      epilogue =
+          ptx_loop_exit_tensor_epilogue(func, (*ii), &epilogue_index);
+      deferred_loop_exit = epilogue != NULL;
+    }
+    if (epilogue &&
+        ptx_try_emit_tensor_commit_resident_epilogue(fn, in, epilogue)) {
+      if (deferred_loop_exit) {
+        PtxTensorResidency *group =
+            ptx_tensor_residency_find(fn, in->tensor_residency_id);
+        if (!group) {
+          fn_error(fn,
+                   "PTX resident loop epilogue handoff lost residency group");
+        } else {
+          group->consumed_epilogue = epilogue;
+        }
+      } else {
+        (*ii) = epilogue_index;
+      }
+    } else {
+      ptx_emit_tensor_residency_commit(fn, in);
+    }
+    break;
+  }
+  default:
+    *handled = 0;
+    break;
+  }
+}
+
+static void ptx_emit_control(IRProgram *program, IRFunction *func, PtxFn *fn,
+                        const IRInstruction *in, size_t *ii, char **error,
+                        int target_arch, int returns_void, const char *ename,
+                        int *handled) {
+  switch (in->op) {
+  case IR_OP_LABEL: {
+    char lbl[256];
+    sanitize_into(in->text ? in->text : "L", lbl, sizeof(lbl));
+    sb_printf(&fn->body, "%s:\n", lbl);
+    break;
+  }
+  case IR_OP_JUMP: {
+    char lbl[256];
+    sanitize_into(in->text ? in->text : "L", lbl, sizeof(lbl));
+    sb_printf(&fn->body, "\tbra %s;\n", lbl);
+    break;
+  }
+  case IR_OP_BRANCH_ZERO: {
+    char lbl[256], r[24];
+    sanitize_into(in->text ? in->text : "L", lbl, sizeof(lbl));
+    PtxVal cv = operand_desc(fn, &in->lhs);
+    int p = new_reg(fn, PC_PRED);
+    char pn[24];
+    reg_name(PC_PRED, p, pn);
+    if (cv.cls == PC_F32 || cv.cls == PC_F64) {
+      use_as(fn, &in->lhs, cv.cls, r);
+      /* Zero immediate as a hex bit-pattern: f32 needs 0f + 8 digits, f64
+       * needs 0d + 16. (Hand-written literals are an easy off-by-one;
+       * formatting from the bits is not.) */
+      if (cv.cls == PC_F32) {
+        sb_printf(&fn->body, "\tsetp.eq.f32 %s, %s, 0f%08X;\n", pn, r, 0u);
+      } else {
+        sb_printf(&fn->body, "\tsetp.eq.f64 %s, %s, 0d%016llX;\n", pn, r, 0ull);
+      }
+    } else {
+      PtxClass c = (cv.cls == PC_B64) ? PC_B64 : PC_B32;
+      use_as(fn, &in->lhs, c, r);
+      sb_printf(&fn->body, "\tsetp.eq.%s %s, %s, 0;\n",
+                c == PC_B64 ? "s64" : "s32", pn, r);
+    }
+    sb_printf(&fn->body, "\t@%s bra%s %s;\n", pn,
+              (in->uniform_branch && target_arch >= 75) ? ".uni" : "",
+              lbl);
+    break;
+  }
+  case IR_OP_BRANCH_EQ: {
+    char lbl[256], a[24], bb[24];
+    sanitize_into(in->text ? in->text : "L", lbl, sizeof(lbl));
+    PtxVal la = operand_desc(fn, &in->lhs);
+    PtxVal lb = operand_desc(fn, &in->rhs);
+    PtxClass c = PC_B32;
+    if (la.cls == PC_B64 || lb.cls == PC_B64) {
+      c = PC_B64;
+    }
+    if (la.cls == PC_F32 || lb.cls == PC_F32) {
+      c = PC_F32;
+    }
+    if (la.cls == PC_F64 || lb.cls == PC_F64) {
+      c = PC_F64;
+    }
+    use_as(fn, &in->lhs, c, a);
+    use_as(fn, &in->rhs, c, bb);
+    int p = new_reg(fn, PC_PRED);
+    char pn[24];
+    reg_name(PC_PRED, p, pn);
+    sb_printf(&fn->body, "\tsetp.eq.%s %s, %s, %s;\n",
+              type_suffix_for_class(c, 0), pn, a, bb);
+    sb_printf(&fn->body, "\t@%s bra%s %s;\n", pn,
+              (in->uniform_branch && target_arch >= 75) ? ".uni" : "",
+              lbl);
+    break;
+  }
+  default:
+    *handled = 0;
+    break;
+  }
+}
+
+static void ptx_emit_assign(IRProgram *program, IRFunction *func, PtxFn *fn,
+                        const IRInstruction *in, size_t *ii, char **error,
+                        int target_arch, int returns_void, const char *ename,
+                        int *handled) {
+  switch (in->op) {
+  case IR_OP_ASSIGN: {
+    if (!in->dest.name) {
+      fn_error(fn, "PTX: assign with no dest");
+      break;
+    }
+    /* destination class: reuse if symbol already bound, else infer from src */
+    PtxBinding *db = find_binding(fn, in->dest.name);
+    PtxBinding *agg = named_binding(fn, &in->lhs);
+    if (agg && agg->val.mem_aggregate) {
+      /* A whole-record assignment. An unbound destination is a temp standing
+       * in for the same record, so it aliases the storage; a destination with
+       * storage of its own receives a copy, which is what by-value means. */
+      if (!db) {
+        bind_value(fn, in->dest.name, agg->val);
+        break;
+      }
+      if (!db->val.mem_aggregate) {
+        fn_error(fn, "PTX: cannot assign a record to the scalar '%s'",
+                 in->dest.name);
+        break;
+      }
+      size_t size = db->val.mem_size < agg->val.mem_size ? db->val.mem_size
+                                                         : agg->val.mem_size;
+      char dst[24], src[24];
+      reg_name(PC_B64, db->val.mem_addr, dst);
+      reg_name(PC_B64, agg->val.mem_addr, src);
+      ptx_block_copy(fn, ".local", dst, ".local", src, size,
+                     db->val.mem_align);
+      break;
+    }
+    PtxClass dc;
+    if (db) {
+      dc = db->val.cls;
+    } else {
+      PtxVal sv = operand_desc(fn, &in->lhs);
+      dc = (sv.cls == PC_NONE || sv.cls == PC_PRED) ? PC_B32 : sv.cls;
+    }
+    char src[24];
+    use_as(fn, &in->lhs, dc, src);
+    PtxVal dv;
+    if (db && db->val.mem_local) {
+      /* The home is memory, so the value lands in a scratch register and
+       * bind_value writes it through. Reusing the binding here would carry
+       * mem_local into the store-back check and drop the write. */
+      dv = (PtxVal){0};
+      dv.cls = dc;
+      dv.is_unsigned = db->val.is_unsigned;
+      dv.idx = new_reg(fn, dc);
+    } else if (db) {
+      dv = db->val;
+    } else {
+      dv = operand_desc(fn, &in->lhs);
+      dv.cls = dc;
+      dv.idx = new_reg(fn, dc);
+    }
+    char dn[24];
+    reg_name(dv.cls, dv.idx, dn);
+    if (strcmp(dn, src) != 0) {
+      const char *mt = (dc == PC_F32)   ? "f32"
+                       : (dc == PC_F64) ? "f64"
+                       : (dc == PC_B64) ? "u64"
+                                        : "u32";
+      sb_printf(&fn->body, "\tmov.%s %s, %s;\n", mt, dn, src);
+    }
+    bind_value(fn, in->dest.name, dv);
+    break;
+  }
+  default:
+    *handled = 0;
+    break;
+  }
+}
+
+static void ptx_emit_memory(IRProgram *program, IRFunction *func, PtxFn *fn,
+                        const IRInstruction *in, size_t *ii, char **error,
+                        int target_arch, int returns_void, const char *ename,
+                        int *handled) {
+  switch (in->op) {
+  case IR_OP_LOAD: {
+    /* A load from a string literal is the frontend taking a format string's
+     * character pointer. PTX has no string value; the print intrinsic reads
+     * the literal directly, so this produces nothing. A temp bound this way
+     * and used for anything else stays undefined, which is the right
+     * diagnostic: kernels have no strings beyond print formats. */
+    if (in->lhs.kind == IR_OPERAND_STRING) {
+      break;
+    }
+    /* dest <- *lhs [rhs size] */
+    PtxVal addr = operand_desc(fn, &in->lhs);
+    MtlcTypeKind elem = addr.is_ptr ? addr.elem : MTLC_TYPE_VOID;
+    if (elem == MTLC_TYPE_VOID) {
+      long long sz = (in->rhs.kind == IR_OPERAND_INT) ? in->rhs.int_value : 4;
+      if (in->is_float) {
+        if (sz == 2 && in->alias_class == IR_ALIAS_CLASS_F16) {
+          elem = MTLC_TYPE_FLOAT16;
+        } else if (sz == 2 && in->alias_class == IR_ALIAS_CLASS_BF16) {
+          elem = MTLC_TYPE_BFLOAT16;
+        } else {
+          elem = (sz == 4) ? MTLC_TYPE_FLOAT32 : MTLC_TYPE_FLOAT64;
+        }
+      } else {
+        elem = (sz == 8) ? MTLC_TYPE_INT64
+               : (sz == 2) ? MTLC_TYPE_INT16
+               : (sz == 1) ? MTLC_TYPE_UINT8
+                           : MTLC_TYPE_INT32;
+      }
+    }
+    char addrreg[24];
+    use_as(fn, &in->lhs, PC_B64, addrreg);
+    int u = 0;
+    PtxClass dc = elem_class(elem, &u);
+    PtxVal dv = {0};
+    dv.cls = dc;
+    dv.is_unsigned = u;
+    dv = destination_value(fn, &in->dest, dv);
+    char dn[24];
+    reg_name(dc, dv.idx, dn);
+    const char *space = ptx_load_space(addr.address_space);
+    if (addr.address_space == MTLC_ADDRESS_SPACE_DEFAULT ||
+        addr.address_space == MTLC_ADDRESS_SPACE_GENERIC) {
+      g_ptx_generic_accesses++;
+    } else {
+      g_ptx_spaced_accesses++;
+    }
+    if (!space) {
+      fn_error(fn, "PTX: invalid load address space %d",
+               (int)addr.address_space);
+    } else if (elem == MTLC_TYPE_FLOAT16 || elem == MTLC_TYPE_BFLOAT16) {
+      char tmp[24];
+      reg_name(PC_B16, new_reg(fn, PC_B16), tmp);
+      sb_printf(&fn->body, "\tld%s.b16 %s, [%s];\n", space, tmp, addrreg);
+      sb_printf(&fn->body, "\tcvt.f32.%s %s, %s;\n",
+                elem == MTLC_TYPE_FLOAT16 ? "f16" : "bf16", dn, tmp);
+    } else {
+      sb_printf(&fn->body, "\tld%s.%s %s, [%s];\n", space,
+                mem_type_suffix(elem), dn, addrreg);
+    }
+    if (in->dest.name) {
+      bind_value(fn, in->dest.name, dv);
+    }
+    break;
+  }
+  case IR_OP_STORE: {
+    /* *dest <- lhs [rhs size] */
+    PtxVal addr = operand_desc(fn, &in->dest);
+    if (in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value > 8) {
+      long long total = in->rhs.int_value;
+      long long offset = 0;
+      PtxVal source = operand_desc(fn, &in->lhs);
+      const char *dst_space = ptx_memory_space(addr.address_space);
+      const char *src_space =
+          source.is_ptr ? ptx_load_space(source.address_space) : "";
+      char dstreg[24], srcreg[24];
+      use_as(fn, &in->dest, PC_B64, dstreg);
+      use_as(fn, &in->lhs, PC_B64, srcreg);
+      if (!src_space) {
+        src_space = "";
+      }
+      if (addr.address_space == MTLC_ADDRESS_SPACE_CONSTANT) {
+        fn_error(fn, "PTX: store to constant address space");
+        break;
+      }
+      if (!dst_space) {
+        fn_error(fn, "PTX: invalid store address space %d",
+                 (int)addr.address_space);
+        break;
+      }
+      while (offset < total) {
+        long long width = total - offset >= 8 ? 8
+                          : total - offset >= 4 ? 4
+                          : total - offset >= 2 ? 2 : 1;
+        const char *suffix = width == 8 ? "b64"
+                             : width == 4 ? "b32"
+                             : width == 2 ? "u16" : "u8";
+        PtxClass cls = width == 8 ? PC_B64 : PC_B32;
+        char tmp[24];
+        reg_name(cls, new_reg(fn, cls), tmp);
+        sb_printf(&fn->body, "\tld%s.%s %s, [%s+%lld];\n", src_space,
+                  suffix, tmp, srcreg, offset);
+        sb_printf(&fn->body, "\tst%s.%s [%s+%lld], %s;\n", dst_space,
+                  suffix, dstreg, offset, tmp);
+        offset += width;
+      }
+      break;
+    }
+    MtlcTypeKind elem = addr.is_ptr ? addr.elem : MTLC_TYPE_VOID;
+    if (elem == MTLC_TYPE_VOID) {
+      long long sz = (in->rhs.kind == IR_OPERAND_INT) ? in->rhs.int_value : 4;
+      if (in->is_float) {
+        if (sz == 2 && in->alias_class == IR_ALIAS_CLASS_F16) {
+          elem = MTLC_TYPE_FLOAT16;
+        } else if (sz == 2 && in->alias_class == IR_ALIAS_CLASS_BF16) {
+          elem = MTLC_TYPE_BFLOAT16;
+        } else {
+          elem = (sz == 4) ? MTLC_TYPE_FLOAT32 : MTLC_TYPE_FLOAT64;
+        }
+      } else {
+        elem = (sz == 8) ? MTLC_TYPE_INT64
+               : (sz == 2) ? MTLC_TYPE_INT16
+               : (sz == 1) ? MTLC_TYPE_UINT8
+                           : MTLC_TYPE_INT32;
+      }
+    }
+    int u = 0;
+    PtxClass vc = elem_class(elem, &u);
+    char addrreg[24], valreg[24];
+    use_as(fn, &in->dest, PC_B64, addrreg);
+    use_as(fn, &in->lhs, vc, valreg);
+    if (vc == PC_B64) {
+      ptx_generic_address(fn, &in->lhs, valreg);
+    }
+    const char *space = ptx_memory_space(addr.address_space);
+    if (addr.address_space == MTLC_ADDRESS_SPACE_DEFAULT ||
+        addr.address_space == MTLC_ADDRESS_SPACE_GENERIC) {
+      g_ptx_generic_accesses++;
+    } else {
+      g_ptx_spaced_accesses++;
+    }
+    if (addr.address_space == MTLC_ADDRESS_SPACE_CONSTANT) {
+      fn_error(fn, "PTX: store to constant address space");
+    } else if (!space) {
+      fn_error(fn, "PTX: invalid store address space %d",
+               (int)addr.address_space);
+    } else if (elem == MTLC_TYPE_FLOAT16 || elem == MTLC_TYPE_BFLOAT16) {
+      char tmp[24];
+      reg_name(PC_B16, new_reg(fn, PC_B16), tmp);
+      sb_printf(&fn->body, "\tcvt.rn.%s.f32 %s, %s;\n",
+                elem == MTLC_TYPE_FLOAT16 ? "f16" : "bf16", tmp, valreg);
+      sb_printf(&fn->body, "\tst%s.b16 [%s], %s;\n", space, addrreg, tmp);
+    } else {
+      sb_printf(&fn->body, "\tst%s.%s [%s], %s;\n", space,
+                mem_type_suffix(elem), addrreg, valreg);
+    }
+    break;
+  }
+  default:
+    *handled = 0;
+    break;
+  }
+}
+
+static void ptx_emit_arith(IRProgram *program, IRFunction *func, PtxFn *fn,
+                        const IRInstruction *in, size_t *ii, char **error,
+                        int target_arch, int returns_void, const char *ename,
+                        int *handled) {
+  switch (in->op) {
+  case IR_OP_BINARY:
+    emit_binary(fn, in);
+    break;
+  case IR_OP_UNARY: {
+    const char *t = in->text ? in->text : "";
+    PtxVal sv = operand_desc(fn, &in->lhs);
+    PtxClass c = in->is_float ? (in->float_bits == 32 ? PC_F32 : PC_F64)
+                              : (sv.cls == PC_B64 ? PC_B64 : PC_B32);
+    char s[24];
+    use_as(fn, &in->lhs, c, s);
+    PtxVal dv = {0};
+    dv.cls = c;
+    dv = destination_value(fn, &in->dest, dv);
+    char dn[24];
+    reg_name(c, dv.idx, dn);
+    if (!strcmp(t, "-")) {
+      sb_printf(&fn->body, "\tneg.%s %s, %s;\n", type_suffix_for_class(c, 0),
+                dn, s);
+    } else if (!strcmp(t, "~")) {
+      sb_printf(&fn->body, "\tnot.%s %s, %s;\n", c == PC_B64 ? "b64" : "b32",
+                dn, s);
+    } else if (!strcmp(t, "!")) {
+      int p = new_reg(fn, PC_PRED);
+      char pn[24];
+      reg_name(PC_PRED, p, pn);
+      sb_printf(&fn->body, "\tsetp.eq.%s %s, %s, 0;\n",
+                c == PC_B64 ? "s64" : "s32", pn, s);
+      sb_printf(&fn->body, "\tselp.u32 %s, 1, 0, %s;\n", dn, pn);
+    } else {
+      fn_error(fn, "PTX: unsupported unary op '%s'", t);
+    }
+    if (in->dest.name) {
+      bind_value(fn, in->dest.name, dv);
+    }
+    break;
+  }
+  case IR_OP_CAST: {
+    /* dest = (text) lhs */
+    PtxVal target = in->value_type ? descriptor_from_type(in->value_type)
+                                   : descriptor_from_typename(in->text);
+    MtlcTypeKind target_elem = target.is_ptr ? MTLC_TYPE_VOID : target.elem;
+    if (!target.is_ptr &&
+        (target_elem == MTLC_TYPE_FLOAT16 || target_elem == MTLC_TYPE_BFLOAT16) &&
+        in->is_float) {
+      char s[24];
+      PtxClass src_cls = (in->float_bits == 64) ? PC_F64 : PC_F32;
+      use_as(fn, &in->lhs, src_cls, s);
+      target.cls = PC_F32;
+      target = destination_value(fn, &in->dest, target);
+      char dn[24];
+      reg_name(target.cls, target.idx, dn);
+      char tmp[24];
+      reg_name(PC_B16, new_reg(fn, PC_B16), tmp);
+      const char *to = (target_elem == MTLC_TYPE_FLOAT16) ? "f16" : "bf16";
+      char f32tmp[24];
+      if (src_cls == PC_F64) {
+        reg_name(PC_F32, new_reg(fn, PC_F32), f32tmp);
+        sb_printf(&fn->body, "\tcvt.rn.f32.f64 %s, %s;\n", f32tmp, s);
+        sb_printf(&fn->body, "\tcvt.rn.%s.f32 %s, %s;\n", to, tmp, f32tmp);
+      } else {
+        sb_printf(&fn->body, "\tcvt.rn.%s.f32 %s, %s;\n", to, tmp, s);
+      }
+      sb_printf(&fn->body, "\tcvt.f32.%s %s, %s;\n", to, dn, tmp);
+      if (in->dest.name) {
+        bind_value(fn, in->dest.name, target);
+      }
+      break;
+    }
+    char s[24];
+    use_as(fn, &in->lhs, target.cls, s);
+    target = destination_value(fn, &in->dest, target);
+    char dn[24];
+    reg_name(target.cls, target.idx, dn);
+    if (strcmp(dn, s) != 0) {
+      const char *mt = (target.cls == PC_F32)   ? "f32"
+                       : (target.cls == PC_F64) ? "f64"
+                       : (target.cls == PC_B64) ? "u64"
+                                                : "u32";
+      sb_printf(&fn->body, "\tmov.%s %s, %s;\n", mt, dn, s);
+    }
+    ptx_emit_uniform_check(fn, in, target, target_arch);
+    if (in->dest.name) {
+      bind_value(fn, in->dest.name, target);
+    }
+    break;
+  }
+  default:
+    *handled = 0;
+    break;
+  }
+}
+
+static void ptx_emit_general_call(IRProgram *program, IRFunction *func,
+                                  PtxFn *fn, const IRInstruction *in,
+                                  char **error, const char *ename) {
+  const char *callee = in->text;
+  MtlcIntrinsic intrinsic = in->intrinsic;
+
+  (void)program;
+  (void)func;
+  (void)callee;
+    if (intrinsic == MTLC_INTRINSIC_NONE) {
+      IRFunction *callee_function = ptx_lookup_function(program, callee);
+      const IRModuleSymbol *callee_symbol =
+          ir_program_lookup_symbol(program, callee);
+      if (!callee_function || !callee_symbol ||
+          callee_symbol->kind != IR_MODSYM_FUNCTION) {
+        fn_error(fn, "PTX: device call target '%s' has no definition",
+                 callee ? callee : "?");
+        return;
+      }
+      if (in->argument_count != callee_function->parameter_count ||
+          in->argument_count != callee_symbol->param_count) {
+        fn_error(fn,
+                 "PTX: device call '%s' expects %zu arguments, received %zu",
+                 callee, callee_symbol->param_count, in->argument_count);
+        return;
+      }
+
+      char callee_name[256];
+      sanitize_into(callee, callee_name, sizeof(callee_name));
+      size_t call_id = fn->call_count++;
+      char **argument_params =
+          calloc(in->argument_count ? in->argument_count : 1,
+                 sizeof(*argument_params));
+      if (!argument_params) {
+        fn_error(fn, "PTX: out of memory lowering device call '%s'", callee);
+        return;
+      }
+      for (size_t a = 0; a < in->argument_count && !fn->error; a++) {
+        const MtlcType *argument_type = callee_symbol->param_types[a];
+        char parameter[320];
+        snprintf(parameter, sizeof(parameter), "__mtlc_call_%zu_arg_%zu",
+                 call_id, a);
+        argument_params[a] = strdup(parameter);
+        if (!argument_params[a]) {
+          fn_error(fn, "PTX: out of memory lowering device call '%s'",
+                   callee);
+          break;
+        }
+        if (ptx_type_is_aggregate(argument_type)) {
+          PtxBinding *record = named_binding(fn, &in->arguments[a]);
+          if (!record || !record->val.mem_aggregate) {
+            fn_error(fn,
+                     "PTX: argument %zu of '%s' is a record with no storage",
+                     a, callee);
+            break;
+          }
+          size_t size = mtlc_type_size(argument_type);
+          size_t alignment = mtlc_type_alignment(argument_type);
+          if (!alignment) {
+            alignment = 1;
+          }
+          char source[24];
+          reg_name(PC_B64, record->val.mem_addr, source);
+          sb_printf(&fn->declarations, "\t.param .align %zu .b8 %s[%zu];\n",
+                    alignment, parameter, size);
+          ptx_block_copy(fn, ".param", parameter, ".local", source, size,
+                         alignment);
+          continue;
+        }
+        PtxVal argument_desc = descriptor_from_type(argument_type);
+        char value[24];
+        use_as(fn, &in->arguments[a], argument_desc.cls, value);
+        ptx_generic_address(fn, &in->arguments[a], value);
+        sb_printf(&fn->declarations, "\t.param .%s %s;\n",
+                  device_param_storage_type(argument_desc), parameter);
+        sb_printf(&fn->body, "\tst.param.%s [%s], %s;\n",
+                  device_param_storage_type(argument_desc), parameter, value);
+      }
+
+      const MtlcType *callee_return_type = ptx_function_return_type(
+          program, callee_function, callee_symbol);
+      int callee_returns_void = ptx_type_is_void(
+          callee_return_type, callee_function->return_type_name);
+      int result_is_record = ptx_type_is_aggregate(callee_return_type);
+      PtxVal result_desc = callee_returns_void
+                               ? (PtxVal){0}
+                               : descriptor_from_type(callee_return_type);
+      char return_parameter[320] = {0};
+      char result_storage[512] = {0};
+      if (result_is_record && !fn->error) {
+        result_desc = (PtxVal){0};
+        result_desc.cls = PC_B64;
+        result_desc.elem = MTLC_TYPE_VOID;
+        result_desc.mem_local = 1;
+        result_desc.mem_aggregate = 1;
+        result_desc.mem_size = mtlc_type_size(callee_return_type);
+        result_desc.mem_align = mtlc_type_alignment(callee_return_type);
+        if (!result_desc.mem_align) {
+          result_desc.mem_align = 1;
+        }
+        char raw[512];
+        snprintf(raw, sizeof(raw), "__mtlc_call_%zu_ret_local", call_id);
+        sanitize_into(raw, result_storage, sizeof(result_storage));
+        sb_printf(&fn->declarations, "\t.local .align %zu .b8 %s[%zu];\n",
+                  result_desc.mem_align, result_storage,
+                  result_desc.mem_size);
+      }
+      if (!callee_returns_void && !fn->error) {
+        snprintf(return_parameter, sizeof(return_parameter),
+                 "__mtlc_call_%zu_ret", call_id);
+        if (result_is_record) {
+          sb_printf(&fn->declarations, "\t.param .align %zu .b8 %s[%zu];\n",
+                    result_desc.mem_align, return_parameter,
+                    result_desc.mem_size);
+        } else {
+          sb_printf(&fn->declarations, "\t.param .%s %s;\n",
+                    device_param_storage_type(result_desc), return_parameter);
+        }
+      }
+      if (!fn->error) {
+        if (callee_returns_void) {
+          sb_printf(&fn->body, "\tcall.uni %s, (", callee_name);
+        } else {
+          sb_printf(&fn->body, "\tcall.uni (%s), %s, (", return_parameter,
+                    callee_name);
+        }
+        for (size_t a = 0; a < in->argument_count; a++) {
+          sb_printf(&fn->body, "%s%s", a ? ", " : "", argument_params[a]);
+        }
+        sb_puts(&fn->body, ");\n");
+
+        if (callee_returns_void) {
+          if (in->dest.name) {
+            fn_error(fn, "PTX: void device call '%s' has a result", callee);
+          }
+        } else if (result_is_record) {
+          char pointer[24];
+          result_desc.mem_addr = new_reg(fn, PC_B64);
+          reg_name(PC_B64, result_desc.mem_addr, pointer);
+          sb_printf(&fn->body, "\tmov.u64 %s, %s;\n", pointer, result_storage);
+          ptx_block_copy(fn, ".local", pointer, ".param", return_parameter,
+                         result_desc.mem_size, result_desc.mem_align);
+          if (in->dest.name) {
+            bind_value(fn, in->dest.name, result_desc);
+          }
+        } else if (in->dest.name) {
+          result_desc = destination_value(fn, &in->dest, result_desc);
+          char result[24];
+          reg_name(result_desc.cls, result_desc.idx, result);
+          sb_printf(&fn->body, "\tld.param.%s %s, [%s];\n",
+                    device_param_storage_type(result_desc), result,
+                    return_parameter);
+          bind_value(fn, in->dest.name, result_desc);
+        }
+      }
+      for (size_t a = 0; a < in->argument_count; a++) {
+        free(argument_params[a]);
+      }
+      free(argument_params);
+    } else {
+      fn_error(fn, "PTX: unsupported call '%s'", callee ? callee : "?");
+    }
+}
+
+static void ptx_emit_atomic_intrinsic(IRProgram *program, IRFunction *func,
+                                      PtxFn *fn, const IRInstruction *in,
+                                      char **error, const char *ename,
+                                      int *handled) {
+  const char *callee = in->text;
+  MtlcIntrinsic intrinsic = in->intrinsic;
+
+  (void)program;
+  (void)func;
+  (void)callee;
+  (void)handled;
+    if (ir_intrinsic_is_atomic(intrinsic) &&
+               in->argument_count >=
+                   (size_t)ir_intrinsic_arity(intrinsic)) {
+      /* Full unsigned atomic load/store/RMW/CAS family. Element indices stay
+       * 64-bit all the way into address generation; large buffers must not
+       * silently wrap at 2^31/2^32 elements. */
+      int is64 =
+          ir_intrinsic_atomic_value_kind(intrinsic) == MTLC_TYPE_UINT64;
+      int is_cas = ir_intrinsic_is_compare_exchange(intrinsic);
+      int is_load = ir_intrinsic_is_atomic_load(intrinsic);
+      int is_store = ir_intrinsic_is_atomic_store(intrinsic);
+      int is_sub = intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_SUB_U32 ||
+                   intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_SUB_U64;
+      const char *opn =
+          intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_ADD_U32 ||
+                  intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_ADD_U64 || is_sub
+              ? "add"
+          : intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_MIN_U32 ||
+                  intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_MIN_U64
+              ? "min"
+          : intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_MAX_U32 ||
+                  intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_MAX_U64
+              ? "max"
+          : intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_AND_U32 ||
+                  intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_AND_U64
+              ? "and"
+          : intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_OR_U32 ||
+                  intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_OR_U64
+              ? "or"
+          : intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_XOR_U32 ||
+                  intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_XOR_U64
+              ? "xor"
+          : is_cas ? "cas"
+                   : "exch";
+      int bit_type = is_cas ||
+                     intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_AND_U32 ||
+                     intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_AND_U64 ||
+                     intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_OR_U32 ||
+                     intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_OR_U64 ||
+                     intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_XOR_U32 ||
+                     intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_XOR_U64 ||
+                     intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_EXCHANGE_U32 ||
+                     intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_EXCHANGE_U64;
+      const char *sem = ptx_atomic_order(in->memory_order);
+      const char *scope = ptx_atomic_scope(in->memory_scope);
+      const char *space = ptx_atomic_space(in->address_space);
+      PtxClass vc = is64 ? PC_B64 : PC_B32;
+      int elem = is64 ? 8 : 4;
+      char bufr[24], idxr[24], valr[24] = {0};
+      use_as(fn, &in->arguments[0], PC_B64, bufr);
+      use_as(fn, &in->arguments[1], PC_B64, idxr);
+      if (!is_load) use_as(fn, &in->arguments[2], vc, valr);
+      if (is_sub) {
+        int neg = new_reg(fn, vc);
+        char negn[24];
+        reg_name(vc, neg, negn);
+        sb_printf(&fn->body, "\tneg.%s %s, %s;\n",
+                  is64 ? "s64" : "s32", negn, valr);
+        strcpy(valr, negn);
+      }
+      int offset = new_reg(fn, PC_B64);
+      int addr = new_reg(fn, PC_B64);
+      char offn[24], an[24];
+      reg_name(PC_B64, offset, offn);
+      reg_name(PC_B64, addr, an);
+      sb_printf(&fn->body, "\tmul.lo.u64 %s, %s, %d;\n", offn, idxr, elem);
+      sb_printf(&fn->body, "\tadd.u64 %s, %s, %s;\n", an, bufr, offn);
+      PtxVal dv = {.cls = vc, .is_unsigned = 1};
+      char dn[24] = {0};
+      if (!is_store) {
+        dv = destination_value(fn, &in->dest, dv);
+        reg_name(vc, dv.idx, dn);
+      }
+      int failure_valid =
+          !is_cas ||
+          (in->failure_memory_order != MTLC_MEMORY_ORDER_RELEASE &&
+           in->failure_memory_order != MTLC_MEMORY_ORDER_ACQ_REL &&
+           ((in->memory_order == MTLC_MEMORY_ORDER_RELAXED &&
+             in->failure_memory_order == MTLC_MEMORY_ORDER_RELAXED) ||
+            ((in->memory_order == MTLC_MEMORY_ORDER_ACQUIRE ||
+              in->memory_order == MTLC_MEMORY_ORDER_ACQ_REL) &&
+             (in->failure_memory_order == MTLC_MEMORY_ORDER_RELAXED ||
+              in->failure_memory_order == MTLC_MEMORY_ORDER_ACQUIRE)) ||
+            (in->memory_order == MTLC_MEMORY_ORDER_RELEASE &&
+             in->failure_memory_order == MTLC_MEMORY_ORDER_RELAXED) ||
+            in->memory_order == MTLC_MEMORY_ORDER_SEQ_CST));
+      int order_valid =
+          (!is_load || in->memory_order == MTLC_MEMORY_ORDER_RELAXED ||
+           in->memory_order == MTLC_MEMORY_ORDER_ACQUIRE ||
+           in->memory_order == MTLC_MEMORY_ORDER_SEQ_CST) &&
+          (!is_store || in->memory_order == MTLC_MEMORY_ORDER_RELAXED ||
+           in->memory_order == MTLC_MEMORY_ORDER_RELEASE ||
+           in->memory_order == MTLC_MEMORY_ORDER_SEQ_CST);
+      if (!sem || !scope || !space || !failure_valid || !order_valid ||
+          (in->address_space == MTLC_ADDRESS_SPACE_WORKGROUP &&
+           in->memory_scope > MTLC_MEMORY_SCOPE_WORKGROUP)) {
+        fn_error(fn,
+                 "PTX: invalid atomic memory contract (space=%d success=%d failure=%d scope=%d)",
+                 (int)in->address_space, (int)in->memory_order,
+                 (int)in->failure_memory_order, (int)in->memory_scope);
+      } else {
+        if (in->memory_order == MTLC_MEMORY_ORDER_SEQ_CST) {
+          sb_printf(&fn->body, "\tfence.sc.%s;\n", scope);
+        }
+        const char *type =
+            bit_type ? (is64 ? "b64" : "b32")
+                     : (is64 ? "u64" : "u32");
+        if (is_load) {
+          sb_printf(&fn->body, "\tld.%s.%s%s.%s %s, [%s];\n", sem,
+                    scope, space, type, dn, an);
+        } else if (is_store) {
+          const char *store_sem =
+              in->memory_order == MTLC_MEMORY_ORDER_SEQ_CST ? "relaxed"
+                                                             : sem;
+          sb_printf(&fn->body, "\tst.%s.%s%s.%s [%s], %s;\n", store_sem,
+                    scope, space, type, an, valr);
+        } else if (is_cas) {
+          char desired[24];
+          use_as(fn, &in->arguments[3], vc, desired);
+          /* PTX takes comparator then desired value. Its single qualifier
+           * strengthens a weaker failure order to the success order. */
+          sb_printf(&fn->body,
+                    "\tatom.%s.%s%s.%s.%s %s, [%s], %s, %s;\n",
+                    sem, scope, space, opn, type, dn, an, valr, desired);
+        } else {
+          sb_printf(&fn->body, "\tatom.%s.%s%s.%s.%s %s, [%s], %s;\n",
+                    sem, scope, space, opn, type, dn, an, valr);
+        }
+      }
+      if (in->dest.name && !is_store)
+        bind_value(fn, in->dest.name, dv);
+    } else {
+      ptx_emit_general_call(program, func, fn, in, error, ename);
+  }
+}
+
+static void ptx_emit_wide_intrinsic(IRProgram *program, IRFunction *func,
+                                    PtxFn *fn, const IRInstruction *in,
+                                    char **error, const char *ename,
+                                    int *handled) {
+  const char *callee = in->text;
+  MtlcIntrinsic intrinsic = in->intrinsic;
+
+  (void)program;
+  (void)func;
+  (void)callee;
+  (void)handled;
+    if (ptx_intrinsic_is_print(intrinsic) &&
+               in->argument_count >= 1) {
+      /* vprintf(format, argument_buffer). The format is a module-scope byte
+       * array interned in the pool; the arguments go through a per-call
+       * local buffer laid out to the C varargs rules the device runtime
+       * reads them back with (4-byte ints, doubles for floats). */
+      const char *format = ptx_literal_string(fn->function, &in->arguments[0]);
+      if (!format) {
+        fn_error(fn, "PTX: a kernel print needs a literal format string");
+      } else {
+        int index = ptx_string_index(format);
+        if (index < 0) {
+          fn_error(fn, "PTX: kernel print format was not interned");
+        } else {
+          size_t site = fn->call_count++;
+          int buffer_bytes =
+              intrinsic == MTLC_INTRINSIC_GPU_PRINT      ? 0
+              : intrinsic == MTLC_INTRINSIC_GPU_PRINT_I32 ? 4
+              : intrinsic == MTLC_INTRINSIC_GPU_PRINT_F32 ? 8
+                                                          : 8;
+          if (buffer_bytes > 0) {
+            sb_printf(&fn->declarations,
+                      "\t.local .align 8 .b8 $mtlc_print_args_%zu[%d];\n",
+                      site, buffer_bytes);
+          }
+          int format_register = new_reg(fn, PC_B64);
+          char format_name[24];
+          reg_name(PC_B64, format_register, format_name);
+          sb_printf(&fn->body, "\tmov.u64 %s, $mtlc_str_%d;\n", format_name,
+                    index);
+          sb_printf(&fn->body, "\tcvta.global.u64 %s, %s;\n", format_name,
+                    format_name);
+          int args_register = new_reg(fn, PC_B64);
+          char args_name[24];
+          reg_name(PC_B64, args_register, args_name);
+          if (buffer_bytes > 0) {
+            sb_printf(&fn->body, "\tmov.u64 %s, $mtlc_print_args_%zu;\n",
+                      args_name, site);
+            sb_printf(&fn->body, "\tcvta.local.u64 %s, %s;\n", args_name,
+                      args_name);
+            if (intrinsic == MTLC_INTRINSIC_GPU_PRINT_I32) {
+              char value[24];
+              use_as(fn, &in->arguments[1], PC_B32, value);
+              sb_printf(&fn->body, "\tst.u32 [%s], %s;\n", args_name, value);
+            } else if (intrinsic == MTLC_INTRINSIC_GPU_PRINT_F32) {
+              /* C varargs promote float to double before the callee reads
+               * it, so %f in the format string expects eight bytes. */
+              char value[24];
+              use_as(fn, &in->arguments[1], PC_F32, value);
+              int widened = new_reg(fn, PC_F64);
+              char widened_name[24];
+              reg_name(PC_F64, widened, widened_name);
+              sb_printf(&fn->body, "\tcvt.f64.f32 %s, %s;\n", widened_name,
+                        value);
+              sb_printf(&fn->body, "\tst.f64 [%s], %s;\n", args_name,
+                        widened_name);
+            } else {
+              char first[24];
+              char second[24];
+              use_as(fn, &in->arguments[1], PC_B32, first);
+              use_as(fn, &in->arguments[2], PC_B32, second);
+              sb_printf(&fn->body, "\tst.u32 [%s], %s;\n", args_name, first);
+              sb_printf(&fn->body, "\tst.u32 [%s+4], %s;\n", args_name,
+                        second);
+            }
+          } else {
+            sb_printf(&fn->body, "\tmov.u64 %s, 0;\n", args_name);
+          }
+          sb_puts(&fn->body, "\t{\n");
+          sb_puts(&fn->body, "\t.param .b64 $mtlc_print_fmt;\n");
+          sb_puts(&fn->body, "\t.param .b64 $mtlc_print_buf;\n");
+          sb_puts(&fn->body, "\t.param .b32 $mtlc_print_ret;\n");
+          sb_printf(&fn->body, "\tst.param.b64 [$mtlc_print_fmt+0], %s;\n",
+                    format_name);
+          sb_printf(&fn->body, "\tst.param.b64 [$mtlc_print_buf+0], %s;\n",
+                    args_name);
+          sb_puts(&fn->body,
+                  "\tcall.uni ($mtlc_print_ret), vprintf, "
+                  "($mtlc_print_fmt, $mtlc_print_buf);\n");
+          sb_puts(&fn->body, "\t}\n");
+        }
+      }
+    } else if ((intrinsic == MTLC_INTRINSIC_GPU_DP2A_LO_U32 ||
+                intrinsic == MTLC_INTRINSIC_GPU_DP2A_LO_S32 ||
+                intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_U32 ||
+                intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32) &&
+               in->argument_count >= 3) {
+      /* dp2a: two 16-bit halves of a against two bytes of b (low or high
+       * pair), accumulated into c. The mixed-width sibling of dp4a. */
+      int is_signed = intrinsic == MTLC_INTRINSIC_GPU_DP2A_LO_S32 ||
+                      intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32;
+      int is_high = intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_U32 ||
+                    intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32;
+      char a[24];
+      char b[24];
+      char c[24];
+      use_as(fn, &in->arguments[0], PC_B32, a);
+      use_as(fn, &in->arguments[1], PC_B32, b);
+      use_as(fn, &in->arguments[2], PC_B32, c);
+      PtxVal dv = {.cls = PC_B32, .is_unsigned = !is_signed};
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_B32, dv.idx, dn);
+      sb_printf(&fn->body, "\tdp2a.%s.%s %s, %s, %s, %s;\n",
+                is_high ? "hi" : "lo", is_signed ? "s32.s32" : "u32.u32", dn,
+                a, b, c);
+      if (in->dest.name)
+        bind_value(fn, in->dest.name, dv);
+    } else if (intrinsic == MTLC_INTRINSIC_GPU_PRMT_B32 &&
+               in->argument_count >= 3) {
+      /* prmt(a, b, selector): gather four bytes out of the {b:a} byte octet,
+       * one selector nibble each. One instruction for the byte shuffling
+       * that nibble-quant decode otherwise spends shifts and masks on. */
+      char a[24];
+      char b[24];
+      char sel[24];
+      use_as(fn, &in->arguments[0], PC_B32, a);
+      use_as(fn, &in->arguments[1], PC_B32, b);
+      use_as(fn, &in->arguments[2], PC_B32, sel);
+      PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_B32, dv.idx, dn);
+      sb_printf(&fn->body, "\tprmt.b32 %s, %s, %s, %s;\n", dn, a, b, sel);
+      if (in->dest.name)
+        bind_value(fn, in->dest.name, dv);
+    } else if ((intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
+                intrinsic == MTLC_INTRINSIC_GPU_LOAD4_U32 ||
+                intrinsic == MTLC_INTRINSIC_GPU_STORE4_F32 ||
+                intrinsic == MTLC_INTRINSIC_GPU_STORE4_U32) &&
+               in->argument_count >= 2) {
+      /* One 128-bit transaction for four consecutive 32-bit elements. The
+       * scalar side is four ordinary accesses against the other pointer,
+       * which ptxas keeps in registers when that pointer is a small
+       * constant-indexed private array. Both addresses must be 16-byte
+       * aligned; that is a source contract, as it is for async copies. */
+      int is_load = intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
+                    intrinsic == MTLC_INTRINSIC_GPU_LOAD4_U32;
+      int is_float = intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
+                     intrinsic == MTLC_INTRINSIC_GPU_STORE4_F32;
+      PtxClass cls = is_float ? PC_F32 : PC_B32;
+      const char *suffix = is_float ? "f32" : "u32";
+      /* Argument order is always (vector side, scalar side): load4 reads the
+       * vector pointer, store4 writes it. */
+      const IROperand *vector_operand = &in->arguments[0];
+      const IROperand *scalar_operand = &in->arguments[1];
+      PtxVal vector_desc = operand_desc(fn, vector_operand);
+      PtxVal scalar_desc = operand_desc(fn, scalar_operand);
+      const char *vector_space = ptx_memory_space(vector_desc.address_space);
+      const char *scalar_space = ptx_memory_space(scalar_desc.address_space);
+      char vector_address[24];
+      char scalar_address[24];
+      use_as(fn, vector_operand, PC_B64, vector_address);
+      use_as(fn, scalar_operand, PC_B64, scalar_address);
+      if (!vector_space || !scalar_space) {
+        fn_error(fn, "PTX: invalid address space in a 4-wide transfer");
+      } else {
+        int lanes[4];
+        char lane_names[4][24];
+        for (int lane = 0; lane < 4; lane++) {
+          lanes[lane] = new_reg(fn, cls);
+          reg_name(cls, lanes[lane], lane_names[lane]);
+        }
+        if (is_load) {
+          sb_printf(&fn->body, "\tld%s.v4.%s {%s, %s, %s, %s}, [%s];\n",
+                    vector_space, suffix, lane_names[0], lane_names[1],
+                    lane_names[2], lane_names[3], vector_address);
+          for (int lane = 0; lane < 4; lane++) {
+            sb_printf(&fn->body, "\tst%s.%s [%s+%d], %s;\n", scalar_space,
+                      suffix, scalar_address, lane * 4, lane_names[lane]);
+          }
+        } else {
+          for (int lane = 0; lane < 4; lane++) {
+            sb_printf(&fn->body, "\tld%s.%s %s, [%s+%d];\n", scalar_space,
+                      suffix, lane_names[lane], scalar_address, lane * 4);
+          }
+          sb_printf(&fn->body, "\tst%s.v4.%s [%s], {%s, %s, %s, %s};\n",
+                    vector_space, suffix, vector_address, lane_names[0],
+                    lane_names[1], lane_names[2], lane_names[3]);
+        }
+      }
+    } else if (intrinsic >= MTLC_INTRINSIC_GPU_SQRT_F32 &&
+               intrinsic <= MTLC_INTRINSIC_GPU_EXP_F32 &&
+               in->argument_count >= 1) {
+      /* single-arg f32 math -> PTX approximations (inference-grade, mirrors
+       * the fast CPU approximations the engine already uses). */
+      char a[24];
+      use_as(fn, &in->arguments[0], PC_F32, a);
+      PtxVal dv = {.cls = PC_F32};
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_F32, dv.idx, dn);
+      if (intrinsic == MTLC_INTRINSIC_GPU_SQRT_F32) {
+        sb_printf(&fn->body, "\tsqrt.rn.f32 %s, %s;\n", dn, a);
+      } else if (intrinsic == MTLC_INTRINSIC_GPU_RSQRT_F32) {
+        sb_printf(&fn->body, "\trsqrt.approx.f32 %s, %s;\n", dn, a);
+      } else if (intrinsic == MTLC_INTRINSIC_GPU_ABS_F32) {
+        sb_printf(&fn->body, "\tabs.f32 %s, %s;\n", dn, a);
+      } else if (intrinsic == MTLC_INTRINSIC_GPU_SIN_F32) {
+        sb_printf(&fn->body, "\tsin.approx.f32 %s, %s;\n", dn, a);
+      } else if (intrinsic == MTLC_INTRINSIC_GPU_COS_F32) {
+        sb_printf(&fn->body, "\tcos.approx.f32 %s, %s;\n", dn, a);
+      } else if (intrinsic == MTLC_INTRINSIC_GPU_LOG_F32) {
+        /* ln(x) = lg2(x) / log2(e) = lg2(x) * 0.6931471805599453 */
+        int t = new_reg(fn, PC_F32);
+        char tn[24];
+        reg_name(PC_F32, t, tn);
+        sb_printf(&fn->body, "\tlg2.approx.f32 %s, %s;\n", tn, a);
+        sb_printf(&fn->body, "\tmul.f32 %s, %s, 0f3F317218;\n", dn, tn);
+      } else { /* expf: exp(x) = 2^(x * log2(e)), log2(e)=1.4426950408 */
+        int t = new_reg(fn, PC_F32);
+        char tn[24];
+        reg_name(PC_F32, t, tn);
+        sb_printf(&fn->body, "\tmul.f32 %s, %s, 0f3FB8AA3B;\n", tn, a);
+        sb_printf(&fn->body, "\tex2.approx.f32 %s, %s;\n", dn, tn);
+      }
+      if (in->dest.name)
+        bind_value(fn, in->dest.name, dv);
+    } else {
+      ptx_emit_atomic_intrinsic(program, func, fn, in, error, ename, handled);
+    }
+}
+
+
+static void ptx_emit_numeric_intrinsic(IRProgram *program, IRFunction *func,
+                                       PtxFn *fn, const IRInstruction *in,
+                                       char **error, const char *ename,
+                                       int *handled) {
+  const char *callee = in->text;
+  MtlcIntrinsic intrinsic = in->intrinsic;
+
+  (void)program;
+  (void)func;
+  (void)callee;
+  (void)handled;
+    if (intrinsic == MTLC_INTRINSIC_GPU_WORKGROUP_BARRIER) {
+      sb_puts(&fn->body, "\tbar.sync 0;\n");
+    } else if (intrinsic == MTLC_INTRINSIC_GPU_F16_BITS_TO_F32 &&
+               in->argument_count >= 1) {
+      /* h2f(bits): reinterpret a uint16 fp16 bit-pattern as float32. The arg
+       * arrives as a 32-bit int (zero-extended u16 load); truncate to .b16 and
+       * cvt.f32.f16. Lets prefill keep fp16-resident weights and convert on
+       * the fly with one PTX instruction. */
+      char a[24];
+      use_as(fn, &in->arguments[0], PC_B32, a);
+      int hidx = new_reg(fn, PC_B16);
+      char hn[24];
+      reg_name(PC_B16, hidx, hn);
+      sb_printf(&fn->body, "\tcvt.u16.u32 %s, %s;\n", hn, a);
+      PtxVal dv = {.cls = PC_F32};
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_F32, dv.idx, dn);
+      sb_printf(&fn->body, "\tcvt.f32.f16 %s, %s;\n", dn, hn);
+      if (in->dest.name)
+        bind_value(fn, in->dest.name, dv);
+    } else if (intrinsic == MTLC_INTRINSIC_GPU_F32_TO_F16_BITS &&
+               in->argument_count >= 1) {
+      /* f2h(x): float32 -> uint16 fp16 bit-pattern (cvt.rn.f16.f32), returned
+       * zero-extended in a 32-bit int so a uint16 store writes the low 16. */
+      char a[24];
+      use_as(fn, &in->arguments[0], PC_F32, a);
+      int hidx = new_reg(fn, PC_B16);
+      char hn[24];
+      reg_name(PC_B16, hidx, hn);
+      sb_printf(&fn->body, "\tcvt.rn.f16.f32 %s, %s;\n", hn, a);
+      PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_B32, dv.idx, dn);
+      sb_printf(&fn->body, "\tcvt.u32.u16 %s, %s;\n", dn, hn);
+      if (in->dest.name)
+        bind_value(fn, in->dest.name, dv);
+    } else if (intrinsic == MTLC_INTRINSIC_GPU_F32_FROM_BITS &&
+               in->argument_count >= 1) {
+      /* f32_from_bits(u32): reinterpret an IEEE-754 bit pattern as float32.
+       * One mov.b32 across register files; no arithmetic reconstruction. */
+      char a[24];
+      use_as(fn, &in->arguments[0], PC_B32, a);
+      PtxVal dv = {.cls = PC_F32};
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_F32, dv.idx, dn);
+      sb_printf(&fn->body, "\tmov.b32 %s, %s;\n", dn, a);
+      if (in->dest.name)
+        bind_value(fn, in->dest.name, dv);
+    } else if (intrinsic == MTLC_INTRINSIC_GPU_F32_TO_BITS &&
+               in->argument_count >= 1) {
+      /* bits_from_f32(x): the float32's IEEE-754 encoding as uint32. */
+      char a[24];
+      use_as(fn, &in->arguments[0], PC_F32, a);
+      PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_B32, dv.idx, dn);
+      sb_printf(&fn->body, "\tmov.b32 %s, %s;\n", dn, a);
+      if (in->dest.name)
+        bind_value(fn, in->dest.name, dv);
+    } else if ((intrinsic == MTLC_INTRINSIC_GPU_DP4A_U32 ||
+                intrinsic == MTLC_INTRINSIC_GPU_DP4A_S32) &&
+               in->argument_count >= 3) {
+      /* dp4a(a, b, c): four-way packed-byte dot product with 32-bit
+       * accumulate. Collapses the shift/mask/convert/FMA chain of quantized
+       * decode to one instruction (sm_61+; every supported target qualifies). */
+      int is_signed = intrinsic == MTLC_INTRINSIC_GPU_DP4A_S32;
+      char a[24];
+      char b[24];
+      char c[24];
+      use_as(fn, &in->arguments[0], PC_B32, a);
+      use_as(fn, &in->arguments[1], PC_B32, b);
+      use_as(fn, &in->arguments[2], PC_B32, c);
+      PtxVal dv = {.cls = PC_B32, .is_unsigned = !is_signed};
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_B32, dv.idx, dn);
+      sb_printf(&fn->body, "\tdp4a.%s %s, %s, %s, %s;\n",
+                is_signed ? "s32.s32" : "u32.u32", dn, a, b, c);
+      if (in->dest.name)
+        bind_value(fn, in->dest.name, dv);
+    } else if ((intrinsic == MTLC_INTRINSIC_GPU_HADD2 ||
+                intrinsic == MTLC_INTRINSIC_GPU_HMUL2 ||
+                intrinsic == MTLC_INTRINSIC_GPU_HFMA2) &&
+               in->argument_count >= 2) {
+      /* Two fp16 lanes per instruction. The carrier is a 32-bit value
+       * holding {hi, lo}; f16x2 arithmetic is the reason to keep
+       * activations packed rather than widening every element to f32. */
+      int is_fma = intrinsic == MTLC_INTRINSIC_GPU_HFMA2;
+      char a[24];
+      char b[24];
+      char c[24];
+      use_as(fn, &in->arguments[0], PC_B32, a);
+      use_as(fn, &in->arguments[1], PC_B32, b);
+      if (is_fma) {
+        use_as(fn, &in->arguments[2], PC_B32, c);
+      }
+      PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_B32, dv.idx, dn);
+      if (is_fma) {
+        sb_printf(&fn->body, "\tfma.rn.f16x2 %s, %s, %s, %s;\n", dn, a, b, c);
+      } else {
+        sb_printf(&fn->body, "\t%s.rn.f16x2 %s, %s, %s;\n",
+                  intrinsic == MTLC_INTRINSIC_GPU_HADD2 ? "add" : "mul", dn,
+                  a, b);
+      }
+      if (in->dest.name)
+        bind_value(fn, in->dest.name, dv);
+    } else if ((intrinsic == MTLC_INTRINSIC_GPU_H2F_LO ||
+                intrinsic == MTLC_INTRINSIC_GPU_H2F_HI) &&
+               in->argument_count >= 1) {
+      /* Widen one lane of a packed pair to f32. */
+      char a[24];
+      use_as(fn, &in->arguments[0], PC_B32, a);
+      const char *source = a;
+      char shifted_name[24];
+      if (intrinsic == MTLC_INTRINSIC_GPU_H2F_HI) {
+        int shifted = new_reg(fn, PC_B32);
+        reg_name(PC_B32, shifted, shifted_name);
+        sb_printf(&fn->body, "\tshr.u32 %s, %s, 16;\n", shifted_name, a);
+        source = shifted_name;
+      }
+      int half = new_reg(fn, PC_B16);
+      char half_name[24];
+      reg_name(PC_B16, half, half_name);
+      sb_printf(&fn->body, "\tcvt.u16.u32 %s, %s;\n", half_name, source);
+      PtxVal dv = {.cls = PC_F32};
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_F32, dv.idx, dn);
+      sb_printf(&fn->body, "\tcvt.f32.f16 %s, %s;\n", dn, half_name);
+      if (in->dest.name)
+        bind_value(fn, in->dest.name, dv);
+    } else if (intrinsic == MTLC_INTRINSIC_GPU_F2H2 &&
+               in->argument_count >= 2) {
+      /* Pack two f32 values into one f16 pair, low lane first. */
+      char lo[24];
+      char hi[24];
+      use_as(fn, &in->arguments[0], PC_F32, lo);
+      use_as(fn, &in->arguments[1], PC_F32, hi);
+      int lo_half = new_reg(fn, PC_B16);
+      int hi_half = new_reg(fn, PC_B16);
+      char lo_name[24];
+      char hi_name[24];
+      reg_name(PC_B16, lo_half, lo_name);
+      reg_name(PC_B16, hi_half, hi_name);
+      sb_printf(&fn->body, "\tcvt.rn.f16.f32 %s, %s;\n", lo_name, lo);
+      sb_printf(&fn->body, "\tcvt.rn.f16.f32 %s, %s;\n", hi_name, hi);
+      PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_B32, dv.idx, dn);
+      sb_printf(&fn->body, "\tmov.b32 %s, {%s, %s};\n", dn, lo_name, hi_name);
+      if (in->dest.name)
+        bind_value(fn, in->dest.name, dv);
+    } else if (intrinsic == MTLC_INTRINSIC_GPU_BF2F &&
+               in->argument_count >= 1) {
+      /* bfloat16 is the top half of an f32, so widening is exact and needs
+       * no conversion instruction or architecture floor. */
+      char a[24];
+      use_as(fn, &in->arguments[0], PC_B32, a);
+      int shifted = new_reg(fn, PC_B32);
+      char shifted_name[24];
+      reg_name(PC_B32, shifted, shifted_name);
+      sb_printf(&fn->body, "\tshl.b32 %s, %s, 16;\n", shifted_name, a);
+      PtxVal dv = {.cls = PC_F32};
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_F32, dv.idx, dn);
+      sb_printf(&fn->body, "\tmov.b32 %s, %s;\n", dn, shifted_name);
+      if (in->dest.name)
+        bind_value(fn, in->dest.name, dv);
+    } else if (intrinsic == MTLC_INTRINSIC_GPU_F2BF &&
+               in->argument_count >= 1) {
+      /* Round-to-nearest-even down to bfloat16, in integer arithmetic so it
+       * holds on every target rather than only where cvt.rn.bf16.f32 does:
+       * add half an ulp plus the low bit of the kept mantissa, then drop
+       * the low half. */
+      char a[24];
+      use_as(fn, &in->arguments[0], PC_F32, a);
+      int bits = new_reg(fn, PC_B32);
+      int carry = new_reg(fn, PC_B32);
+      int rounded = new_reg(fn, PC_B32);
+      char bits_name[24];
+      char carry_name[24];
+      char rounded_name[24];
+      reg_name(PC_B32, bits, bits_name);
+      reg_name(PC_B32, carry, carry_name);
+      reg_name(PC_B32, rounded, rounded_name);
+      sb_printf(&fn->body, "\tmov.b32 %s, %s;\n", bits_name, a);
+      sb_printf(&fn->body, "\tshr.u32 %s, %s, 16;\n", carry_name, bits_name);
+      sb_printf(&fn->body, "\tand.b32 %s, %s, 1;\n", carry_name, carry_name);
+      sb_printf(&fn->body, "\tadd.u32 %s, %s, 32767;\n", rounded_name,
+                carry_name);
+      sb_printf(&fn->body, "\tadd.u32 %s, %s, %s;\n", rounded_name,
+                rounded_name, bits_name);
+      PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_B32, dv.idx, dn);
+      sb_printf(&fn->body, "\tshr.u32 %s, %s, 16;\n", dn, rounded_name);
+      if (in->dest.name)
+        bind_value(fn, in->dest.name, dv);
+    } else if (intrinsic == MTLC_INTRINSIC_GPU_ASSERT &&
+               in->argument_count >= 1) {
+      /* A false condition traps the launch at the offending lane, which is
+       * what turns "the numbers are wrong somewhere" into a located fault.
+       * Only under --gpu-checks: an assertion left in shipped source must
+       * cost nothing. */
+      if (g_ptx_emit_checks) {
+        char condition[24];
+        use_as(fn, &in->arguments[0], PC_B32, condition);
+        int predicate = new_reg(fn, PC_PRED);
+        char predicate_name[24];
+        reg_name(PC_PRED, predicate, predicate_name);
+        size_t label = fn->call_count++;
+        sb_printf(&fn->body, "\tsetp.ne.s32 %s, %s, 0;\n", predicate_name,
+                  condition);
+        sb_printf(&fn->body, "\t@%s bra $mtlc_assert_ok_%zu;\n",
+                  predicate_name, label);
+        sb_puts(&fn->body, "\ttrap;\n");
+        sb_printf(&fn->body, "$mtlc_assert_ok_%zu:\n", label);
+      }
+    } else {
+      ptx_emit_wide_intrinsic(program, func, fn, in, error, ename, handled);
+    }
+}
+
+
+static void ptx_emit_call(IRProgram *program, IRFunction *func, PtxFn *fn,
+                        const IRInstruction *in, size_t *ii, char **error,
+                        int target_arch, int returns_void, const char *ename,
+                        int *handled) {
+  switch (in->op) {
+  case IR_OP_CALL: {
+    const char *callee = in->text;
+    MtlcIntrinsic intrinsic = in->intrinsic;
+    const char *sreg = sreg_for_intrinsic(intrinsic);
+    if (sreg) {
+      PtxVal dv = {0};
+      dv.cls = PC_B32;
+      dv.is_unsigned = 1;
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_B32, dv.idx, dn);
+      sb_printf(&fn->body, "\tmov.u32 %s, %s;\n", dn, sreg);
+      if (in->dest.name) {
+        bind_value(fn, in->dest.name, dv);
+      }
+    } else if (intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SIZE) {
+      PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
+      dv = destination_value(fn, &in->dest, dv);
+      char dn[24];
+      reg_name(PC_B32, dv.idx, dn);
+      /* A PTX execution subgroup is an NVIDIA warp. This backend-specific
+       * width never leaks into the semantic IR or SPIR-V lowering. */
+      sb_printf(&fn->body, "\tmov.u32 %s, 32;\n", dn);
+      if (in->dest.name) bind_value(fn, in->dest.name, dv);
+    } else if ((intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_BROADCAST_U32 ||
+                intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_BROADCAST_F32) &&
+               in->argument_count >= 2) {
+      int is_float =
+          intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_BROADCAST_F32;
+      PtxClass cls = is_float ? PC_F32 : PC_B32;
+      char value[24], source_lane[24], mask[24], dn[24];
+      use_as(fn, &in->arguments[0], cls, value);
+      use_as(fn, &in->arguments[1], PC_B32, source_lane);
+      int mask_index = new_reg(fn, PC_B32);
+      reg_name(PC_B32, mask_index, mask);
+      PtxVal dv = {.cls = cls, .is_unsigned = !is_float};
+      dv = destination_value(fn, &in->dest, dv);
+      reg_name(cls, dv.idx, dn);
+      sb_printf(&fn->body, "\tactivemask.b32 %s;\n", mask);
+      sb_printf(&fn->body,
+                "\tshfl.sync.idx.b32 %s, %s, %s, 0x1f, %s;\n",
+                dn, value, source_lane, mask);
+      if (in->dest.name) bind_value(fn, in->dest.name, dv);
+    } else if ((intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SHUFFLE_U32 ||
+                intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SHUFFLE_F32) &&
+               in->argument_count >= 2) {
+      int is_float = intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SHUFFLE_F32;
+      PtxClass cls = is_float ? PC_F32 : PC_B32;
+      char value[24], source_lane[24], mask[24], other[24], dn[24];
+      char shuffle_ok[24], source_in_range[24], source_active[24];
+      char bit[24], active_bits[24], take[24];
+      use_as(fn, &in->arguments[0], cls, value);
+      use_as(fn, &in->arguments[1], PC_B32, source_lane);
+      int mask_index = new_reg(fn, PC_B32);
+      int other_index = new_reg(fn, cls);
+      int shuffle_ok_index = new_reg(fn, PC_PRED);
+      int source_in_range_index = new_reg(fn, PC_PRED);
+      int source_active_index = new_reg(fn, PC_PRED);
+      int bit_index = new_reg(fn, PC_B32);
+      int active_bits_index = new_reg(fn, PC_B32);
+      int take_index = new_reg(fn, PC_PRED);
+      reg_name(PC_B32, mask_index, mask);
+      reg_name(cls, other_index, other);
+      reg_name(PC_PRED, shuffle_ok_index, shuffle_ok);
+      reg_name(PC_PRED, source_in_range_index, source_in_range);
+      reg_name(PC_PRED, source_active_index, source_active);
+      reg_name(PC_B32, bit_index, bit);
+      reg_name(PC_B32, active_bits_index, active_bits);
+      reg_name(PC_PRED, take_index, take);
+      PtxVal dv = {.cls = cls, .is_unsigned = !is_float};
+      dv = destination_value(fn, &in->dest, dv);
+      reg_name(cls, dv.idx, dn);
+      sb_printf(&fn->body, "\tactivemask.b32 %s;\n", mask);
+      sb_printf(&fn->body,
+                "\tshfl.sync.idx.b32 %s|%s, %s, %s, 0x1f, %s;\n",
+                other, shuffle_ok, value, source_lane, mask);
+      sb_printf(&fn->body, "\tsetp.lt.u32 %s, %s, 32;\n",
+                source_in_range, source_lane);
+      sb_printf(&fn->body, "\tmov.u32 %s, 0;\n", bit);
+      sb_printf(&fn->body, "\t@%s shl.b32 %s, 1, %s;\n",
+                source_in_range, bit, source_lane);
+      sb_printf(&fn->body, "\tand.b32 %s, %s, %s;\n", active_bits,
+                mask, bit);
+      sb_printf(&fn->body, "\tsetp.ne.u32 %s, %s, 0;\n", source_active,
+                active_bits);
+      sb_printf(&fn->body, "\tand.pred %s, %s, %s;\n", take,
+                shuffle_ok, source_active);
+      sb_printf(&fn->body, "\tmov.%s %s, %s;\n",
+                is_float ? "f32" : "u32", dn, value);
+      sb_printf(&fn->body, "\t@%s mov.%s %s, %s;\n", take,
+                is_float ? "f32" : "u32", dn, other);
+      if (in->dest.name) bind_value(fn, in->dest.name, dv);
+    } else if (intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_BALLOT_WORD &&
+               in->argument_count >= 2) {
+      char predicate[24], word[24], mask[24], bits[24], word_zero[24], dn[24];
+      use_as(fn, &in->arguments[0], PC_PRED, predicate);
+      use_as(fn, &in->arguments[1], PC_B32, word);
+      int mask_index = new_reg(fn, PC_B32);
+      int bits_index = new_reg(fn, PC_B32);
+      int word_zero_index = new_reg(fn, PC_PRED);
+      reg_name(PC_B32, mask_index, mask);
+      reg_name(PC_B32, bits_index, bits);
+      reg_name(PC_PRED, word_zero_index, word_zero);
+      PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
+      dv = destination_value(fn, &in->dest, dv);
+      reg_name(PC_B32, dv.idx, dn);
+      sb_printf(&fn->body, "\tactivemask.b32 %s;\n", mask);
+      sb_printf(&fn->body, "\tvote.sync.ballot.b32 %s, %s, %s;\n",
+                bits, predicate, mask);
+      sb_printf(&fn->body, "\tsetp.eq.u32 %s, %s, 0;\n", word_zero, word);
+      sb_printf(&fn->body, "\tmov.u32 %s, 0;\n", dn);
+      sb_printf(&fn->body, "\t@%s mov.u32 %s, %s;\n", word_zero, dn, bits);
+      if (in->dest.name) bind_value(fn, in->dest.name, dv);
+    } else if ((intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_ANY ||
+                intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_ALL) &&
+               in->argument_count >= 1) {
+      char predicate[24], mask[24], dn[24];
+      use_as(fn, &in->arguments[0], PC_PRED, predicate);
+      int mask_index = new_reg(fn, PC_B32);
+      reg_name(PC_B32, mask_index, mask);
+      PtxVal dv = {.cls = PC_PRED, .is_unsigned = 1};
+      dv = destination_value(fn, &in->dest, dv);
+      reg_name(PC_PRED, dv.idx, dn);
+      sb_printf(&fn->body, "\tactivemask.b32 %s;\n", mask);
+      sb_printf(&fn->body, "\tvote.sync.%s.pred %s, %s, %s;\n",
+                intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_ANY ? "any" : "all",
+                dn, predicate, mask);
+      if (in->dest.name) bind_value(fn, in->dest.name, dv);
+    } else if ((intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_U32 ||
+                intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_F32 ||
+                intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_U32 ||
+                intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32 ||
+                intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_U32 ||
+                intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32) &&
+                in->argument_count >= 1) {
+      int is_float = intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_F32 ||
+                     intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32 ||
+                     intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32;
+      const char *operation =
+          (intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_U32 ||
+           intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32)
+              ? "min"
+          : (intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_U32 ||
+             intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32)
+              ? "max"
+              : "add";
+      PtxClass cls = is_float ? PC_F32 : PC_B32;
+      char input[24], accum[24], mask[24], lane[24];
+      use_as(fn, &in->arguments[0], cls, input);
+      PtxVal dv = {.cls = cls, .is_unsigned = !is_float};
+      dv = destination_value(fn, &in->dest, dv);
+      reg_name(cls, dv.idx, accum);
+      sb_printf(&fn->body, "\tmov.%s %s, %s;\n",
+                is_float ? "f32" : "u32", accum, input);
+      int mask_index = new_reg(fn, PC_B32);
+      int lane_index = new_reg(fn, PC_B32);
+      reg_name(PC_B32, mask_index, mask);
+      reg_name(PC_B32, lane_index, lane);
+      sb_printf(&fn->body, "\tactivemask.b32 %s;\n", mask);
+      sb_printf(&fn->body, "\tmov.u32 %s, %%laneid;\n", lane);
+
+      /* Uniform collectives may end in a partial final warp. A plain
+       * butterfly reduction would read inactive lanes for non-power-of-two
+       * sizes, so each tree edge is guarded by the captured active mask.
+       * Lane zero then broadcasts the complete sum to every participant. */
+      static const unsigned offsets[] = {16, 8, 4, 2, 1};
+      for (size_t oi = 0; oi < sizeof(offsets) / sizeof(offsets[0]); oi++) {
+        unsigned offset = offsets[oi];
+        char other[24], source[24], bit[24], active_bits[24];
+        char shuffle_ok[24], source_in_range[24], source_active[24], take[24];
+        int other_index = new_reg(fn, cls);
+        int source_index = new_reg(fn, PC_B32);
+        int bit_index = new_reg(fn, PC_B32);
+        int active_bits_index = new_reg(fn, PC_B32);
+        int shuffle_ok_index = new_reg(fn, PC_PRED);
+        int source_in_range_index = new_reg(fn, PC_PRED);
+        int source_active_index = new_reg(fn, PC_PRED);
+        int take_index = new_reg(fn, PC_PRED);
+        reg_name(cls, other_index, other);
+        reg_name(PC_B32, source_index, source);
+        reg_name(PC_B32, bit_index, bit);
+        reg_name(PC_B32, active_bits_index, active_bits);
+        reg_name(PC_PRED, shuffle_ok_index, shuffle_ok);
+        reg_name(PC_PRED, source_in_range_index, source_in_range);
+        reg_name(PC_PRED, source_active_index, source_active);
+        reg_name(PC_PRED, take_index, take);
+        sb_printf(&fn->body,
+                  "\tshfl.sync.down.b32 %s|%s, %s, %u, 0x1f, %s;\n",
+                  other, shuffle_ok, accum, offset, mask);
+        sb_printf(&fn->body, "\tadd.u32 %s, %s, %u;\n", source, lane,
+                  offset);
+        sb_printf(&fn->body, "\tsetp.lt.u32 %s, %s, 32;\n",
+                  source_in_range, source);
+        sb_printf(&fn->body, "\tmov.u32 %s, 0;\n", bit);
+        sb_printf(&fn->body, "\t@%s shl.b32 %s, 1, %s;\n",
+                  source_in_range, bit, source);
+        sb_printf(&fn->body, "\tand.b32 %s, %s, %s;\n", active_bits,
+                  mask, bit);
+        sb_printf(&fn->body, "\tsetp.ne.u32 %s, %s, 0;\n", source_active,
+                  active_bits);
+        sb_printf(&fn->body, "\tand.pred %s, %s, %s;\n", take,
+                  shuffle_ok, source_active);
+        sb_printf(&fn->body, "\t@%s %s.%s %s, %s, %s;\n", take, operation,
+                   is_float ? "f32" : "u32", accum, accum, other);
+      }
+      sb_printf(&fn->body,
+                "\tshfl.sync.idx.b32 %s, %s, 0, 0x1f, %s;\n",
+                accum, accum, mask);
+      if (in->dest.name) bind_value(fn, in->dest.name, dv);
+    } else if ((intrinsic ==
+                    MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_U32 ||
+                intrinsic ==
+                    MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_F32 ||
+                intrinsic ==
+                    MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_U32 ||
+                intrinsic ==
+                    MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32) &&
+               in->argument_count >= 1) {
+      int is_float =
+          intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_F32 ||
+          intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32;
+      int is_exclusive =
+          intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_U32 ||
+          intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32;
+      PtxClass cls = is_float ? PC_F32 : PC_B32;
+      char input[24], accum[24], mask[24], lane[24];
+      use_as(fn, &in->arguments[0], cls, input);
+      PtxVal dv = {.cls = cls, .is_unsigned = !is_float};
+      dv = destination_value(fn, &in->dest, dv);
+      reg_name(cls, dv.idx, accum);
+      sb_printf(&fn->body, "\tmov.%s %s, %s;\n",
+                is_float ? "f32" : "u32", accum, input);
+      int mask_index = new_reg(fn, PC_B32);
+      int lane_index = new_reg(fn, PC_B32);
+      reg_name(PC_B32, mask_index, mask);
+      reg_name(PC_B32, lane_index, lane);
+      sb_printf(&fn->body, "\tactivemask.b32 %s;\n", mask);
+      sb_printf(&fn->body, "\tmov.u32 %s, %%laneid;\n", lane);
+
+      static const unsigned scan_offsets[] = {1, 2, 4, 8, 16};
+      for (size_t oi = 0;
+           oi < sizeof(scan_offsets) / sizeof(scan_offsets[0]); oi++) {
+        unsigned offset = scan_offsets[oi];
+        char other[24], source[24], bit[24], active_bits[24];
+        char shuffle_ok[24], source_in_range[24], source_active[24], take[24];
+        int other_index = new_reg(fn, cls);
+        int source_index = new_reg(fn, PC_B32);
+        int bit_index = new_reg(fn, PC_B32);
+        int active_bits_index = new_reg(fn, PC_B32);
+        int shuffle_ok_index = new_reg(fn, PC_PRED);
+        int source_in_range_index = new_reg(fn, PC_PRED);
+        int source_active_index = new_reg(fn, PC_PRED);
+        int take_index = new_reg(fn, PC_PRED);
+        reg_name(cls, other_index, other);
+        reg_name(PC_B32, source_index, source);
+        reg_name(PC_B32, bit_index, bit);
+        reg_name(PC_B32, active_bits_index, active_bits);
+        reg_name(PC_PRED, shuffle_ok_index, shuffle_ok);
+        reg_name(PC_PRED, source_in_range_index, source_in_range);
+        reg_name(PC_PRED, source_active_index, source_active);
+        reg_name(PC_PRED, take_index, take);
+        sb_printf(&fn->body,
+                  "\tshfl.sync.up.b32 %s|%s, %s, %u, 0, %s;\n",
+                  other, shuffle_ok, accum, offset, mask);
+        sb_printf(&fn->body, "\tsetp.ge.u32 %s, %s, %u;\n",
+                  source_in_range, lane, offset);
+        sb_printf(&fn->body, "\tsub.u32 %s, %s, %u;\n", source, lane,
+                  offset);
+        sb_printf(&fn->body, "\tmov.u32 %s, 0;\n", bit);
+        sb_printf(&fn->body, "\t@%s shl.b32 %s, 1, %s;\n",
+                  source_in_range, bit, source);
+        sb_printf(&fn->body, "\tand.b32 %s, %s, %s;\n", active_bits,
+                  mask, bit);
+        sb_printf(&fn->body, "\tsetp.ne.u32 %s, %s, 0;\n", source_active,
+                  active_bits);
+        sb_printf(&fn->body, "\tand.pred %s, %s, %s;\n", take,
+                  shuffle_ok, source_active);
+        sb_printf(&fn->body, "\t@%s add.%s %s, %s, %s;\n", take,
+                  is_float ? "f32" : "u32", accum, accum, other);
+      }
+
+      if (is_exclusive) {
+        char other[24], source[24], bit[24], active_bits[24];
+        char shuffle_ok[24], has_predecessor[24], source_active[24];
+        char take[24], take_active[24];
+        int other_index = new_reg(fn, cls);
+        int source_index = new_reg(fn, PC_B32);
+        int bit_index = new_reg(fn, PC_B32);
+        int active_bits_index = new_reg(fn, PC_B32);
+        int shuffle_ok_index = new_reg(fn, PC_PRED);
+        int has_predecessor_index = new_reg(fn, PC_PRED);
+        int source_active_index = new_reg(fn, PC_PRED);
+        int take_index = new_reg(fn, PC_PRED);
+        int take_active_index = new_reg(fn, PC_PRED);
+        reg_name(cls, other_index, other);
+        reg_name(PC_B32, source_index, source);
+        reg_name(PC_B32, bit_index, bit);
+        reg_name(PC_B32, active_bits_index, active_bits);
+        reg_name(PC_PRED, shuffle_ok_index, shuffle_ok);
+        reg_name(PC_PRED, has_predecessor_index, has_predecessor);
+        reg_name(PC_PRED, source_active_index, source_active);
+        reg_name(PC_PRED, take_index, take);
+        reg_name(PC_PRED, take_active_index, take_active);
+        sb_printf(&fn->body,
+                  "\tshfl.sync.up.b32 %s|%s, %s, 1, 0, %s;\n",
+                  other, shuffle_ok, accum, mask);
+        sb_printf(&fn->body, "\tsetp.ge.u32 %s, %s, 1;\n",
+                  has_predecessor, lane);
+        sb_printf(&fn->body, "\tsub.u32 %s, %s, 1;\n", source, lane);
+        sb_printf(&fn->body, "\tmov.u32 %s, 0;\n", bit);
+        sb_printf(&fn->body, "\t@%s shl.b32 %s, 1, %s;\n",
+                  has_predecessor, bit, source);
+        sb_printf(&fn->body, "\tand.b32 %s, %s, %s;\n", active_bits,
+                  mask, bit);
+        sb_printf(&fn->body, "\tsetp.ne.u32 %s, %s, 0;\n", source_active,
+                  active_bits);
+        sb_printf(&fn->body, "\tand.pred %s, %s, %s;\n", take,
+                  shuffle_ok, has_predecessor);
+        sb_printf(&fn->body, "\tand.pred %s, %s, %s;\n", take_active,
+                  take, source_active);
+        sb_printf(&fn->body, "\tmov.%s %s, %s;\n",
+                  is_float ? "f32" : "u32", accum,
+                  is_float ? "0f00000000" : "0");
+        sb_printf(&fn->body, "\t@%s mov.%s %s, %s;\n", take_active,
+                  is_float ? "f32" : "u32", accum, other);
+      }
+      if (in->dest.name) bind_value(fn, in->dest.name, dv);
+    } else {
+      ptx_emit_numeric_intrinsic(program, func, fn, in, error, ename, handled);
+    }
+    return;
+  }
+  default:
+    *handled = 0;
+    return;
+  }
+}
+
+static void ptx_emit_result(IRProgram *program, IRFunction *func, PtxFn *fn,
+                        const IRInstruction *in, size_t *ii, char **error,
+                        int target_arch, int returns_void, const char *ename,
+                        int *handled) {
+  switch (in->op) {
+  case IR_OP_RETURN:
+    if (func->is_kernel || returns_void) {
+      if (in->lhs.kind != IR_OPERAND_NONE) {
+        fn_error(fn, "PTX: void device function '%s' returns a value",
+                 func->name ? func->name : "?");
+      } else {
+        sb_puts(&fn->body, "\tret;\n");
+      }
+    } else if (in->lhs.kind == IR_OPERAND_NONE) {
+      fn_error(fn, "PTX: non-void device function '%s' has an empty return",
+               func->name ? func->name : "?");
+    } else if (fn->return_desc.mem_aggregate) {
+      PtxBinding *value = named_binding(fn, &in->lhs);
+      if (!value || !value->val.mem_aggregate) {
+        fn_error(fn, "PTX: device function '%s' returns a record it has no "
+                      "storage for",
+                 func->name ? func->name : "?");
+        break;
+      }
+      char source[24], destination[512];
+      reg_name(PC_B64, value->val.mem_addr, source);
+      snprintf(destination, sizeof(destination), "%s_ret", ename);
+      ptx_block_copy(fn, ".param", destination, ".local", source,
+                     fn->return_desc.mem_size, fn->return_desc.mem_align);
+      sb_puts(&fn->body, "\tret;\n");
+    } else {
+      char value[24];
+      use_as(fn, &in->lhs, fn->return_desc.cls, value);
+      sb_printf(&fn->body, "\tst.param.%s [%s_ret], %s;\n\tret;\n",
+                device_param_storage_type(fn->return_desc), ename, value);
+    }
+    break;
+  case IR_OP_ADDRESS_OF: {
+    PtxBinding *home = named_binding(fn, &in->lhs);
+    if (!home || !home->val.mem_local) {
+      fn_error(fn, "PTX: cannot take the address of '%s' in device code",
+               in->lhs.name ? in->lhs.name : "?");
+      break;
+    }
+    PtxVal a = {0};
+    a.cls = PC_B64;
+    a.idx = home->val.mem_addr;
+    a.is_ptr = 1;
+    a.is_unsigned = 1;
+    a.elem = home->val.mem_aggregate ? MTLC_TYPE_VOID : home->val.elem;
+    a.address_space = MTLC_ADDRESS_SPACE_PRIVATE;
+    if (in->dest.name) {
+      bind_value(fn, in->dest.name, a);
+    }
+    break;
+  }
+  default:
+    fn_error(fn, "PTX: unsupported IR opcode %d in device function '%s'", in->op,
+             func->name ? func->name : "?");
+    break;
+  }
+}
+
 static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
                            FILE *out, int target_arch, char target_variant,
                            int isa_major, int isa_minor,
@@ -7224,1588 +8943,40 @@ static void emit_function(IRProgram *program, size_t fi, CodeGenerator *gen,
       g_ptx_vector_loads_saved += width - 1;
       continue;
     }
-    switch (in->op) {
-    case IR_OP_NOP:
-    case IR_OP_ADDRESS_SPACE_ALLOC:
-    case IR_OP_DECLARE_LOCAL: {
-      if (in->op == IR_OP_DECLARE_LOCAL && in->dest.name) {
-        /* pre-allocate a register for the local so refs resolve; aggregates or
-         * address-taken locals are unsupported and will surface as errors. */
-        PtxVal d = in->value_type ? descriptor_from_type(in->value_type)
-                                  : descriptor_from_typename(in->text);
-        if (d.cls == PC_NONE) {
-          fn_error(&fn, "PTX: local '%s' has unsupported type '%s'",
-                   in->dest.name, in->text ? in->text : "?");
-          break;
-        }
-        if (!find_binding(&fn, in->dest.name)) {
-          d.idx = new_reg(&fn, d.cls);
-          bind_value(&fn, in->dest.name, d);
-        }
+    {
+      int handled = 1;
+      ptx_emit_device(program, func, &fn, in, &ii, error, target_arch,
+                       returns_void, ename, &handled);
+      if (!handled) {
+        handled = 1;
+        ptx_emit_control(program, func, &fn, in, &ii, error, target_arch,
+                       returns_void, ename, &handled);
       }
-      break;
-    }
-    case IR_OP_BARRIER:
-      if (!ptx_workgroup_barrier_contract(in)) {
-        fn_error(&fn, "PTX: invalid workgroup barrier memory contract");
-      } else {
-        /* bar.sync is a full CTA execution/memory barrier. It safely
-         * strengthens acquire/release-only contracts and covers both shared
-         * and global accesses made by participating work-items. */
-        sb_puts(&fn.body, "\tbar.sync 0;\n");
+      if (!handled) {
+        handled = 1;
+        ptx_emit_assign(program, func, &fn, in, &ii, error, target_arch,
+                       returns_void, ename, &handled);
       }
-      break;
-    case IR_OP_ASYNC_COPY:
-      ptx_emit_async_copy(&fn, in);
-      break;
-    case IR_OP_ASYNC_COMMIT:
-      ptx_emit_async_commit(&fn);
-      break;
-    case IR_OP_ASYNC_WAIT:
-      ptx_emit_async_wait(&fn, in);
-      break;
-    case IR_OP_TENSOR_TRANSFER:
-      ptx_emit_tensor_transfer(&fn, in);
-      break;
-    case IR_OP_TENSOR_MMA: {
-      size_t epilogue_index = 0;
-      const IRInstruction *epilogue =
-          ptx_following_tensor_epilogue(func, ii, &epilogue_index);
-      if (epilogue &&
-          ptx_try_emit_tensor_mma_resident_epilogue(&fn, in, epilogue)) {
-        ii = epilogue_index;
-      } else {
-        ptx_emit_tensor_mma(&fn, in);
+      if (!handled) {
+        handled = 1;
+        ptx_emit_memory(program, func, &fn, in, &ii, error, target_arch,
+                       returns_void, ename, &handled);
       }
-      break;
-    }
-    case IR_OP_TENSOR_MATMUL:
-      ptx_emit_tensor_matmul(&fn, in);
-      break;
-    case IR_OP_TENSOR_EPILOGUE:
-      if (!ptx_tensor_epilogue_was_consumed(&fn, in))
-        ptx_emit_tensor_epilogue(&fn, in);
-      break;
-    case IR_OP_TENSOR_COMMIT: {
-      size_t epilogue_index = 0;
-      const IRInstruction *epilogue =
-          ptx_following_tensor_epilogue(func, ii, &epilogue_index);
-      int deferred_loop_exit = 0;
-      if (!epilogue) {
-        epilogue =
-            ptx_loop_exit_tensor_epilogue(func, ii, &epilogue_index);
-        deferred_loop_exit = epilogue != NULL;
+      if (!handled) {
+        handled = 1;
+        ptx_emit_arith(program, func, &fn, in, &ii, error, target_arch,
+                       returns_void, ename, &handled);
       }
-      if (epilogue &&
-          ptx_try_emit_tensor_commit_resident_epilogue(&fn, in, epilogue)) {
-        if (deferred_loop_exit) {
-          PtxTensorResidency *group =
-              ptx_tensor_residency_find(&fn, in->tensor_residency_id);
-          if (!group) {
-            fn_error(&fn,
-                     "PTX resident loop epilogue handoff lost residency group");
-          } else {
-            group->consumed_epilogue = epilogue;
-          }
-        } else {
-          ii = epilogue_index;
-        }
-      } else {
-        ptx_emit_tensor_residency_commit(&fn, in);
+      if (!handled) {
+        handled = 1;
+        ptx_emit_call(program, func, &fn, in, &ii, error, target_arch,
+                       returns_void, ename, &handled);
       }
-      break;
-    }
-    case IR_OP_LABEL: {
-      char lbl[256];
-      sanitize_into(in->text ? in->text : "L", lbl, sizeof(lbl));
-      sb_printf(&fn.body, "%s:\n", lbl);
-      break;
-    }
-    case IR_OP_JUMP: {
-      char lbl[256];
-      sanitize_into(in->text ? in->text : "L", lbl, sizeof(lbl));
-      sb_printf(&fn.body, "\tbra %s;\n", lbl);
-      break;
-    }
-    case IR_OP_BRANCH_ZERO: {
-      char lbl[256], r[24];
-      sanitize_into(in->text ? in->text : "L", lbl, sizeof(lbl));
-      PtxVal cv = operand_desc(&fn, &in->lhs);
-      int p = new_reg(&fn, PC_PRED);
-      char pn[24];
-      reg_name(PC_PRED, p, pn);
-      if (cv.cls == PC_F32 || cv.cls == PC_F64) {
-        use_as(&fn, &in->lhs, cv.cls, r);
-        /* Zero immediate as a hex bit-pattern: f32 needs 0f + 8 digits, f64
-         * needs 0d + 16. (Hand-written literals are an easy off-by-one;
-         * formatting from the bits is not.) */
-        if (cv.cls == PC_F32) {
-          sb_printf(&fn.body, "\tsetp.eq.f32 %s, %s, 0f%08X;\n", pn, r, 0u);
-        } else {
-          sb_printf(&fn.body, "\tsetp.eq.f64 %s, %s, 0d%016llX;\n", pn, r, 0ull);
-        }
-      } else {
-        PtxClass c = (cv.cls == PC_B64) ? PC_B64 : PC_B32;
-        use_as(&fn, &in->lhs, c, r);
-        sb_printf(&fn.body, "\tsetp.eq.%s %s, %s, 0;\n",
-                  c == PC_B64 ? "s64" : "s32", pn, r);
+      if (!handled) {
+        handled = 1;
+        ptx_emit_result(program, func, &fn, in, &ii, error, target_arch,
+                       returns_void, ename, &handled);
       }
-      sb_printf(&fn.body, "\t@%s bra%s %s;\n", pn,
-                (in->uniform_branch && target_arch >= 75) ? ".uni" : "",
-                lbl);
-      break;
-    }
-    case IR_OP_BRANCH_EQ: {
-      char lbl[256], a[24], bb[24];
-      sanitize_into(in->text ? in->text : "L", lbl, sizeof(lbl));
-      PtxVal la = operand_desc(&fn, &in->lhs);
-      PtxVal lb = operand_desc(&fn, &in->rhs);
-      PtxClass c = PC_B32;
-      if (la.cls == PC_B64 || lb.cls == PC_B64) {
-        c = PC_B64;
-      }
-      if (la.cls == PC_F32 || lb.cls == PC_F32) {
-        c = PC_F32;
-      }
-      if (la.cls == PC_F64 || lb.cls == PC_F64) {
-        c = PC_F64;
-      }
-      use_as(&fn, &in->lhs, c, a);
-      use_as(&fn, &in->rhs, c, bb);
-      int p = new_reg(&fn, PC_PRED);
-      char pn[24];
-      reg_name(PC_PRED, p, pn);
-      sb_printf(&fn.body, "\tsetp.eq.%s %s, %s, %s;\n",
-                type_suffix_for_class(c, 0), pn, a, bb);
-      sb_printf(&fn.body, "\t@%s bra%s %s;\n", pn,
-                (in->uniform_branch && target_arch >= 75) ? ".uni" : "",
-                lbl);
-      break;
-    }
-    case IR_OP_ASSIGN: {
-      if (!in->dest.name) {
-        fn_error(&fn, "PTX: assign with no dest");
-        break;
-      }
-      /* destination class: reuse if symbol already bound, else infer from src */
-      PtxBinding *db = find_binding(&fn, in->dest.name);
-      PtxBinding *agg = named_binding(&fn, &in->lhs);
-      if (agg && agg->val.mem_aggregate) {
-        /* A whole-record assignment. An unbound destination is a temp standing
-         * in for the same record, so it aliases the storage; a destination with
-         * storage of its own receives a copy, which is what by-value means. */
-        if (!db) {
-          bind_value(&fn, in->dest.name, agg->val);
-          break;
-        }
-        if (!db->val.mem_aggregate) {
-          fn_error(&fn, "PTX: cannot assign a record to the scalar '%s'",
-                   in->dest.name);
-          break;
-        }
-        size_t size = db->val.mem_size < agg->val.mem_size ? db->val.mem_size
-                                                           : agg->val.mem_size;
-        char dst[24], src[24];
-        reg_name(PC_B64, db->val.mem_addr, dst);
-        reg_name(PC_B64, agg->val.mem_addr, src);
-        ptx_block_copy(&fn, ".local", dst, ".local", src, size,
-                       db->val.mem_align);
-        break;
-      }
-      PtxClass dc;
-      if (db) {
-        dc = db->val.cls;
-      } else {
-        PtxVal sv = operand_desc(&fn, &in->lhs);
-        dc = (sv.cls == PC_NONE || sv.cls == PC_PRED) ? PC_B32 : sv.cls;
-      }
-      char src[24];
-      use_as(&fn, &in->lhs, dc, src);
-      PtxVal dv;
-      if (db && db->val.mem_local) {
-        /* The home is memory, so the value lands in a scratch register and
-         * bind_value writes it through. Reusing the binding here would carry
-         * mem_local into the store-back check and drop the write. */
-        dv = (PtxVal){0};
-        dv.cls = dc;
-        dv.is_unsigned = db->val.is_unsigned;
-        dv.idx = new_reg(&fn, dc);
-      } else if (db) {
-        dv = db->val;
-      } else {
-        dv = operand_desc(&fn, &in->lhs);
-        dv.cls = dc;
-        dv.idx = new_reg(&fn, dc);
-      }
-      char dn[24];
-      reg_name(dv.cls, dv.idx, dn);
-      if (strcmp(dn, src) != 0) {
-        const char *mt = (dc == PC_F32)   ? "f32"
-                         : (dc == PC_F64) ? "f64"
-                         : (dc == PC_B64) ? "u64"
-                                          : "u32";
-        sb_printf(&fn.body, "\tmov.%s %s, %s;\n", mt, dn, src);
-      }
-      bind_value(&fn, in->dest.name, dv);
-      break;
-    }
-    case IR_OP_LOAD: {
-      /* A load from a string literal is the frontend taking a format string's
-       * character pointer. PTX has no string value; the print intrinsic reads
-       * the literal directly, so this produces nothing. A temp bound this way
-       * and used for anything else stays undefined, which is the right
-       * diagnostic: kernels have no strings beyond print formats. */
-      if (in->lhs.kind == IR_OPERAND_STRING) {
-        break;
-      }
-      /* dest <- *lhs [rhs size] */
-      PtxVal addr = operand_desc(&fn, &in->lhs);
-      MtlcTypeKind elem = addr.is_ptr ? addr.elem : MTLC_TYPE_VOID;
-      if (elem == MTLC_TYPE_VOID) {
-        long long sz = (in->rhs.kind == IR_OPERAND_INT) ? in->rhs.int_value : 4;
-        if (in->is_float) {
-          if (sz == 2 && in->alias_class == IR_ALIAS_CLASS_F16) {
-            elem = MTLC_TYPE_FLOAT16;
-          } else if (sz == 2 && in->alias_class == IR_ALIAS_CLASS_BF16) {
-            elem = MTLC_TYPE_BFLOAT16;
-          } else {
-            elem = (sz == 4) ? MTLC_TYPE_FLOAT32 : MTLC_TYPE_FLOAT64;
-          }
-        } else {
-          elem = (sz == 8) ? MTLC_TYPE_INT64
-                 : (sz == 2) ? MTLC_TYPE_INT16
-                 : (sz == 1) ? MTLC_TYPE_UINT8
-                             : MTLC_TYPE_INT32;
-        }
-      }
-      char addrreg[24];
-      use_as(&fn, &in->lhs, PC_B64, addrreg);
-      int u = 0;
-      PtxClass dc = elem_class(elem, &u);
-      PtxVal dv = {0};
-      dv.cls = dc;
-      dv.is_unsigned = u;
-      dv = destination_value(&fn, &in->dest, dv);
-      char dn[24];
-      reg_name(dc, dv.idx, dn);
-      const char *space = ptx_load_space(addr.address_space);
-      if (addr.address_space == MTLC_ADDRESS_SPACE_DEFAULT ||
-          addr.address_space == MTLC_ADDRESS_SPACE_GENERIC) {
-        g_ptx_generic_accesses++;
-      } else {
-        g_ptx_spaced_accesses++;
-      }
-      if (!space) {
-        fn_error(&fn, "PTX: invalid load address space %d",
-                 (int)addr.address_space);
-      } else if (elem == MTLC_TYPE_FLOAT16 || elem == MTLC_TYPE_BFLOAT16) {
-        char tmp[24];
-        reg_name(PC_B16, new_reg(&fn, PC_B16), tmp);
-        sb_printf(&fn.body, "\tld%s.b16 %s, [%s];\n", space, tmp, addrreg);
-        sb_printf(&fn.body, "\tcvt.f32.%s %s, %s;\n",
-                  elem == MTLC_TYPE_FLOAT16 ? "f16" : "bf16", dn, tmp);
-      } else {
-        sb_printf(&fn.body, "\tld%s.%s %s, [%s];\n", space,
-                  mem_type_suffix(elem), dn, addrreg);
-      }
-      if (in->dest.name) {
-        bind_value(&fn, in->dest.name, dv);
-      }
-      break;
-    }
-    case IR_OP_STORE: {
-      /* *dest <- lhs [rhs size] */
-      PtxVal addr = operand_desc(&fn, &in->dest);
-      if (in->rhs.kind == IR_OPERAND_INT && in->rhs.int_value > 8) {
-        long long total = in->rhs.int_value;
-        long long offset = 0;
-        PtxVal source = operand_desc(&fn, &in->lhs);
-        const char *dst_space = ptx_memory_space(addr.address_space);
-        const char *src_space =
-            source.is_ptr ? ptx_load_space(source.address_space) : "";
-        char dstreg[24], srcreg[24];
-        use_as(&fn, &in->dest, PC_B64, dstreg);
-        use_as(&fn, &in->lhs, PC_B64, srcreg);
-        if (!src_space) {
-          src_space = "";
-        }
-        if (addr.address_space == MTLC_ADDRESS_SPACE_CONSTANT) {
-          fn_error(&fn, "PTX: store to constant address space");
-          break;
-        }
-        if (!dst_space) {
-          fn_error(&fn, "PTX: invalid store address space %d",
-                   (int)addr.address_space);
-          break;
-        }
-        while (offset < total) {
-          long long width = total - offset >= 8 ? 8
-                            : total - offset >= 4 ? 4
-                            : total - offset >= 2 ? 2 : 1;
-          const char *suffix = width == 8 ? "b64"
-                               : width == 4 ? "b32"
-                               : width == 2 ? "u16" : "u8";
-          PtxClass cls = width == 8 ? PC_B64 : PC_B32;
-          char tmp[24];
-          reg_name(cls, new_reg(&fn, cls), tmp);
-          sb_printf(&fn.body, "\tld%s.%s %s, [%s+%lld];\n", src_space,
-                    suffix, tmp, srcreg, offset);
-          sb_printf(&fn.body, "\tst%s.%s [%s+%lld], %s;\n", dst_space,
-                    suffix, dstreg, offset, tmp);
-          offset += width;
-        }
-        break;
-      }
-      MtlcTypeKind elem = addr.is_ptr ? addr.elem : MTLC_TYPE_VOID;
-      if (elem == MTLC_TYPE_VOID) {
-        long long sz = (in->rhs.kind == IR_OPERAND_INT) ? in->rhs.int_value : 4;
-        if (in->is_float) {
-          if (sz == 2 && in->alias_class == IR_ALIAS_CLASS_F16) {
-            elem = MTLC_TYPE_FLOAT16;
-          } else if (sz == 2 && in->alias_class == IR_ALIAS_CLASS_BF16) {
-            elem = MTLC_TYPE_BFLOAT16;
-          } else {
-            elem = (sz == 4) ? MTLC_TYPE_FLOAT32 : MTLC_TYPE_FLOAT64;
-          }
-        } else {
-          elem = (sz == 8) ? MTLC_TYPE_INT64
-                 : (sz == 2) ? MTLC_TYPE_INT16
-                 : (sz == 1) ? MTLC_TYPE_UINT8
-                             : MTLC_TYPE_INT32;
-        }
-      }
-      int u = 0;
-      PtxClass vc = elem_class(elem, &u);
-      char addrreg[24], valreg[24];
-      use_as(&fn, &in->dest, PC_B64, addrreg);
-      use_as(&fn, &in->lhs, vc, valreg);
-      if (vc == PC_B64) {
-        ptx_generic_address(&fn, &in->lhs, valreg);
-      }
-      const char *space = ptx_memory_space(addr.address_space);
-      if (addr.address_space == MTLC_ADDRESS_SPACE_DEFAULT ||
-          addr.address_space == MTLC_ADDRESS_SPACE_GENERIC) {
-        g_ptx_generic_accesses++;
-      } else {
-        g_ptx_spaced_accesses++;
-      }
-      if (addr.address_space == MTLC_ADDRESS_SPACE_CONSTANT) {
-        fn_error(&fn, "PTX: store to constant address space");
-      } else if (!space) {
-        fn_error(&fn, "PTX: invalid store address space %d",
-                 (int)addr.address_space);
-      } else if (elem == MTLC_TYPE_FLOAT16 || elem == MTLC_TYPE_BFLOAT16) {
-        char tmp[24];
-        reg_name(PC_B16, new_reg(&fn, PC_B16), tmp);
-        sb_printf(&fn.body, "\tcvt.rn.%s.f32 %s, %s;\n",
-                  elem == MTLC_TYPE_FLOAT16 ? "f16" : "bf16", tmp, valreg);
-        sb_printf(&fn.body, "\tst%s.b16 [%s], %s;\n", space, addrreg, tmp);
-      } else {
-        sb_printf(&fn.body, "\tst%s.%s [%s], %s;\n", space,
-                  mem_type_suffix(elem), addrreg, valreg);
-      }
-      break;
-    }
-    case IR_OP_BINARY:
-      emit_binary(&fn, in);
-      break;
-    case IR_OP_UNARY: {
-      const char *t = in->text ? in->text : "";
-      PtxVal sv = operand_desc(&fn, &in->lhs);
-      PtxClass c = in->is_float ? (in->float_bits == 32 ? PC_F32 : PC_F64)
-                                : (sv.cls == PC_B64 ? PC_B64 : PC_B32);
-      char s[24];
-      use_as(&fn, &in->lhs, c, s);
-      PtxVal dv = {0};
-      dv.cls = c;
-      dv = destination_value(&fn, &in->dest, dv);
-      char dn[24];
-      reg_name(c, dv.idx, dn);
-      if (!strcmp(t, "-")) {
-        sb_printf(&fn.body, "\tneg.%s %s, %s;\n", type_suffix_for_class(c, 0),
-                  dn, s);
-      } else if (!strcmp(t, "~")) {
-        sb_printf(&fn.body, "\tnot.%s %s, %s;\n", c == PC_B64 ? "b64" : "b32",
-                  dn, s);
-      } else if (!strcmp(t, "!")) {
-        int p = new_reg(&fn, PC_PRED);
-        char pn[24];
-        reg_name(PC_PRED, p, pn);
-        sb_printf(&fn.body, "\tsetp.eq.%s %s, %s, 0;\n",
-                  c == PC_B64 ? "s64" : "s32", pn, s);
-        sb_printf(&fn.body, "\tselp.u32 %s, 1, 0, %s;\n", dn, pn);
-      } else {
-        fn_error(&fn, "PTX: unsupported unary op '%s'", t);
-      }
-      if (in->dest.name) {
-        bind_value(&fn, in->dest.name, dv);
-      }
-      break;
-    }
-    case IR_OP_CAST: {
-      /* dest = (text) lhs */
-      PtxVal target = in->value_type ? descriptor_from_type(in->value_type)
-                                     : descriptor_from_typename(in->text);
-      MtlcTypeKind target_elem = target.is_ptr ? MTLC_TYPE_VOID : target.elem;
-      if (!target.is_ptr &&
-          (target_elem == MTLC_TYPE_FLOAT16 || target_elem == MTLC_TYPE_BFLOAT16) &&
-          in->is_float) {
-        char s[24];
-        PtxClass src_cls = (in->float_bits == 64) ? PC_F64 : PC_F32;
-        use_as(&fn, &in->lhs, src_cls, s);
-        target.cls = PC_F32;
-        target = destination_value(&fn, &in->dest, target);
-        char dn[24];
-        reg_name(target.cls, target.idx, dn);
-        char tmp[24];
-        reg_name(PC_B16, new_reg(&fn, PC_B16), tmp);
-        const char *to = (target_elem == MTLC_TYPE_FLOAT16) ? "f16" : "bf16";
-        char f32tmp[24];
-        if (src_cls == PC_F64) {
-          reg_name(PC_F32, new_reg(&fn, PC_F32), f32tmp);
-          sb_printf(&fn.body, "\tcvt.rn.f32.f64 %s, %s;\n", f32tmp, s);
-          sb_printf(&fn.body, "\tcvt.rn.%s.f32 %s, %s;\n", to, tmp, f32tmp);
-        } else {
-          sb_printf(&fn.body, "\tcvt.rn.%s.f32 %s, %s;\n", to, tmp, s);
-        }
-        sb_printf(&fn.body, "\tcvt.f32.%s %s, %s;\n", to, dn, tmp);
-        if (in->dest.name) {
-          bind_value(&fn, in->dest.name, target);
-        }
-        break;
-      }
-      char s[24];
-      use_as(&fn, &in->lhs, target.cls, s);
-      target = destination_value(&fn, &in->dest, target);
-      char dn[24];
-      reg_name(target.cls, target.idx, dn);
-      if (strcmp(dn, s) != 0) {
-        const char *mt = (target.cls == PC_F32)   ? "f32"
-                         : (target.cls == PC_F64) ? "f64"
-                         : (target.cls == PC_B64) ? "u64"
-                                                  : "u32";
-        sb_printf(&fn.body, "\tmov.%s %s, %s;\n", mt, dn, s);
-      }
-      ptx_emit_uniform_check(&fn, in, target, target_arch);
-      if (in->dest.name) {
-        bind_value(&fn, in->dest.name, target);
-      }
-      break;
-    }
-    case IR_OP_CALL: {
-      const char *callee = in->text;
-      MtlcIntrinsic intrinsic = in->intrinsic;
-      const char *sreg = sreg_for_intrinsic(intrinsic);
-      if (sreg) {
-        PtxVal dv = {0};
-        dv.cls = PC_B32;
-        dv.is_unsigned = 1;
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_B32, dv.idx, dn);
-        sb_printf(&fn.body, "\tmov.u32 %s, %s;\n", dn, sreg);
-        if (in->dest.name) {
-          bind_value(&fn, in->dest.name, dv);
-        }
-      } else if (intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SIZE) {
-        PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_B32, dv.idx, dn);
-        /* A PTX execution subgroup is an NVIDIA warp. This backend-specific
-         * width never leaks into the semantic IR or SPIR-V lowering. */
-        sb_printf(&fn.body, "\tmov.u32 %s, 32;\n", dn);
-        if (in->dest.name) bind_value(&fn, in->dest.name, dv);
-      } else if ((intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_BROADCAST_U32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_BROADCAST_F32) &&
-                 in->argument_count >= 2) {
-        int is_float =
-            intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_BROADCAST_F32;
-        PtxClass cls = is_float ? PC_F32 : PC_B32;
-        char value[24], source_lane[24], mask[24], dn[24];
-        use_as(&fn, &in->arguments[0], cls, value);
-        use_as(&fn, &in->arguments[1], PC_B32, source_lane);
-        int mask_index = new_reg(&fn, PC_B32);
-        reg_name(PC_B32, mask_index, mask);
-        PtxVal dv = {.cls = cls, .is_unsigned = !is_float};
-        dv = destination_value(&fn, &in->dest, dv);
-        reg_name(cls, dv.idx, dn);
-        sb_printf(&fn.body, "\tactivemask.b32 %s;\n", mask);
-        sb_printf(&fn.body,
-                  "\tshfl.sync.idx.b32 %s, %s, %s, 0x1f, %s;\n",
-                  dn, value, source_lane, mask);
-        if (in->dest.name) bind_value(&fn, in->dest.name, dv);
-      } else if ((intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SHUFFLE_U32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SHUFFLE_F32) &&
-                 in->argument_count >= 2) {
-        int is_float = intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SHUFFLE_F32;
-        PtxClass cls = is_float ? PC_F32 : PC_B32;
-        char value[24], source_lane[24], mask[24], other[24], dn[24];
-        char shuffle_ok[24], source_in_range[24], source_active[24];
-        char bit[24], active_bits[24], take[24];
-        use_as(&fn, &in->arguments[0], cls, value);
-        use_as(&fn, &in->arguments[1], PC_B32, source_lane);
-        int mask_index = new_reg(&fn, PC_B32);
-        int other_index = new_reg(&fn, cls);
-        int shuffle_ok_index = new_reg(&fn, PC_PRED);
-        int source_in_range_index = new_reg(&fn, PC_PRED);
-        int source_active_index = new_reg(&fn, PC_PRED);
-        int bit_index = new_reg(&fn, PC_B32);
-        int active_bits_index = new_reg(&fn, PC_B32);
-        int take_index = new_reg(&fn, PC_PRED);
-        reg_name(PC_B32, mask_index, mask);
-        reg_name(cls, other_index, other);
-        reg_name(PC_PRED, shuffle_ok_index, shuffle_ok);
-        reg_name(PC_PRED, source_in_range_index, source_in_range);
-        reg_name(PC_PRED, source_active_index, source_active);
-        reg_name(PC_B32, bit_index, bit);
-        reg_name(PC_B32, active_bits_index, active_bits);
-        reg_name(PC_PRED, take_index, take);
-        PtxVal dv = {.cls = cls, .is_unsigned = !is_float};
-        dv = destination_value(&fn, &in->dest, dv);
-        reg_name(cls, dv.idx, dn);
-        sb_printf(&fn.body, "\tactivemask.b32 %s;\n", mask);
-        sb_printf(&fn.body,
-                  "\tshfl.sync.idx.b32 %s|%s, %s, %s, 0x1f, %s;\n",
-                  other, shuffle_ok, value, source_lane, mask);
-        sb_printf(&fn.body, "\tsetp.lt.u32 %s, %s, 32;\n",
-                  source_in_range, source_lane);
-        sb_printf(&fn.body, "\tmov.u32 %s, 0;\n", bit);
-        sb_printf(&fn.body, "\t@%s shl.b32 %s, 1, %s;\n",
-                  source_in_range, bit, source_lane);
-        sb_printf(&fn.body, "\tand.b32 %s, %s, %s;\n", active_bits,
-                  mask, bit);
-        sb_printf(&fn.body, "\tsetp.ne.u32 %s, %s, 0;\n", source_active,
-                  active_bits);
-        sb_printf(&fn.body, "\tand.pred %s, %s, %s;\n", take,
-                  shuffle_ok, source_active);
-        sb_printf(&fn.body, "\tmov.%s %s, %s;\n",
-                  is_float ? "f32" : "u32", dn, value);
-        sb_printf(&fn.body, "\t@%s mov.%s %s, %s;\n", take,
-                  is_float ? "f32" : "u32", dn, other);
-        if (in->dest.name) bind_value(&fn, in->dest.name, dv);
-      } else if (intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_BALLOT_WORD &&
-                 in->argument_count >= 2) {
-        char predicate[24], word[24], mask[24], bits[24], word_zero[24], dn[24];
-        use_as(&fn, &in->arguments[0], PC_PRED, predicate);
-        use_as(&fn, &in->arguments[1], PC_B32, word);
-        int mask_index = new_reg(&fn, PC_B32);
-        int bits_index = new_reg(&fn, PC_B32);
-        int word_zero_index = new_reg(&fn, PC_PRED);
-        reg_name(PC_B32, mask_index, mask);
-        reg_name(PC_B32, bits_index, bits);
-        reg_name(PC_PRED, word_zero_index, word_zero);
-        PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
-        dv = destination_value(&fn, &in->dest, dv);
-        reg_name(PC_B32, dv.idx, dn);
-        sb_printf(&fn.body, "\tactivemask.b32 %s;\n", mask);
-        sb_printf(&fn.body, "\tvote.sync.ballot.b32 %s, %s, %s;\n",
-                  bits, predicate, mask);
-        sb_printf(&fn.body, "\tsetp.eq.u32 %s, %s, 0;\n", word_zero, word);
-        sb_printf(&fn.body, "\tmov.u32 %s, 0;\n", dn);
-        sb_printf(&fn.body, "\t@%s mov.u32 %s, %s;\n", word_zero, dn, bits);
-        if (in->dest.name) bind_value(&fn, in->dest.name, dv);
-      } else if ((intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_ANY ||
-                  intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_ALL) &&
-                 in->argument_count >= 1) {
-        char predicate[24], mask[24], dn[24];
-        use_as(&fn, &in->arguments[0], PC_PRED, predicate);
-        int mask_index = new_reg(&fn, PC_B32);
-        reg_name(PC_B32, mask_index, mask);
-        PtxVal dv = {.cls = PC_PRED, .is_unsigned = 1};
-        dv = destination_value(&fn, &in->dest, dv);
-        reg_name(PC_PRED, dv.idx, dn);
-        sb_printf(&fn.body, "\tactivemask.b32 %s;\n", mask);
-        sb_printf(&fn.body, "\tvote.sync.%s.pred %s, %s, %s;\n",
-                  intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_ANY ? "any" : "all",
-                  dn, predicate, mask);
-        if (in->dest.name) bind_value(&fn, in->dest.name, dv);
-      } else if ((intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_U32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_F32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_U32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_U32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32) &&
-                  in->argument_count >= 1) {
-        int is_float = intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_ADD_F32 ||
-                       intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32 ||
-                       intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32;
-        const char *operation =
-            (intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_U32 ||
-             intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MIN_F32)
-                ? "min"
-            : (intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_U32 ||
-               intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_REDUCE_MAX_F32)
-                ? "max"
-                : "add";
-        PtxClass cls = is_float ? PC_F32 : PC_B32;
-        char input[24], accum[24], mask[24], lane[24];
-        use_as(&fn, &in->arguments[0], cls, input);
-        PtxVal dv = {.cls = cls, .is_unsigned = !is_float};
-        dv = destination_value(&fn, &in->dest, dv);
-        reg_name(cls, dv.idx, accum);
-        sb_printf(&fn.body, "\tmov.%s %s, %s;\n",
-                  is_float ? "f32" : "u32", accum, input);
-        int mask_index = new_reg(&fn, PC_B32);
-        int lane_index = new_reg(&fn, PC_B32);
-        reg_name(PC_B32, mask_index, mask);
-        reg_name(PC_B32, lane_index, lane);
-        sb_printf(&fn.body, "\tactivemask.b32 %s;\n", mask);
-        sb_printf(&fn.body, "\tmov.u32 %s, %%laneid;\n", lane);
-
-        /* Uniform collectives may end in a partial final warp. A plain
-         * butterfly reduction would read inactive lanes for non-power-of-two
-         * sizes, so each tree edge is guarded by the captured active mask.
-         * Lane zero then broadcasts the complete sum to every participant. */
-        static const unsigned offsets[] = {16, 8, 4, 2, 1};
-        for (size_t oi = 0; oi < sizeof(offsets) / sizeof(offsets[0]); oi++) {
-          unsigned offset = offsets[oi];
-          char other[24], source[24], bit[24], active_bits[24];
-          char shuffle_ok[24], source_in_range[24], source_active[24], take[24];
-          int other_index = new_reg(&fn, cls);
-          int source_index = new_reg(&fn, PC_B32);
-          int bit_index = new_reg(&fn, PC_B32);
-          int active_bits_index = new_reg(&fn, PC_B32);
-          int shuffle_ok_index = new_reg(&fn, PC_PRED);
-          int source_in_range_index = new_reg(&fn, PC_PRED);
-          int source_active_index = new_reg(&fn, PC_PRED);
-          int take_index = new_reg(&fn, PC_PRED);
-          reg_name(cls, other_index, other);
-          reg_name(PC_B32, source_index, source);
-          reg_name(PC_B32, bit_index, bit);
-          reg_name(PC_B32, active_bits_index, active_bits);
-          reg_name(PC_PRED, shuffle_ok_index, shuffle_ok);
-          reg_name(PC_PRED, source_in_range_index, source_in_range);
-          reg_name(PC_PRED, source_active_index, source_active);
-          reg_name(PC_PRED, take_index, take);
-          sb_printf(&fn.body,
-                    "\tshfl.sync.down.b32 %s|%s, %s, %u, 0x1f, %s;\n",
-                    other, shuffle_ok, accum, offset, mask);
-          sb_printf(&fn.body, "\tadd.u32 %s, %s, %u;\n", source, lane,
-                    offset);
-          sb_printf(&fn.body, "\tsetp.lt.u32 %s, %s, 32;\n",
-                    source_in_range, source);
-          sb_printf(&fn.body, "\tmov.u32 %s, 0;\n", bit);
-          sb_printf(&fn.body, "\t@%s shl.b32 %s, 1, %s;\n",
-                    source_in_range, bit, source);
-          sb_printf(&fn.body, "\tand.b32 %s, %s, %s;\n", active_bits,
-                    mask, bit);
-          sb_printf(&fn.body, "\tsetp.ne.u32 %s, %s, 0;\n", source_active,
-                    active_bits);
-          sb_printf(&fn.body, "\tand.pred %s, %s, %s;\n", take,
-                    shuffle_ok, source_active);
-          sb_printf(&fn.body, "\t@%s %s.%s %s, %s, %s;\n", take, operation,
-                     is_float ? "f32" : "u32", accum, accum, other);
-        }
-        sb_printf(&fn.body,
-                  "\tshfl.sync.idx.b32 %s, %s, 0, 0x1f, %s;\n",
-                  accum, accum, mask);
-        if (in->dest.name) bind_value(&fn, in->dest.name, dv);
-      } else if ((intrinsic ==
-                      MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_U32 ||
-                  intrinsic ==
-                      MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_F32 ||
-                  intrinsic ==
-                      MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_U32 ||
-                  intrinsic ==
-                      MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32) &&
-                 in->argument_count >= 1) {
-        int is_float =
-            intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_INCLUSIVE_ADD_F32 ||
-            intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32;
-        int is_exclusive =
-            intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_U32 ||
-            intrinsic == MTLC_INTRINSIC_GPU_SUBGROUP_SCAN_EXCLUSIVE_ADD_F32;
-        PtxClass cls = is_float ? PC_F32 : PC_B32;
-        char input[24], accum[24], mask[24], lane[24];
-        use_as(&fn, &in->arguments[0], cls, input);
-        PtxVal dv = {.cls = cls, .is_unsigned = !is_float};
-        dv = destination_value(&fn, &in->dest, dv);
-        reg_name(cls, dv.idx, accum);
-        sb_printf(&fn.body, "\tmov.%s %s, %s;\n",
-                  is_float ? "f32" : "u32", accum, input);
-        int mask_index = new_reg(&fn, PC_B32);
-        int lane_index = new_reg(&fn, PC_B32);
-        reg_name(PC_B32, mask_index, mask);
-        reg_name(PC_B32, lane_index, lane);
-        sb_printf(&fn.body, "\tactivemask.b32 %s;\n", mask);
-        sb_printf(&fn.body, "\tmov.u32 %s, %%laneid;\n", lane);
-
-        static const unsigned scan_offsets[] = {1, 2, 4, 8, 16};
-        for (size_t oi = 0;
-             oi < sizeof(scan_offsets) / sizeof(scan_offsets[0]); oi++) {
-          unsigned offset = scan_offsets[oi];
-          char other[24], source[24], bit[24], active_bits[24];
-          char shuffle_ok[24], source_in_range[24], source_active[24], take[24];
-          int other_index = new_reg(&fn, cls);
-          int source_index = new_reg(&fn, PC_B32);
-          int bit_index = new_reg(&fn, PC_B32);
-          int active_bits_index = new_reg(&fn, PC_B32);
-          int shuffle_ok_index = new_reg(&fn, PC_PRED);
-          int source_in_range_index = new_reg(&fn, PC_PRED);
-          int source_active_index = new_reg(&fn, PC_PRED);
-          int take_index = new_reg(&fn, PC_PRED);
-          reg_name(cls, other_index, other);
-          reg_name(PC_B32, source_index, source);
-          reg_name(PC_B32, bit_index, bit);
-          reg_name(PC_B32, active_bits_index, active_bits);
-          reg_name(PC_PRED, shuffle_ok_index, shuffle_ok);
-          reg_name(PC_PRED, source_in_range_index, source_in_range);
-          reg_name(PC_PRED, source_active_index, source_active);
-          reg_name(PC_PRED, take_index, take);
-          sb_printf(&fn.body,
-                    "\tshfl.sync.up.b32 %s|%s, %s, %u, 0, %s;\n",
-                    other, shuffle_ok, accum, offset, mask);
-          sb_printf(&fn.body, "\tsetp.ge.u32 %s, %s, %u;\n",
-                    source_in_range, lane, offset);
-          sb_printf(&fn.body, "\tsub.u32 %s, %s, %u;\n", source, lane,
-                    offset);
-          sb_printf(&fn.body, "\tmov.u32 %s, 0;\n", bit);
-          sb_printf(&fn.body, "\t@%s shl.b32 %s, 1, %s;\n",
-                    source_in_range, bit, source);
-          sb_printf(&fn.body, "\tand.b32 %s, %s, %s;\n", active_bits,
-                    mask, bit);
-          sb_printf(&fn.body, "\tsetp.ne.u32 %s, %s, 0;\n", source_active,
-                    active_bits);
-          sb_printf(&fn.body, "\tand.pred %s, %s, %s;\n", take,
-                    shuffle_ok, source_active);
-          sb_printf(&fn.body, "\t@%s add.%s %s, %s, %s;\n", take,
-                    is_float ? "f32" : "u32", accum, accum, other);
-        }
-
-        if (is_exclusive) {
-          char other[24], source[24], bit[24], active_bits[24];
-          char shuffle_ok[24], has_predecessor[24], source_active[24];
-          char take[24], take_active[24];
-          int other_index = new_reg(&fn, cls);
-          int source_index = new_reg(&fn, PC_B32);
-          int bit_index = new_reg(&fn, PC_B32);
-          int active_bits_index = new_reg(&fn, PC_B32);
-          int shuffle_ok_index = new_reg(&fn, PC_PRED);
-          int has_predecessor_index = new_reg(&fn, PC_PRED);
-          int source_active_index = new_reg(&fn, PC_PRED);
-          int take_index = new_reg(&fn, PC_PRED);
-          int take_active_index = new_reg(&fn, PC_PRED);
-          reg_name(cls, other_index, other);
-          reg_name(PC_B32, source_index, source);
-          reg_name(PC_B32, bit_index, bit);
-          reg_name(PC_B32, active_bits_index, active_bits);
-          reg_name(PC_PRED, shuffle_ok_index, shuffle_ok);
-          reg_name(PC_PRED, has_predecessor_index, has_predecessor);
-          reg_name(PC_PRED, source_active_index, source_active);
-          reg_name(PC_PRED, take_index, take);
-          reg_name(PC_PRED, take_active_index, take_active);
-          sb_printf(&fn.body,
-                    "\tshfl.sync.up.b32 %s|%s, %s, 1, 0, %s;\n",
-                    other, shuffle_ok, accum, mask);
-          sb_printf(&fn.body, "\tsetp.ge.u32 %s, %s, 1;\n",
-                    has_predecessor, lane);
-          sb_printf(&fn.body, "\tsub.u32 %s, %s, 1;\n", source, lane);
-          sb_printf(&fn.body, "\tmov.u32 %s, 0;\n", bit);
-          sb_printf(&fn.body, "\t@%s shl.b32 %s, 1, %s;\n",
-                    has_predecessor, bit, source);
-          sb_printf(&fn.body, "\tand.b32 %s, %s, %s;\n", active_bits,
-                    mask, bit);
-          sb_printf(&fn.body, "\tsetp.ne.u32 %s, %s, 0;\n", source_active,
-                    active_bits);
-          sb_printf(&fn.body, "\tand.pred %s, %s, %s;\n", take,
-                    shuffle_ok, has_predecessor);
-          sb_printf(&fn.body, "\tand.pred %s, %s, %s;\n", take_active,
-                    take, source_active);
-          sb_printf(&fn.body, "\tmov.%s %s, %s;\n",
-                    is_float ? "f32" : "u32", accum,
-                    is_float ? "0f00000000" : "0");
-          sb_printf(&fn.body, "\t@%s mov.%s %s, %s;\n", take_active,
-                    is_float ? "f32" : "u32", accum, other);
-        }
-        if (in->dest.name) bind_value(&fn, in->dest.name, dv);
-      } else if (intrinsic == MTLC_INTRINSIC_GPU_WORKGROUP_BARRIER) {
-        sb_puts(&fn.body, "\tbar.sync 0;\n");
-      } else if (intrinsic == MTLC_INTRINSIC_GPU_F16_BITS_TO_F32 &&
-                 in->argument_count >= 1) {
-        /* h2f(bits): reinterpret a uint16 fp16 bit-pattern as float32. The arg
-         * arrives as a 32-bit int (zero-extended u16 load); truncate to .b16 and
-         * cvt.f32.f16. Lets prefill keep fp16-resident weights and convert on
-         * the fly with one PTX instruction. */
-        char a[24];
-        use_as(&fn, &in->arguments[0], PC_B32, a);
-        int hidx = new_reg(&fn, PC_B16);
-        char hn[24];
-        reg_name(PC_B16, hidx, hn);
-        sb_printf(&fn.body, "\tcvt.u16.u32 %s, %s;\n", hn, a);
-        PtxVal dv = {.cls = PC_F32};
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_F32, dv.idx, dn);
-        sb_printf(&fn.body, "\tcvt.f32.f16 %s, %s;\n", dn, hn);
-        if (in->dest.name)
-          bind_value(&fn, in->dest.name, dv);
-      } else if (intrinsic == MTLC_INTRINSIC_GPU_F32_TO_F16_BITS &&
-                 in->argument_count >= 1) {
-        /* f2h(x): float32 -> uint16 fp16 bit-pattern (cvt.rn.f16.f32), returned
-         * zero-extended in a 32-bit int so a uint16 store writes the low 16. */
-        char a[24];
-        use_as(&fn, &in->arguments[0], PC_F32, a);
-        int hidx = new_reg(&fn, PC_B16);
-        char hn[24];
-        reg_name(PC_B16, hidx, hn);
-        sb_printf(&fn.body, "\tcvt.rn.f16.f32 %s, %s;\n", hn, a);
-        PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_B32, dv.idx, dn);
-        sb_printf(&fn.body, "\tcvt.u32.u16 %s, %s;\n", dn, hn);
-        if (in->dest.name)
-          bind_value(&fn, in->dest.name, dv);
-      } else if (intrinsic == MTLC_INTRINSIC_GPU_F32_FROM_BITS &&
-                 in->argument_count >= 1) {
-        /* f32_from_bits(u32): reinterpret an IEEE-754 bit pattern as float32.
-         * One mov.b32 across register files; no arithmetic reconstruction. */
-        char a[24];
-        use_as(&fn, &in->arguments[0], PC_B32, a);
-        PtxVal dv = {.cls = PC_F32};
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_F32, dv.idx, dn);
-        sb_printf(&fn.body, "\tmov.b32 %s, %s;\n", dn, a);
-        if (in->dest.name)
-          bind_value(&fn, in->dest.name, dv);
-      } else if (intrinsic == MTLC_INTRINSIC_GPU_F32_TO_BITS &&
-                 in->argument_count >= 1) {
-        /* bits_from_f32(x): the float32's IEEE-754 encoding as uint32. */
-        char a[24];
-        use_as(&fn, &in->arguments[0], PC_F32, a);
-        PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_B32, dv.idx, dn);
-        sb_printf(&fn.body, "\tmov.b32 %s, %s;\n", dn, a);
-        if (in->dest.name)
-          bind_value(&fn, in->dest.name, dv);
-      } else if ((intrinsic == MTLC_INTRINSIC_GPU_DP4A_U32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_DP4A_S32) &&
-                 in->argument_count >= 3) {
-        /* dp4a(a, b, c): four-way packed-byte dot product with 32-bit
-         * accumulate. Collapses the shift/mask/convert/FMA chain of quantized
-         * decode to one instruction (sm_61+; every supported target qualifies). */
-        int is_signed = intrinsic == MTLC_INTRINSIC_GPU_DP4A_S32;
-        char a[24];
-        char b[24];
-        char c[24];
-        use_as(&fn, &in->arguments[0], PC_B32, a);
-        use_as(&fn, &in->arguments[1], PC_B32, b);
-        use_as(&fn, &in->arguments[2], PC_B32, c);
-        PtxVal dv = {.cls = PC_B32, .is_unsigned = !is_signed};
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_B32, dv.idx, dn);
-        sb_printf(&fn.body, "\tdp4a.%s %s, %s, %s, %s;\n",
-                  is_signed ? "s32.s32" : "u32.u32", dn, a, b, c);
-        if (in->dest.name)
-          bind_value(&fn, in->dest.name, dv);
-      } else if ((intrinsic == MTLC_INTRINSIC_GPU_HADD2 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_HMUL2 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_HFMA2) &&
-                 in->argument_count >= 2) {
-        /* Two fp16 lanes per instruction. The carrier is a 32-bit value
-         * holding {hi, lo}; f16x2 arithmetic is the reason to keep
-         * activations packed rather than widening every element to f32. */
-        int is_fma = intrinsic == MTLC_INTRINSIC_GPU_HFMA2;
-        char a[24];
-        char b[24];
-        char c[24];
-        use_as(&fn, &in->arguments[0], PC_B32, a);
-        use_as(&fn, &in->arguments[1], PC_B32, b);
-        if (is_fma) {
-          use_as(&fn, &in->arguments[2], PC_B32, c);
-        }
-        PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_B32, dv.idx, dn);
-        if (is_fma) {
-          sb_printf(&fn.body, "\tfma.rn.f16x2 %s, %s, %s, %s;\n", dn, a, b, c);
-        } else {
-          sb_printf(&fn.body, "\t%s.rn.f16x2 %s, %s, %s;\n",
-                    intrinsic == MTLC_INTRINSIC_GPU_HADD2 ? "add" : "mul", dn,
-                    a, b);
-        }
-        if (in->dest.name)
-          bind_value(&fn, in->dest.name, dv);
-      } else if ((intrinsic == MTLC_INTRINSIC_GPU_H2F_LO ||
-                  intrinsic == MTLC_INTRINSIC_GPU_H2F_HI) &&
-                 in->argument_count >= 1) {
-        /* Widen one lane of a packed pair to f32. */
-        char a[24];
-        use_as(&fn, &in->arguments[0], PC_B32, a);
-        const char *source = a;
-        char shifted_name[24];
-        if (intrinsic == MTLC_INTRINSIC_GPU_H2F_HI) {
-          int shifted = new_reg(&fn, PC_B32);
-          reg_name(PC_B32, shifted, shifted_name);
-          sb_printf(&fn.body, "\tshr.u32 %s, %s, 16;\n", shifted_name, a);
-          source = shifted_name;
-        }
-        int half = new_reg(&fn, PC_B16);
-        char half_name[24];
-        reg_name(PC_B16, half, half_name);
-        sb_printf(&fn.body, "\tcvt.u16.u32 %s, %s;\n", half_name, source);
-        PtxVal dv = {.cls = PC_F32};
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_F32, dv.idx, dn);
-        sb_printf(&fn.body, "\tcvt.f32.f16 %s, %s;\n", dn, half_name);
-        if (in->dest.name)
-          bind_value(&fn, in->dest.name, dv);
-      } else if (intrinsic == MTLC_INTRINSIC_GPU_F2H2 &&
-                 in->argument_count >= 2) {
-        /* Pack two f32 values into one f16 pair, low lane first. */
-        char lo[24];
-        char hi[24];
-        use_as(&fn, &in->arguments[0], PC_F32, lo);
-        use_as(&fn, &in->arguments[1], PC_F32, hi);
-        int lo_half = new_reg(&fn, PC_B16);
-        int hi_half = new_reg(&fn, PC_B16);
-        char lo_name[24];
-        char hi_name[24];
-        reg_name(PC_B16, lo_half, lo_name);
-        reg_name(PC_B16, hi_half, hi_name);
-        sb_printf(&fn.body, "\tcvt.rn.f16.f32 %s, %s;\n", lo_name, lo);
-        sb_printf(&fn.body, "\tcvt.rn.f16.f32 %s, %s;\n", hi_name, hi);
-        PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_B32, dv.idx, dn);
-        sb_printf(&fn.body, "\tmov.b32 %s, {%s, %s};\n", dn, lo_name, hi_name);
-        if (in->dest.name)
-          bind_value(&fn, in->dest.name, dv);
-      } else if (intrinsic == MTLC_INTRINSIC_GPU_BF2F &&
-                 in->argument_count >= 1) {
-        /* bfloat16 is the top half of an f32, so widening is exact and needs
-         * no conversion instruction or architecture floor. */
-        char a[24];
-        use_as(&fn, &in->arguments[0], PC_B32, a);
-        int shifted = new_reg(&fn, PC_B32);
-        char shifted_name[24];
-        reg_name(PC_B32, shifted, shifted_name);
-        sb_printf(&fn.body, "\tshl.b32 %s, %s, 16;\n", shifted_name, a);
-        PtxVal dv = {.cls = PC_F32};
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_F32, dv.idx, dn);
-        sb_printf(&fn.body, "\tmov.b32 %s, %s;\n", dn, shifted_name);
-        if (in->dest.name)
-          bind_value(&fn, in->dest.name, dv);
-      } else if (intrinsic == MTLC_INTRINSIC_GPU_F2BF &&
-                 in->argument_count >= 1) {
-        /* Round-to-nearest-even down to bfloat16, in integer arithmetic so it
-         * holds on every target rather than only where cvt.rn.bf16.f32 does:
-         * add half an ulp plus the low bit of the kept mantissa, then drop
-         * the low half. */
-        char a[24];
-        use_as(&fn, &in->arguments[0], PC_F32, a);
-        int bits = new_reg(&fn, PC_B32);
-        int carry = new_reg(&fn, PC_B32);
-        int rounded = new_reg(&fn, PC_B32);
-        char bits_name[24];
-        char carry_name[24];
-        char rounded_name[24];
-        reg_name(PC_B32, bits, bits_name);
-        reg_name(PC_B32, carry, carry_name);
-        reg_name(PC_B32, rounded, rounded_name);
-        sb_printf(&fn.body, "\tmov.b32 %s, %s;\n", bits_name, a);
-        sb_printf(&fn.body, "\tshr.u32 %s, %s, 16;\n", carry_name, bits_name);
-        sb_printf(&fn.body, "\tand.b32 %s, %s, 1;\n", carry_name, carry_name);
-        sb_printf(&fn.body, "\tadd.u32 %s, %s, 32767;\n", rounded_name,
-                  carry_name);
-        sb_printf(&fn.body, "\tadd.u32 %s, %s, %s;\n", rounded_name,
-                  rounded_name, bits_name);
-        PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_B32, dv.idx, dn);
-        sb_printf(&fn.body, "\tshr.u32 %s, %s, 16;\n", dn, rounded_name);
-        if (in->dest.name)
-          bind_value(&fn, in->dest.name, dv);
-      } else if (intrinsic == MTLC_INTRINSIC_GPU_ASSERT &&
-                 in->argument_count >= 1) {
-        /* A false condition traps the launch at the offending lane, which is
-         * what turns "the numbers are wrong somewhere" into a located fault.
-         * Only under --gpu-checks: an assertion left in shipped source must
-         * cost nothing. */
-        if (g_ptx_emit_checks) {
-          char condition[24];
-          use_as(&fn, &in->arguments[0], PC_B32, condition);
-          int predicate = new_reg(&fn, PC_PRED);
-          char predicate_name[24];
-          reg_name(PC_PRED, predicate, predicate_name);
-          size_t label = fn.call_count++;
-          sb_printf(&fn.body, "\tsetp.ne.s32 %s, %s, 0;\n", predicate_name,
-                    condition);
-          sb_printf(&fn.body, "\t@%s bra $mtlc_assert_ok_%zu;\n",
-                    predicate_name, label);
-          sb_puts(&fn.body, "\ttrap;\n");
-          sb_printf(&fn.body, "$mtlc_assert_ok_%zu:\n", label);
-        }
-      } else if (ptx_intrinsic_is_print(intrinsic) &&
-                 in->argument_count >= 1) {
-        /* vprintf(format, argument_buffer). The format is a module-scope byte
-         * array interned in the pool; the arguments go through a per-call
-         * local buffer laid out to the C varargs rules the device runtime
-         * reads them back with (4-byte ints, doubles for floats). */
-        const char *format = ptx_literal_string(fn.function, &in->arguments[0]);
-        if (!format) {
-          fn_error(&fn, "PTX: a kernel print needs a literal format string");
-        } else {
-          int index = ptx_string_index(format);
-          if (index < 0) {
-            fn_error(&fn, "PTX: kernel print format was not interned");
-          } else {
-            size_t site = fn.call_count++;
-            int buffer_bytes =
-                intrinsic == MTLC_INTRINSIC_GPU_PRINT      ? 0
-                : intrinsic == MTLC_INTRINSIC_GPU_PRINT_I32 ? 4
-                : intrinsic == MTLC_INTRINSIC_GPU_PRINT_F32 ? 8
-                                                            : 8;
-            if (buffer_bytes > 0) {
-              sb_printf(&fn.declarations,
-                        "\t.local .align 8 .b8 $mtlc_print_args_%zu[%d];\n",
-                        site, buffer_bytes);
-            }
-            int format_register = new_reg(&fn, PC_B64);
-            char format_name[24];
-            reg_name(PC_B64, format_register, format_name);
-            sb_printf(&fn.body, "\tmov.u64 %s, $mtlc_str_%d;\n", format_name,
-                      index);
-            sb_printf(&fn.body, "\tcvta.global.u64 %s, %s;\n", format_name,
-                      format_name);
-            int args_register = new_reg(&fn, PC_B64);
-            char args_name[24];
-            reg_name(PC_B64, args_register, args_name);
-            if (buffer_bytes > 0) {
-              sb_printf(&fn.body, "\tmov.u64 %s, $mtlc_print_args_%zu;\n",
-                        args_name, site);
-              sb_printf(&fn.body, "\tcvta.local.u64 %s, %s;\n", args_name,
-                        args_name);
-              if (intrinsic == MTLC_INTRINSIC_GPU_PRINT_I32) {
-                char value[24];
-                use_as(&fn, &in->arguments[1], PC_B32, value);
-                sb_printf(&fn.body, "\tst.u32 [%s], %s;\n", args_name, value);
-              } else if (intrinsic == MTLC_INTRINSIC_GPU_PRINT_F32) {
-                /* C varargs promote float to double before the callee reads
-                 * it, so %f in the format string expects eight bytes. */
-                char value[24];
-                use_as(&fn, &in->arguments[1], PC_F32, value);
-                int widened = new_reg(&fn, PC_F64);
-                char widened_name[24];
-                reg_name(PC_F64, widened, widened_name);
-                sb_printf(&fn.body, "\tcvt.f64.f32 %s, %s;\n", widened_name,
-                          value);
-                sb_printf(&fn.body, "\tst.f64 [%s], %s;\n", args_name,
-                          widened_name);
-              } else {
-                char first[24];
-                char second[24];
-                use_as(&fn, &in->arguments[1], PC_B32, first);
-                use_as(&fn, &in->arguments[2], PC_B32, second);
-                sb_printf(&fn.body, "\tst.u32 [%s], %s;\n", args_name, first);
-                sb_printf(&fn.body, "\tst.u32 [%s+4], %s;\n", args_name,
-                          second);
-              }
-            } else {
-              sb_printf(&fn.body, "\tmov.u64 %s, 0;\n", args_name);
-            }
-            sb_puts(&fn.body, "\t{\n");
-            sb_puts(&fn.body, "\t.param .b64 $mtlc_print_fmt;\n");
-            sb_puts(&fn.body, "\t.param .b64 $mtlc_print_buf;\n");
-            sb_puts(&fn.body, "\t.param .b32 $mtlc_print_ret;\n");
-            sb_printf(&fn.body, "\tst.param.b64 [$mtlc_print_fmt+0], %s;\n",
-                      format_name);
-            sb_printf(&fn.body, "\tst.param.b64 [$mtlc_print_buf+0], %s;\n",
-                      args_name);
-            sb_puts(&fn.body,
-                    "\tcall.uni ($mtlc_print_ret), vprintf, "
-                    "($mtlc_print_fmt, $mtlc_print_buf);\n");
-            sb_puts(&fn.body, "\t}\n");
-          }
-        }
-      } else if ((intrinsic == MTLC_INTRINSIC_GPU_DP2A_LO_U32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_DP2A_LO_S32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_U32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32) &&
-                 in->argument_count >= 3) {
-        /* dp2a: two 16-bit halves of a against two bytes of b (low or high
-         * pair), accumulated into c. The mixed-width sibling of dp4a. */
-        int is_signed = intrinsic == MTLC_INTRINSIC_GPU_DP2A_LO_S32 ||
-                        intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32;
-        int is_high = intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_U32 ||
-                      intrinsic == MTLC_INTRINSIC_GPU_DP2A_HI_S32;
-        char a[24];
-        char b[24];
-        char c[24];
-        use_as(&fn, &in->arguments[0], PC_B32, a);
-        use_as(&fn, &in->arguments[1], PC_B32, b);
-        use_as(&fn, &in->arguments[2], PC_B32, c);
-        PtxVal dv = {.cls = PC_B32, .is_unsigned = !is_signed};
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_B32, dv.idx, dn);
-        sb_printf(&fn.body, "\tdp2a.%s.%s %s, %s, %s, %s;\n",
-                  is_high ? "hi" : "lo", is_signed ? "s32.s32" : "u32.u32", dn,
-                  a, b, c);
-        if (in->dest.name)
-          bind_value(&fn, in->dest.name, dv);
-      } else if (intrinsic == MTLC_INTRINSIC_GPU_PRMT_B32 &&
-                 in->argument_count >= 3) {
-        /* prmt(a, b, selector): gather four bytes out of the {b:a} byte octet,
-         * one selector nibble each. One instruction for the byte shuffling
-         * that nibble-quant decode otherwise spends shifts and masks on. */
-        char a[24];
-        char b[24];
-        char sel[24];
-        use_as(&fn, &in->arguments[0], PC_B32, a);
-        use_as(&fn, &in->arguments[1], PC_B32, b);
-        use_as(&fn, &in->arguments[2], PC_B32, sel);
-        PtxVal dv = {.cls = PC_B32, .is_unsigned = 1};
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_B32, dv.idx, dn);
-        sb_printf(&fn.body, "\tprmt.b32 %s, %s, %s, %s;\n", dn, a, b, sel);
-        if (in->dest.name)
-          bind_value(&fn, in->dest.name, dv);
-      } else if ((intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_LOAD4_U32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_STORE4_F32 ||
-                  intrinsic == MTLC_INTRINSIC_GPU_STORE4_U32) &&
-                 in->argument_count >= 2) {
-        /* One 128-bit transaction for four consecutive 32-bit elements. The
-         * scalar side is four ordinary accesses against the other pointer,
-         * which ptxas keeps in registers when that pointer is a small
-         * constant-indexed private array. Both addresses must be 16-byte
-         * aligned; that is a source contract, as it is for async copies. */
-        int is_load = intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
-                      intrinsic == MTLC_INTRINSIC_GPU_LOAD4_U32;
-        int is_float = intrinsic == MTLC_INTRINSIC_GPU_LOAD4_F32 ||
-                       intrinsic == MTLC_INTRINSIC_GPU_STORE4_F32;
-        PtxClass cls = is_float ? PC_F32 : PC_B32;
-        const char *suffix = is_float ? "f32" : "u32";
-        /* Argument order is always (vector side, scalar side): load4 reads the
-         * vector pointer, store4 writes it. */
-        const IROperand *vector_operand = &in->arguments[0];
-        const IROperand *scalar_operand = &in->arguments[1];
-        PtxVal vector_desc = operand_desc(&fn, vector_operand);
-        PtxVal scalar_desc = operand_desc(&fn, scalar_operand);
-        const char *vector_space = ptx_memory_space(vector_desc.address_space);
-        const char *scalar_space = ptx_memory_space(scalar_desc.address_space);
-        char vector_address[24];
-        char scalar_address[24];
-        use_as(&fn, vector_operand, PC_B64, vector_address);
-        use_as(&fn, scalar_operand, PC_B64, scalar_address);
-        if (!vector_space || !scalar_space) {
-          fn_error(&fn, "PTX: invalid address space in a 4-wide transfer");
-        } else {
-          int lanes[4];
-          char lane_names[4][24];
-          for (int lane = 0; lane < 4; lane++) {
-            lanes[lane] = new_reg(&fn, cls);
-            reg_name(cls, lanes[lane], lane_names[lane]);
-          }
-          if (is_load) {
-            sb_printf(&fn.body, "\tld%s.v4.%s {%s, %s, %s, %s}, [%s];\n",
-                      vector_space, suffix, lane_names[0], lane_names[1],
-                      lane_names[2], lane_names[3], vector_address);
-            for (int lane = 0; lane < 4; lane++) {
-              sb_printf(&fn.body, "\tst%s.%s [%s+%d], %s;\n", scalar_space,
-                        suffix, scalar_address, lane * 4, lane_names[lane]);
-            }
-          } else {
-            for (int lane = 0; lane < 4; lane++) {
-              sb_printf(&fn.body, "\tld%s.%s %s, [%s+%d];\n", scalar_space,
-                        suffix, lane_names[lane], scalar_address, lane * 4);
-            }
-            sb_printf(&fn.body, "\tst%s.v4.%s [%s], {%s, %s, %s, %s};\n",
-                      vector_space, suffix, vector_address, lane_names[0],
-                      lane_names[1], lane_names[2], lane_names[3]);
-          }
-        }
-      } else if (intrinsic >= MTLC_INTRINSIC_GPU_SQRT_F32 &&
-                 intrinsic <= MTLC_INTRINSIC_GPU_EXP_F32 &&
-                 in->argument_count >= 1) {
-        /* single-arg f32 math -> PTX approximations (inference-grade, mirrors
-         * the fast CPU approximations the engine already uses). */
-        char a[24];
-        use_as(&fn, &in->arguments[0], PC_F32, a);
-        PtxVal dv = {.cls = PC_F32};
-        dv = destination_value(&fn, &in->dest, dv);
-        char dn[24];
-        reg_name(PC_F32, dv.idx, dn);
-        if (intrinsic == MTLC_INTRINSIC_GPU_SQRT_F32) {
-          sb_printf(&fn.body, "\tsqrt.rn.f32 %s, %s;\n", dn, a);
-        } else if (intrinsic == MTLC_INTRINSIC_GPU_RSQRT_F32) {
-          sb_printf(&fn.body, "\trsqrt.approx.f32 %s, %s;\n", dn, a);
-        } else if (intrinsic == MTLC_INTRINSIC_GPU_ABS_F32) {
-          sb_printf(&fn.body, "\tabs.f32 %s, %s;\n", dn, a);
-        } else if (intrinsic == MTLC_INTRINSIC_GPU_SIN_F32) {
-          sb_printf(&fn.body, "\tsin.approx.f32 %s, %s;\n", dn, a);
-        } else if (intrinsic == MTLC_INTRINSIC_GPU_COS_F32) {
-          sb_printf(&fn.body, "\tcos.approx.f32 %s, %s;\n", dn, a);
-        } else if (intrinsic == MTLC_INTRINSIC_GPU_LOG_F32) {
-          /* ln(x) = lg2(x) / log2(e) = lg2(x) * 0.6931471805599453 */
-          int t = new_reg(&fn, PC_F32);
-          char tn[24];
-          reg_name(PC_F32, t, tn);
-          sb_printf(&fn.body, "\tlg2.approx.f32 %s, %s;\n", tn, a);
-          sb_printf(&fn.body, "\tmul.f32 %s, %s, 0f3F317218;\n", dn, tn);
-        } else { /* expf: exp(x) = 2^(x * log2(e)), log2(e)=1.4426950408 */
-          int t = new_reg(&fn, PC_F32);
-          char tn[24];
-          reg_name(PC_F32, t, tn);
-          sb_printf(&fn.body, "\tmul.f32 %s, %s, 0f3FB8AA3B;\n", tn, a);
-          sb_printf(&fn.body, "\tex2.approx.f32 %s, %s;\n", dn, tn);
-        }
-        if (in->dest.name)
-          bind_value(&fn, in->dest.name, dv);
-      } else if (ir_intrinsic_is_atomic(intrinsic) &&
-                 in->argument_count >=
-                     (size_t)ir_intrinsic_arity(intrinsic)) {
-        /* Full unsigned atomic load/store/RMW/CAS family. Element indices stay
-         * 64-bit all the way into address generation; large buffers must not
-         * silently wrap at 2^31/2^32 elements. */
-        int is64 =
-            ir_intrinsic_atomic_value_kind(intrinsic) == MTLC_TYPE_UINT64;
-        int is_cas = ir_intrinsic_is_compare_exchange(intrinsic);
-        int is_load = ir_intrinsic_is_atomic_load(intrinsic);
-        int is_store = ir_intrinsic_is_atomic_store(intrinsic);
-        int is_sub = intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_SUB_U32 ||
-                     intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_SUB_U64;
-        const char *opn =
-            intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_ADD_U32 ||
-                    intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_ADD_U64 || is_sub
-                ? "add"
-            : intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_MIN_U32 ||
-                    intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_MIN_U64
-                ? "min"
-            : intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_MAX_U32 ||
-                    intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_MAX_U64
-                ? "max"
-            : intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_AND_U32 ||
-                    intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_AND_U64
-                ? "and"
-            : intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_OR_U32 ||
-                    intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_OR_U64
-                ? "or"
-            : intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_XOR_U32 ||
-                    intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_XOR_U64
-                ? "xor"
-            : is_cas ? "cas"
-                     : "exch";
-        int bit_type = is_cas ||
-                       intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_AND_U32 ||
-                       intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_AND_U64 ||
-                       intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_OR_U32 ||
-                       intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_OR_U64 ||
-                       intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_XOR_U32 ||
-                       intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_XOR_U64 ||
-                       intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_EXCHANGE_U32 ||
-                       intrinsic == MTLC_INTRINSIC_GPU_ATOMIC_EXCHANGE_U64;
-        const char *sem = ptx_atomic_order(in->memory_order);
-        const char *scope = ptx_atomic_scope(in->memory_scope);
-        const char *space = ptx_atomic_space(in->address_space);
-        PtxClass vc = is64 ? PC_B64 : PC_B32;
-        int elem = is64 ? 8 : 4;
-        char bufr[24], idxr[24], valr[24] = {0};
-        use_as(&fn, &in->arguments[0], PC_B64, bufr);
-        use_as(&fn, &in->arguments[1], PC_B64, idxr);
-        if (!is_load) use_as(&fn, &in->arguments[2], vc, valr);
-        if (is_sub) {
-          int neg = new_reg(&fn, vc);
-          char negn[24];
-          reg_name(vc, neg, negn);
-          sb_printf(&fn.body, "\tneg.%s %s, %s;\n",
-                    is64 ? "s64" : "s32", negn, valr);
-          strcpy(valr, negn);
-        }
-        int offset = new_reg(&fn, PC_B64);
-        int addr = new_reg(&fn, PC_B64);
-        char offn[24], an[24];
-        reg_name(PC_B64, offset, offn);
-        reg_name(PC_B64, addr, an);
-        sb_printf(&fn.body, "\tmul.lo.u64 %s, %s, %d;\n", offn, idxr, elem);
-        sb_printf(&fn.body, "\tadd.u64 %s, %s, %s;\n", an, bufr, offn);
-        PtxVal dv = {.cls = vc, .is_unsigned = 1};
-        char dn[24] = {0};
-        if (!is_store) {
-          dv = destination_value(&fn, &in->dest, dv);
-          reg_name(vc, dv.idx, dn);
-        }
-        int failure_valid =
-            !is_cas ||
-            (in->failure_memory_order != MTLC_MEMORY_ORDER_RELEASE &&
-             in->failure_memory_order != MTLC_MEMORY_ORDER_ACQ_REL &&
-             ((in->memory_order == MTLC_MEMORY_ORDER_RELAXED &&
-               in->failure_memory_order == MTLC_MEMORY_ORDER_RELAXED) ||
-              ((in->memory_order == MTLC_MEMORY_ORDER_ACQUIRE ||
-                in->memory_order == MTLC_MEMORY_ORDER_ACQ_REL) &&
-               (in->failure_memory_order == MTLC_MEMORY_ORDER_RELAXED ||
-                in->failure_memory_order == MTLC_MEMORY_ORDER_ACQUIRE)) ||
-              (in->memory_order == MTLC_MEMORY_ORDER_RELEASE &&
-               in->failure_memory_order == MTLC_MEMORY_ORDER_RELAXED) ||
-              in->memory_order == MTLC_MEMORY_ORDER_SEQ_CST));
-        int order_valid =
-            (!is_load || in->memory_order == MTLC_MEMORY_ORDER_RELAXED ||
-             in->memory_order == MTLC_MEMORY_ORDER_ACQUIRE ||
-             in->memory_order == MTLC_MEMORY_ORDER_SEQ_CST) &&
-            (!is_store || in->memory_order == MTLC_MEMORY_ORDER_RELAXED ||
-             in->memory_order == MTLC_MEMORY_ORDER_RELEASE ||
-             in->memory_order == MTLC_MEMORY_ORDER_SEQ_CST);
-        if (!sem || !scope || !space || !failure_valid || !order_valid ||
-            (in->address_space == MTLC_ADDRESS_SPACE_WORKGROUP &&
-             in->memory_scope > MTLC_MEMORY_SCOPE_WORKGROUP)) {
-          fn_error(&fn,
-                   "PTX: invalid atomic memory contract (space=%d success=%d failure=%d scope=%d)",
-                   (int)in->address_space, (int)in->memory_order,
-                   (int)in->failure_memory_order, (int)in->memory_scope);
-        } else {
-          if (in->memory_order == MTLC_MEMORY_ORDER_SEQ_CST) {
-            sb_printf(&fn.body, "\tfence.sc.%s;\n", scope);
-          }
-          const char *type =
-              bit_type ? (is64 ? "b64" : "b32")
-                       : (is64 ? "u64" : "u32");
-          if (is_load) {
-            sb_printf(&fn.body, "\tld.%s.%s%s.%s %s, [%s];\n", sem,
-                      scope, space, type, dn, an);
-          } else if (is_store) {
-            const char *store_sem =
-                in->memory_order == MTLC_MEMORY_ORDER_SEQ_CST ? "relaxed"
-                                                               : sem;
-            sb_printf(&fn.body, "\tst.%s.%s%s.%s [%s], %s;\n", store_sem,
-                      scope, space, type, an, valr);
-          } else if (is_cas) {
-            char desired[24];
-            use_as(&fn, &in->arguments[3], vc, desired);
-            /* PTX takes comparator then desired value. Its single qualifier
-             * strengthens a weaker failure order to the success order. */
-            sb_printf(&fn.body,
-                      "\tatom.%s.%s%s.%s.%s %s, [%s], %s, %s;\n",
-                      sem, scope, space, opn, type, dn, an, valr, desired);
-          } else {
-            sb_printf(&fn.body, "\tatom.%s.%s%s.%s.%s %s, [%s], %s;\n",
-                      sem, scope, space, opn, type, dn, an, valr);
-          }
-        }
-        if (in->dest.name && !is_store)
-          bind_value(&fn, in->dest.name, dv);
-      } else if (intrinsic == MTLC_INTRINSIC_NONE) {
-        IRFunction *callee_function = ptx_lookup_function(program, callee);
-        const IRModuleSymbol *callee_symbol =
-            ir_program_lookup_symbol(program, callee);
-        if (!callee_function || !callee_symbol ||
-            callee_symbol->kind != IR_MODSYM_FUNCTION) {
-          fn_error(&fn, "PTX: device call target '%s' has no definition",
-                   callee ? callee : "?");
-          break;
-        }
-        if (in->argument_count != callee_function->parameter_count ||
-            in->argument_count != callee_symbol->param_count) {
-          fn_error(&fn,
-                   "PTX: device call '%s' expects %zu arguments, received %zu",
-                   callee, callee_symbol->param_count, in->argument_count);
-          break;
-        }
-
-        char callee_name[256];
-        sanitize_into(callee, callee_name, sizeof(callee_name));
-        size_t call_id = fn.call_count++;
-        char **argument_params =
-            calloc(in->argument_count ? in->argument_count : 1,
-                   sizeof(*argument_params));
-        if (!argument_params) {
-          fn_error(&fn, "PTX: out of memory lowering device call '%s'", callee);
-          break;
-        }
-        for (size_t a = 0; a < in->argument_count && !fn.error; a++) {
-          const MtlcType *argument_type = callee_symbol->param_types[a];
-          char parameter[320];
-          snprintf(parameter, sizeof(parameter), "__mtlc_call_%zu_arg_%zu",
-                   call_id, a);
-          argument_params[a] = strdup(parameter);
-          if (!argument_params[a]) {
-            fn_error(&fn, "PTX: out of memory lowering device call '%s'",
-                     callee);
-            break;
-          }
-          if (ptx_type_is_aggregate(argument_type)) {
-            PtxBinding *record = named_binding(&fn, &in->arguments[a]);
-            if (!record || !record->val.mem_aggregate) {
-              fn_error(&fn,
-                       "PTX: argument %zu of '%s' is a record with no storage",
-                       a, callee);
-              break;
-            }
-            size_t size = mtlc_type_size(argument_type);
-            size_t alignment = mtlc_type_alignment(argument_type);
-            if (!alignment) {
-              alignment = 1;
-            }
-            char source[24];
-            reg_name(PC_B64, record->val.mem_addr, source);
-            sb_printf(&fn.declarations, "\t.param .align %zu .b8 %s[%zu];\n",
-                      alignment, parameter, size);
-            ptx_block_copy(&fn, ".param", parameter, ".local", source, size,
-                           alignment);
-            continue;
-          }
-          PtxVal argument_desc = descriptor_from_type(argument_type);
-          char value[24];
-          use_as(&fn, &in->arguments[a], argument_desc.cls, value);
-          ptx_generic_address(&fn, &in->arguments[a], value);
-          sb_printf(&fn.declarations, "\t.param .%s %s;\n",
-                    device_param_storage_type(argument_desc), parameter);
-          sb_printf(&fn.body, "\tst.param.%s [%s], %s;\n",
-                    device_param_storage_type(argument_desc), parameter, value);
-        }
-
-        const MtlcType *callee_return_type = ptx_function_return_type(
-            program, callee_function, callee_symbol);
-        int callee_returns_void = ptx_type_is_void(
-            callee_return_type, callee_function->return_type_name);
-        int result_is_record = ptx_type_is_aggregate(callee_return_type);
-        PtxVal result_desc = callee_returns_void
-                                 ? (PtxVal){0}
-                                 : descriptor_from_type(callee_return_type);
-        char return_parameter[320] = {0};
-        char result_storage[512] = {0};
-        if (result_is_record && !fn.error) {
-          result_desc = (PtxVal){0};
-          result_desc.cls = PC_B64;
-          result_desc.elem = MTLC_TYPE_VOID;
-          result_desc.mem_local = 1;
-          result_desc.mem_aggregate = 1;
-          result_desc.mem_size = mtlc_type_size(callee_return_type);
-          result_desc.mem_align = mtlc_type_alignment(callee_return_type);
-          if (!result_desc.mem_align) {
-            result_desc.mem_align = 1;
-          }
-          char raw[512];
-          snprintf(raw, sizeof(raw), "__mtlc_call_%zu_ret_local", call_id);
-          sanitize_into(raw, result_storage, sizeof(result_storage));
-          sb_printf(&fn.declarations, "\t.local .align %zu .b8 %s[%zu];\n",
-                    result_desc.mem_align, result_storage,
-                    result_desc.mem_size);
-        }
-        if (!callee_returns_void && !fn.error) {
-          snprintf(return_parameter, sizeof(return_parameter),
-                   "__mtlc_call_%zu_ret", call_id);
-          if (result_is_record) {
-            sb_printf(&fn.declarations, "\t.param .align %zu .b8 %s[%zu];\n",
-                      result_desc.mem_align, return_parameter,
-                      result_desc.mem_size);
-          } else {
-            sb_printf(&fn.declarations, "\t.param .%s %s;\n",
-                      device_param_storage_type(result_desc), return_parameter);
-          }
-        }
-        if (!fn.error) {
-          if (callee_returns_void) {
-            sb_printf(&fn.body, "\tcall.uni %s, (", callee_name);
-          } else {
-            sb_printf(&fn.body, "\tcall.uni (%s), %s, (", return_parameter,
-                      callee_name);
-          }
-          for (size_t a = 0; a < in->argument_count; a++) {
-            sb_printf(&fn.body, "%s%s", a ? ", " : "", argument_params[a]);
-          }
-          sb_puts(&fn.body, ");\n");
-
-          if (callee_returns_void) {
-            if (in->dest.name) {
-              fn_error(&fn, "PTX: void device call '%s' has a result", callee);
-            }
-          } else if (result_is_record) {
-            char pointer[24];
-            result_desc.mem_addr = new_reg(&fn, PC_B64);
-            reg_name(PC_B64, result_desc.mem_addr, pointer);
-            sb_printf(&fn.body, "\tmov.u64 %s, %s;\n", pointer, result_storage);
-            ptx_block_copy(&fn, ".local", pointer, ".param", return_parameter,
-                           result_desc.mem_size, result_desc.mem_align);
-            if (in->dest.name) {
-              bind_value(&fn, in->dest.name, result_desc);
-            }
-          } else if (in->dest.name) {
-            result_desc = destination_value(&fn, &in->dest, result_desc);
-            char result[24];
-            reg_name(result_desc.cls, result_desc.idx, result);
-            sb_printf(&fn.body, "\tld.param.%s %s, [%s];\n",
-                      device_param_storage_type(result_desc), result,
-                      return_parameter);
-            bind_value(&fn, in->dest.name, result_desc);
-          }
-        }
-        for (size_t a = 0; a < in->argument_count; a++) {
-          free(argument_params[a]);
-        }
-        free(argument_params);
-      } else {
-        fn_error(&fn, "PTX: unsupported call '%s'", callee ? callee : "?");
-      }
-      break;
-    }
-    case IR_OP_RETURN:
-      if (func->is_kernel || returns_void) {
-        if (in->lhs.kind != IR_OPERAND_NONE) {
-          fn_error(&fn, "PTX: void device function '%s' returns a value",
-                   func->name ? func->name : "?");
-        } else {
-          sb_puts(&fn.body, "\tret;\n");
-        }
-      } else if (in->lhs.kind == IR_OPERAND_NONE) {
-        fn_error(&fn, "PTX: non-void device function '%s' has an empty return",
-                 func->name ? func->name : "?");
-      } else if (fn.return_desc.mem_aggregate) {
-        PtxBinding *value = named_binding(&fn, &in->lhs);
-        if (!value || !value->val.mem_aggregate) {
-          fn_error(&fn, "PTX: device function '%s' returns a record it has no "
-                        "storage for",
-                   func->name ? func->name : "?");
-          break;
-        }
-        char source[24], destination[512];
-        reg_name(PC_B64, value->val.mem_addr, source);
-        snprintf(destination, sizeof(destination), "%s_ret", ename);
-        ptx_block_copy(&fn, ".param", destination, ".local", source,
-                       fn.return_desc.mem_size, fn.return_desc.mem_align);
-        sb_puts(&fn.body, "\tret;\n");
-      } else {
-        char value[24];
-        use_as(&fn, &in->lhs, fn.return_desc.cls, value);
-        sb_printf(&fn.body, "\tst.param.%s [%s_ret], %s;\n\tret;\n",
-                  device_param_storage_type(fn.return_desc), ename, value);
-      }
-      break;
-    case IR_OP_ADDRESS_OF: {
-      PtxBinding *home = named_binding(&fn, &in->lhs);
-      if (!home || !home->val.mem_local) {
-        fn_error(&fn, "PTX: cannot take the address of '%s' in device code",
-                 in->lhs.name ? in->lhs.name : "?");
-        break;
-      }
-      PtxVal a = {0};
-      a.cls = PC_B64;
-      a.idx = home->val.mem_addr;
-      a.is_ptr = 1;
-      a.is_unsigned = 1;
-      a.elem = home->val.mem_aggregate ? MTLC_TYPE_VOID : home->val.elem;
-      a.address_space = MTLC_ADDRESS_SPACE_PRIVATE;
-      if (in->dest.name) {
-        bind_value(&fn, in->dest.name, a);
-      }
-      break;
-    }
-    default:
-      fn_error(&fn, "PTX: unsupported IR opcode %d in device function '%s'", in->op,
-               func->name ? func->name : "?");
-      break;
     }
   }
 
