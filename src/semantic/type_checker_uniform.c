@@ -531,37 +531,8 @@ static int lane_local_value(TypeChecker *checker, ASTNode *node,
   return 1;
 }
 
-static int lane_value(TypeChecker *checker, ASTNode *expression, long long lane,
+static int lane_binary_value(TypeChecker *checker, ASTNode *expression, long long lane,
                       int depth, long long *out) {
-  long long constant = 0;
-  if (!expression || depth > 32) {
-    return 0;
-  }
-  if (type_checker_eval_integer_constant_with_checker(checker, expression,
-                                                      &constant)) {
-    *out = constant;
-    return 1;
-  }
-  switch (expression->type) {
-  case AST_FUNCTION_CALL: {
-    CallExpression *call = (CallExpression *)expression->data;
-    if (call && call->is_gpu_index && call->function_name &&
-        strcmp(call->function_name, "gpu_tid_x") == 0) {
-      *out = lane;
-      return 1;
-    }
-    if (call && call->function_name &&
-        strcmp(call->function_name, "subgroup_local_id") == 0) {
-      *out = lane;
-      return 1;
-    }
-    return 0;
-  }
-  case AST_CAST_EXPRESSION: {
-    CastExpression *cast = (CastExpression *)expression->data;
-    return cast && lane_value(checker, cast->operand, lane, depth + 1, out);
-  }
-  case AST_BINARY_EXPRESSION: {
     BinaryExpression *binary = (BinaryExpression *)expression->data;
     long long left = 0;
     long long right = 0;
@@ -593,7 +564,41 @@ static int lane_value(TypeChecker *checker, ASTNode *expression, long long lane,
       return 1;
     }
     return 0;
+}
+
+static int lane_value(TypeChecker *checker, ASTNode *expression, long long lane,
+                      int depth, long long *out) {
+  long long constant = 0;
+  if (!expression || depth > 32) {
+    return 0;
   }
+  if (type_checker_eval_integer_constant_with_checker(checker, expression,
+                                                      &constant)) {
+    *out = constant;
+    return 1;
+  }
+  switch (expression->type) {
+  case AST_FUNCTION_CALL: {
+    CallExpression *call = (CallExpression *)expression->data;
+    if (call && call->is_gpu_index && call->function_name &&
+        strcmp(call->function_name, "gpu_tid_x") == 0) {
+      *out = lane;
+      return 1;
+    }
+    if (call && call->function_name &&
+        strcmp(call->function_name, "subgroup_local_id") == 0) {
+      *out = lane;
+      return 1;
+    }
+    return 0;
+  }
+  case AST_CAST_EXPRESSION: {
+    CastExpression *cast = (CastExpression *)expression->data;
+    return cast && lane_value(checker, cast->operand, lane, depth + 1, out);
+  }
+  case AST_BINARY_EXPRESSION:
+    return lane_binary_value(checker, expression, lane, depth, out);
+
   case AST_IDENTIFIER: {
     Identifier *identifier = (Identifier *)expression->data;
     ASTNode *owner_node = checker->current_function_decl;

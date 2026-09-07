@@ -1286,6 +1286,92 @@ static int type_checker_process_deferred(TypeChecker *checker,
   return 0;
 }
 
+static int type_checker_check_declared_address_space(
+    TypeChecker *checker, ASTNode *declaration, VarDeclaration *var_decl,
+    Scope *current_scope, Type **var_type_io) {
+  Type *var_type = *var_type_io;
+  FunctionDeclaration *owner =
+      checker->current_function_decl &&
+              checker->current_function_decl->type == AST_FUNCTION_DECLARATION
+          ? (FunctionDeclaration *)checker->current_function_decl->data
+          : NULL;
+  if (!owner || !owner->is_kernel || !current_scope ||
+      current_scope->type == SCOPE_GLOBAL) {
+    type_checker_set_error_at_location(
+        checker, declaration->location,
+        "%s storage is only legal inside a GPU kernel",
+        var_decl->address_space == AST_ADDRESS_SPACE_WORKGROUP ? "workgroup"
+                                                               : "private");
+    return 0;
+  }
+  if (var_decl->is_const || var_decl->is_extern || var_decl->is_exported) {
+    type_checker_set_error_at_location(
+        checker, declaration->location,
+        "GPU address-space storage must be a local 'var' binding");
+    return 0;
+  }
+  if (var_decl->initializer) {
+    type_checker_set_error_at_location(
+        checker, declaration->location,
+        "%s storage cannot have a declaration initializer; initialize "
+        "elements explicitly",
+        var_decl->address_space == AST_ADDRESS_SPACE_WORKGROUP ? "workgroup"
+                                                               : "private");
+    return 0;
+  }
+  int is_static_storage =
+      var_type && var_type->kind == TYPE_ARRAY && var_type->base_type &&
+      var_type->array_size > 0 && var_type->array_size <= UINT32_MAX;
+  /* A view whose extents are in its type is static storage of the same
+     shape: the element count is the product of the extents, and the layout
+     says where each element sits inside it. */
+  int is_static_view = var_type && var_type->kind == TYPE_SLICE &&
+                       var_type->base_type && var_type->view_extents[0] > 0;
+  type_checker_note_device_type_in(
+      checker, var_decl->name, var_type,
+      var_decl->address_space == AST_ADDRESS_SPACE_WORKGROUP
+          ? DEVICE_SPACE_SHARED
+          : DEVICE_SPACE_LOCAL,
+      declaration->location);
+  int is_dynamic_workgroup_view =
+      var_type && var_type->kind == TYPE_POINTER && var_type->base_type &&
+      var_decl->address_space == AST_ADDRESS_SPACE_WORKGROUP;
+  if (!is_static_storage && !is_static_view && !is_dynamic_workgroup_view) {
+    type_checker_set_error_at_location(
+        checker, declaration->location,
+        "GPU address-space storage requires a statically sized array type "
+        "with at most %u elements, or a pointer type for a dynamic "
+        "workgroup view",
+        UINT32_MAX);
+    return 0;
+  }
+  Type *element_type = var_type->base_type;
+  switch (element_type->kind) {
+  case TYPE_INT8:
+  case TYPE_INT16:
+  case TYPE_INT32:
+  case TYPE_INT64:
+  case TYPE_UINT8:
+  case TYPE_UINT16:
+  case TYPE_UINT32:
+  case TYPE_UINT64:
+  case TYPE_BOOL:
+  case TYPE_FLOAT32:
+  case TYPE_FLOAT64:
+  case TYPE_FLOAT16:
+  case TYPE_BFLOAT16:
+    break;
+  default:
+    type_checker_set_error_at_location(
+        checker, declaration->location,
+        "GPU address-space binding '%s' must have a scalar numeric element "
+        "type",
+        var_decl->name);
+    return 0;
+  }
+  return 1;
+}
+
 static int type_checker_check_address_space(TypeChecker *checker,
                                             ASTNode *declaration,
                                             VarDeclaration *var_decl,
@@ -1293,85 +1379,8 @@ static int type_checker_check_address_space(TypeChecker *checker,
                                             Type **var_type_io) {
   Type *var_type = *var_type_io;
   if (var_decl->address_space != AST_ADDRESS_SPACE_DEFAULT) {
-    FunctionDeclaration *owner =
-        checker->current_function_decl &&
-                checker->current_function_decl->type == AST_FUNCTION_DECLARATION
-            ? (FunctionDeclaration *)checker->current_function_decl->data
-            : NULL;
-    if (!owner || !owner->is_kernel || !current_scope ||
-        current_scope->type == SCOPE_GLOBAL) {
-      type_checker_set_error_at_location(
-          checker, declaration->location,
-          "%s storage is only legal inside a GPU kernel",
-          var_decl->address_space == AST_ADDRESS_SPACE_WORKGROUP ? "workgroup"
-                                                                 : "private");
-      return 0;
-    }
-    if (var_decl->is_const || var_decl->is_extern || var_decl->is_exported) {
-      type_checker_set_error_at_location(
-          checker, declaration->location,
-          "GPU address-space storage must be a local 'var' binding");
-      return 0;
-    }
-    if (var_decl->initializer) {
-      type_checker_set_error_at_location(
-          checker, declaration->location,
-          "%s storage cannot have a declaration initializer; initialize "
-          "elements explicitly",
-          var_decl->address_space == AST_ADDRESS_SPACE_WORKGROUP ? "workgroup"
-                                                                 : "private");
-      return 0;
-    }
-    int is_static_storage =
-        var_type && var_type->kind == TYPE_ARRAY && var_type->base_type &&
-        var_type->array_size > 0 && var_type->array_size <= UINT32_MAX;
-    /* A view whose extents are in its type is static storage of the same
-       shape: the element count is the product of the extents, and the layout
-       says where each element sits inside it. */
-    int is_static_view = var_type && var_type->kind == TYPE_SLICE &&
-                         var_type->base_type && var_type->view_extents[0] > 0;
-    type_checker_note_device_type_in(
-        checker, var_decl->name, var_type,
-        var_decl->address_space == AST_ADDRESS_SPACE_WORKGROUP
-            ? DEVICE_SPACE_SHARED
-            : DEVICE_SPACE_LOCAL,
-        declaration->location);
-    int is_dynamic_workgroup_view =
-        var_type && var_type->kind == TYPE_POINTER && var_type->base_type &&
-        var_decl->address_space == AST_ADDRESS_SPACE_WORKGROUP;
-    if (!is_static_storage && !is_static_view && !is_dynamic_workgroup_view) {
-      type_checker_set_error_at_location(
-          checker, declaration->location,
-          "GPU address-space storage requires a statically sized array type "
-          "with at most %u elements, or a pointer type for a dynamic "
-          "workgroup view",
-          UINT32_MAX);
-      return 0;
-    }
-    Type *element_type = var_type->base_type;
-    switch (element_type->kind) {
-    case TYPE_INT8:
-    case TYPE_INT16:
-    case TYPE_INT32:
-    case TYPE_INT64:
-    case TYPE_UINT8:
-    case TYPE_UINT16:
-    case TYPE_UINT32:
-    case TYPE_UINT64:
-    case TYPE_BOOL:
-    case TYPE_FLOAT32:
-    case TYPE_FLOAT64:
-    case TYPE_FLOAT16:
-    case TYPE_BFLOAT16:
-      break;
-    default:
-      type_checker_set_error_at_location(
-          checker, declaration->location,
-          "GPU address-space binding '%s' must have a scalar numeric element "
-          "type",
-          var_decl->name);
-      return 0;
-    }
+    return type_checker_check_declared_address_space(
+        checker, declaration, var_decl, current_scope, var_type_io);
   }
   *var_type_io = var_type;
   return 1;

@@ -95,6 +95,50 @@ size_t type_checker_expression_multiple_of(TypeChecker *checker,
 /* The alignment an address expression is known to have. An `align(N)` claim is
    accepted only where this reaches N; the number it did reach is what the
    refusal reports. */
+static size_t type_checker_unary_alignment(TypeChecker *checker,
+                                           ASTNode *expression,
+                                           int depth) {
+  UnaryExpression *unary = (UnaryExpression *)expression->data;
+  if (unary && unary->operator && strcmp(unary->operator, "&") == 0 &&
+      unary->operand && unary->operand->type == AST_INDEX_EXPRESSION) {
+    ArrayIndexExpression *index = (ArrayIndexExpression *)unary->operand->data;
+    Type *base = index && index->array ? index->array->resolved_type : NULL;
+    Type *element = base ? base->base_type : NULL;
+    size_t base_align = 0;
+    size_t stride = element ? element->size : 0;
+    size_t offset_multiple;
+    if (!index || !base || !element || stride == 0) {
+      return 0;
+    }
+    if (base->declared_align) {
+      base_align = base->declared_align;
+    } else if (type_checker_lvalue_device_space(checker, index->array) ==
+               DEVICE_SPACE_SHARED) {
+      /* A workgroup tile is emitted 32-byte aligned, which is what makes a
+         swizzled tile's vector accesses legal. */
+      base_align = 32;
+    } else if (base->kind == TYPE_ARRAY) {
+      base_align = base->alignment ? base->alignment : element->size;
+    } else if (base->kind == TYPE_POINTER || base->kind == TYPE_SLICE) {
+      /* Nothing was declared, so all that is known is that the elements are
+         where their own type puts them. */
+      base_align = element->alignment ? element->alignment : element->size;
+    }
+    if (!base_align) {
+      return 0;
+    }
+    offset_multiple =
+        type_checker_expression_multiple_of(checker, index->index, 0);
+    if (offset_multiple > 4096 / (stride ? stride : 1)) {
+      offset_multiple = 4096;
+    } else {
+      offset_multiple *= stride;
+    }
+    return base_align < offset_multiple ? base_align : offset_multiple;
+  }
+  return 0;
+}
+
 size_t type_checker_address_alignment(TypeChecker *checker, ASTNode *expression,
                                       int depth) {
   if (!checker || !expression || depth > 16) {
@@ -113,44 +157,7 @@ size_t type_checker_address_alignment(TypeChecker *checker, ASTNode *expression,
     return expression->resolved_type->declared_align;
   }
   if (expression->type == AST_UNARY_EXPRESSION) {
-    UnaryExpression *unary = (UnaryExpression *)expression->data;
-    if (unary && unary->operator && strcmp(unary->operator, "&") == 0 &&
-        unary->operand && unary->operand->type == AST_INDEX_EXPRESSION) {
-      ArrayIndexExpression *index = (ArrayIndexExpression *)unary->operand->data;
-      Type *base = index && index->array ? index->array->resolved_type : NULL;
-      Type *element = base ? base->base_type : NULL;
-      size_t base_align = 0;
-      size_t stride = element ? element->size : 0;
-      size_t offset_multiple;
-      if (!index || !base || !element || stride == 0) {
-        return 0;
-      }
-      if (base->declared_align) {
-        base_align = base->declared_align;
-      } else if (type_checker_lvalue_device_space(checker, index->array) ==
-                 DEVICE_SPACE_SHARED) {
-        /* A workgroup tile is emitted 32-byte aligned, which is what makes a
-           swizzled tile's vector accesses legal. */
-        base_align = 32;
-      } else if (base->kind == TYPE_ARRAY) {
-        base_align = base->alignment ? base->alignment : element->size;
-      } else if (base->kind == TYPE_POINTER || base->kind == TYPE_SLICE) {
-        /* Nothing was declared, so all that is known is that the elements are
-           where their own type puts them. */
-        base_align = element->alignment ? element->alignment : element->size;
-      }
-      if (!base_align) {
-        return 0;
-      }
-      offset_multiple =
-          type_checker_expression_multiple_of(checker, index->index, 0);
-      if (offset_multiple > 4096 / (stride ? stride : 1)) {
-        offset_multiple = 4096;
-      } else {
-        offset_multiple *= stride;
-      }
-      return base_align < offset_multiple ? base_align : offset_multiple;
-    }
+    return type_checker_unary_alignment(checker, expression, depth);
   }
   if (expression->type == AST_IDENTIFIER) {
     Identifier *identifier = (Identifier *)expression->data;
@@ -2855,6 +2862,60 @@ static Type *type_checker_check_syscall(TypeChecker *checker,
   return checker->builtin_int64;
 }
 
+static Type *type_checker_interp_builtin(TypeChecker *checker,
+                                         CallExpression *call,
+                                         ASTNode *expression, int *handled) {
+  if (call->argument_count != 1 || !call->arguments ||
+      !call->arguments[0]) {
+    type_checker_set_error_at_location(
+        checker, expression->location,
+        "String interpolation takes exactly one value");
+    return NULL;
+  }
+  Type *value_type =
+      type_checker_infer_type(checker, call->arguments[0]);
+  if (!value_type) {
+    return NULL;
+  }
+  switch (value_type->kind) {
+  case TYPE_INT8:
+  case TYPE_INT16:
+  case TYPE_INT32:
+  case TYPE_INT64:
+  case TYPE_UINT8:
+  case TYPE_UINT16:
+  case TYPE_UINT32:
+  case TYPE_UINT64:
+  case TYPE_BOOL:
+  case TYPE_CHAR:
+  case TYPE_FLOAT32:
+  case TYPE_FLOAT64:
+  case TYPE_FLOAT16:
+  case TYPE_BFLOAT16:
+  case TYPE_STRING:
+    return checker->builtin_string;
+  /* The C-facing surface hands back `cstring`, so this is the first thing
+   * anybody interpolates after calling into C. It is a pointer type with a
+   * name rather than a kind of its own, and only that one name interpolates:
+   * any other pointer has no length to read. */
+  case TYPE_POINTER:
+    if (value_type->name && strcmp(value_type->name, "cstring") == 0) {
+      return checker->builtin_string;
+    }
+    goto interpolation_unsupported;
+  default:
+  interpolation_unsupported:
+    type_checker_set_error_at_location(
+        checker, call->arguments[0]->location,
+        "Cannot interpolate a value of type '%s' into a string; "
+        "interpolation takes integers, characters, booleans, floats, "
+        "strings and C strings",
+        value_type->name ? value_type->name : "?");
+    return NULL;
+  }
+  return NULL;
+}
+
 static Type *type_checker_infer_named_builtin(TypeChecker *checker,
                                               ASTNode *expression,
                                               CallExpression *call,
@@ -2940,54 +3001,7 @@ static Type *type_checker_infer_named_builtin(TypeChecker *checker,
    * "{expr}" part. It types as string for every value the runtime can
    * render; IR lowering picks the mettle_string_from_* helper. */
   if (strcmp(call->function_name, "__mtl_interp") == 0) {
-    if (call->argument_count != 1 || !call->arguments ||
-        !call->arguments[0]) {
-      type_checker_set_error_at_location(
-          checker, expression->location,
-          "String interpolation takes exactly one value");
-      return NULL;
-    }
-    Type *value_type =
-        type_checker_infer_type(checker, call->arguments[0]);
-    if (!value_type) {
-      return NULL;
-    }
-    switch (value_type->kind) {
-    case TYPE_INT8:
-    case TYPE_INT16:
-    case TYPE_INT32:
-    case TYPE_INT64:
-    case TYPE_UINT8:
-    case TYPE_UINT16:
-    case TYPE_UINT32:
-    case TYPE_UINT64:
-    case TYPE_BOOL:
-    case TYPE_CHAR:
-    case TYPE_FLOAT32:
-    case TYPE_FLOAT64:
-    case TYPE_FLOAT16:
-    case TYPE_BFLOAT16:
-    case TYPE_STRING:
-      return checker->builtin_string;
-    /* The C-facing surface hands back `cstring`, so this is the first thing
-     * anybody interpolates after calling into C. It is a pointer type with a
-     * name rather than a kind of its own, and only that one name interpolates:
-     * any other pointer has no length to read. */
-    case TYPE_POINTER:
-      if (value_type->name && strcmp(value_type->name, "cstring") == 0) {
-        return checker->builtin_string;
-      }
-      goto interpolation_unsupported;
-    default:
-    interpolation_unsupported:
-      type_checker_set_error_at_location(
-          checker, call->arguments[0]->location,
-          "Cannot interpolate a value of type '%s' into a string; "
-          "interpolation takes integers, characters, booleans, floats, "
-          "strings and C strings",
-          value_type->name ? value_type->name : "?");
-      return NULL;
-    }
+    return type_checker_interp_builtin(checker, call, expression, handled);
   }
 
   *handled = 0;

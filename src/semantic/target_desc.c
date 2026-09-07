@@ -131,6 +131,177 @@ static int copy_wide_names(char (*slots)[16], size_t *count, size_t capacity,
   return 1;
 }
 
+static int read_numeric_field(const AggregateLiteral *literal, size_t i,
+                              MtlcTargetDescription *out, const char *field,
+                              ASTNode *value, char *error,
+                              size_t error_size) {
+  long long number = 0;
+
+  (void)literal;
+  (void)i;
+  if (strncmp(field, "cost_", 5) == 0) {
+    static const struct {
+      const char *name;
+      size_t offset;
+    } costs[] = {
+        {"cost_op", offsetof(MtlcTargetDescription, cost_op)},
+        {"cost_load", offsetof(MtlcTargetDescription, cost_load)},
+        {"cost_store", offsetof(MtlcTargetDescription, cost_store)},
+        {"cost_branch", offsetof(MtlcTargetDescription, cost_branch)},
+        {"cost_multiply", offsetof(MtlcTargetDescription, cost_multiply)},
+        {"cost_multiply_float",
+         offsetof(MtlcTargetDescription, cost_multiply_float)},
+        {"cost_divide", offsetof(MtlcTargetDescription, cost_divide)},
+        {"cost_divide_float",
+         offsetof(MtlcTargetDescription, cost_divide_float)},
+        {"cost_call", offsetof(MtlcTargetDescription, cost_call)},
+        {"cost_allocate", offsetof(MtlcTargetDescription, cost_allocate)},
+    };
+    size_t c;
+    if (!int_of(value, &number)) {
+      snprintf(error, error_size, "`%s` must be an integer literal", field);
+      return 0;
+    }
+    for (c = 0; c < sizeof(costs) / sizeof(costs[0]); c++) {
+      if (strcmp(field, costs[c].name) == 0) {
+        *(int *)((char *)out + costs[c].offset) = (int)number;
+        break;
+      }
+    }
+    if (c == sizeof(costs) / sizeof(costs[0])) {
+      snprintf(error, error_size,
+               "`%s` is not a cost this machine has; the costs are cost_op, "
+               "cost_load, cost_store, cost_branch, cost_multiply, "
+               "cost_multiply_float, cost_divide, cost_divide_float, "
+               "cost_call and cost_allocate",
+               field);
+      return 0;
+    }
+  } else if (strcmp(field, "pointer_bits") == 0 ||
+             strcmp(field, "stack_alignment") == 0 ||
+             strcmp(field, "shadow_space") == 0 ||
+             strcmp(field, "red_zone") == 0 ||
+             strcmp(field, "vector_width") == 0 ||
+             strcmp(field, "subgroup_width") == 0 ||
+             strcmp(field, "shared_memory_banks") == 0 ||
+             strcmp(field, "shared_bank_bytes") == 0) {
+    if (!int_of(value, &number)) {
+      snprintf(error, error_size, "`%s` must be an integer literal", field);
+      return 0;
+    }
+    if (strcmp(field, "pointer_bits") == 0) {
+      out->pointer_bits = (int)number;
+    } else if (strcmp(field, "stack_alignment") == 0) {
+      out->stack_alignment = (int)number;
+    } else if (strcmp(field, "shadow_space") == 0) {
+      out->shadow_space = (int)number;
+    } else if (strcmp(field, "red_zone") == 0) {
+      out->red_zone = (int)number;
+    } else if (strcmp(field, "subgroup_width") == 0) {
+      out->subgroup_width = (int)number;
+    } else if (strcmp(field, "shared_memory_banks") == 0) {
+      out->shared_memory_banks = (int)number;
+    } else if (strcmp(field, "shared_bank_bytes") == 0) {
+      out->shared_bank_bytes = (int)number;
+    } else {
+      out->vector_width = (int)number;
+    }
+  } else {
+    snprintf(error, error_size, "TargetDesc has no field `%s`", field);
+    return 0;
+  }
+  return 1;
+}
+
+static int read_field(const AggregateLiteral *literal, size_t i,
+                      MtlcTargetDescription *out, int *seen_name,
+                      int *seen_arch, char *error, size_t error_size) {
+  const char *field =
+      literal->field_names ? literal->field_names[i] : NULL;
+  ASTNode *value = literal->elements[i];
+  long long number = 0;
+  if (!field) {
+    snprintf(error, error_size, "every element of a TargetDesc names a field");
+    return 0;
+  }
+  if (strcmp(field, "name") == 0) {
+    if (!copy_string(out->name, sizeof(out->name), value, field, error,
+                     error_size)) {
+      return 0;
+    }
+    (*seen_name) = 1;
+  } else if (strcmp(field, "arch") == 0) {
+    if (!copy_string(out->arch, sizeof(out->arch), value, field, error,
+                     error_size)) {
+      return 0;
+    }
+    (*seen_arch) = 1;
+  } else if (strcmp(field, "os") == 0) {
+    if (!copy_string(out->os, sizeof(out->os), value, field, error,
+                     error_size)) {
+      return 0;
+    }
+  } else if (strcmp(field, "format") == 0) {
+    if (!copy_string(out->format, sizeof(out->format), value, field, error,
+                     error_size)) {
+      return 0;
+    }
+  } else if (strcmp(field, "indirect_return") == 0) {
+    if (!copy_string(out->indirect_return, sizeof(out->indirect_return),
+                     value, field, error, error_size)) {
+      return 0;
+    }
+  } else if (strcmp(field, "int_args") == 0) {
+    if (!copy_names(out->int_args, &out->int_arg_count,
+                    MTLC_TARGET_DESC_MAX_REGS, value, field, error,
+                    error_size)) {
+      return 0;
+    }
+  } else if (strcmp(field, "float_args") == 0) {
+    if (!copy_names(out->float_args, &out->float_arg_count,
+                    MTLC_TARGET_DESC_MAX_REGS, value, field, error,
+                    error_size)) {
+      return 0;
+    }
+  } else if (strcmp(field, "address_spaces") == 0) {
+    if (!copy_wide_names(out->address_spaces, &out->address_space_count,
+                         MTLC_TARGET_DESC_MAX_NAMES, value, field, error,
+                         error_size)) {
+      return 0;
+    }
+  } else if (strcmp(field, "separate_classes") == 0) {
+    if (!bool_of(value, &out->separate_classes)) {
+      snprintf(error, error_size, "`separate_classes` must be true or false");
+      return 0;
+    }
+  } else if (strcmp(field, "widths") == 0) {
+    const AggregateLiteral *widths = array_of(value);
+    size_t w;
+    out->width_count = 0;
+    if (!widths) {
+      snprintf(error, error_size, "`widths` must be an array of integers");
+      return 0;
+    }
+    if (widths->element_count > MTLC_TARGET_DESC_MAX_NAMES) {
+      snprintf(error, error_size, "`widths` lists more than %d widths",
+               MTLC_TARGET_DESC_MAX_NAMES);
+      return 0;
+    }
+    for (w = 0; w < widths->element_count; w++) {
+      if (!int_of(widths->elements[w], &number)) {
+        snprintf(error, error_size, "every width must be an integer literal");
+        return 0;
+      }
+      out->widths[out->width_count++] = (int)number;
+    }
+  } else {
+    return read_numeric_field(literal, i, out, field, value, error,
+                              error_size);
+  }
+  return 1;
+}
+
+
 static int read_fields(const AggregateLiteral *literal,
                        MtlcTargetDescription *out, char *error,
                        size_t error_size) {
@@ -138,153 +309,8 @@ static int read_fields(const AggregateLiteral *literal,
   int seen_name = 0;
   int seen_arch = 0;
   for (i = 0; i < literal->element_count; i++) {
-    const char *field =
-        literal->field_names ? literal->field_names[i] : NULL;
-    ASTNode *value = literal->elements[i];
-    long long number = 0;
-    if (!field) {
-      snprintf(error, error_size, "every element of a TargetDesc names a field");
-      return 0;
-    }
-    if (strcmp(field, "name") == 0) {
-      if (!copy_string(out->name, sizeof(out->name), value, field, error,
-                       error_size)) {
-        return 0;
-      }
-      seen_name = 1;
-    } else if (strcmp(field, "arch") == 0) {
-      if (!copy_string(out->arch, sizeof(out->arch), value, field, error,
-                       error_size)) {
-        return 0;
-      }
-      seen_arch = 1;
-    } else if (strcmp(field, "os") == 0) {
-      if (!copy_string(out->os, sizeof(out->os), value, field, error,
-                       error_size)) {
-        return 0;
-      }
-    } else if (strcmp(field, "format") == 0) {
-      if (!copy_string(out->format, sizeof(out->format), value, field, error,
-                       error_size)) {
-        return 0;
-      }
-    } else if (strcmp(field, "indirect_return") == 0) {
-      if (!copy_string(out->indirect_return, sizeof(out->indirect_return),
-                       value, field, error, error_size)) {
-        return 0;
-      }
-    } else if (strcmp(field, "int_args") == 0) {
-      if (!copy_names(out->int_args, &out->int_arg_count,
-                      MTLC_TARGET_DESC_MAX_REGS, value, field, error,
-                      error_size)) {
-        return 0;
-      }
-    } else if (strcmp(field, "float_args") == 0) {
-      if (!copy_names(out->float_args, &out->float_arg_count,
-                      MTLC_TARGET_DESC_MAX_REGS, value, field, error,
-                      error_size)) {
-        return 0;
-      }
-    } else if (strcmp(field, "address_spaces") == 0) {
-      if (!copy_wide_names(out->address_spaces, &out->address_space_count,
-                           MTLC_TARGET_DESC_MAX_NAMES, value, field, error,
-                           error_size)) {
-        return 0;
-      }
-    } else if (strcmp(field, "separate_classes") == 0) {
-      if (!bool_of(value, &out->separate_classes)) {
-        snprintf(error, error_size, "`separate_classes` must be true or false");
-        return 0;
-      }
-    } else if (strcmp(field, "widths") == 0) {
-      const AggregateLiteral *widths = array_of(value);
-      size_t w;
-      out->width_count = 0;
-      if (!widths) {
-        snprintf(error, error_size, "`widths` must be an array of integers");
-        return 0;
-      }
-      if (widths->element_count > MTLC_TARGET_DESC_MAX_NAMES) {
-        snprintf(error, error_size, "`widths` lists more than %d widths",
-                 MTLC_TARGET_DESC_MAX_NAMES);
-        return 0;
-      }
-      for (w = 0; w < widths->element_count; w++) {
-        if (!int_of(widths->elements[w], &number)) {
-          snprintf(error, error_size, "every width must be an integer literal");
-          return 0;
-        }
-        out->widths[out->width_count++] = (int)number;
-      }
-    } else if (strncmp(field, "cost_", 5) == 0) {
-      static const struct {
-        const char *name;
-        size_t offset;
-      } costs[] = {
-          {"cost_op", offsetof(MtlcTargetDescription, cost_op)},
-          {"cost_load", offsetof(MtlcTargetDescription, cost_load)},
-          {"cost_store", offsetof(MtlcTargetDescription, cost_store)},
-          {"cost_branch", offsetof(MtlcTargetDescription, cost_branch)},
-          {"cost_multiply", offsetof(MtlcTargetDescription, cost_multiply)},
-          {"cost_multiply_float",
-           offsetof(MtlcTargetDescription, cost_multiply_float)},
-          {"cost_divide", offsetof(MtlcTargetDescription, cost_divide)},
-          {"cost_divide_float",
-           offsetof(MtlcTargetDescription, cost_divide_float)},
-          {"cost_call", offsetof(MtlcTargetDescription, cost_call)},
-          {"cost_allocate", offsetof(MtlcTargetDescription, cost_allocate)},
-      };
-      size_t c;
-      if (!int_of(value, &number)) {
-        snprintf(error, error_size, "`%s` must be an integer literal", field);
-        return 0;
-      }
-      for (c = 0; c < sizeof(costs) / sizeof(costs[0]); c++) {
-        if (strcmp(field, costs[c].name) == 0) {
-          *(int *)((char *)out + costs[c].offset) = (int)number;
-          break;
-        }
-      }
-      if (c == sizeof(costs) / sizeof(costs[0])) {
-        snprintf(error, error_size,
-                 "`%s` is not a cost this machine has; the costs are cost_op, "
-                 "cost_load, cost_store, cost_branch, cost_multiply, "
-                 "cost_multiply_float, cost_divide, cost_divide_float, "
-                 "cost_call and cost_allocate",
-                 field);
-        return 0;
-      }
-    } else if (strcmp(field, "pointer_bits") == 0 ||
-               strcmp(field, "stack_alignment") == 0 ||
-               strcmp(field, "shadow_space") == 0 ||
-               strcmp(field, "red_zone") == 0 ||
-               strcmp(field, "vector_width") == 0 ||
-               strcmp(field, "subgroup_width") == 0 ||
-               strcmp(field, "shared_memory_banks") == 0 ||
-               strcmp(field, "shared_bank_bytes") == 0) {
-      if (!int_of(value, &number)) {
-        snprintf(error, error_size, "`%s` must be an integer literal", field);
-        return 0;
-      }
-      if (strcmp(field, "pointer_bits") == 0) {
-        out->pointer_bits = (int)number;
-      } else if (strcmp(field, "stack_alignment") == 0) {
-        out->stack_alignment = (int)number;
-      } else if (strcmp(field, "shadow_space") == 0) {
-        out->shadow_space = (int)number;
-      } else if (strcmp(field, "red_zone") == 0) {
-        out->red_zone = (int)number;
-      } else if (strcmp(field, "subgroup_width") == 0) {
-        out->subgroup_width = (int)number;
-      } else if (strcmp(field, "shared_memory_banks") == 0) {
-        out->shared_memory_banks = (int)number;
-      } else if (strcmp(field, "shared_bank_bytes") == 0) {
-        out->shared_bank_bytes = (int)number;
-      } else {
-        out->vector_width = (int)number;
-      }
-    } else {
-      snprintf(error, error_size, "TargetDesc has no field `%s`", field);
+    if (!read_field(literal, i, out, &seen_name, &seen_arch, error,
+                    error_size)) {
       return 0;
     }
   }
