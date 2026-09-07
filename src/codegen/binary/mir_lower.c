@@ -1621,7 +1621,11 @@ static int mir_call_is_supported(CodeGenerator *g,
       if (ret && code_generator_type_is_aggregate(ret) &&
           mir_call_sysv_returns_in_gp_registers(g, in->text, (MtlcType *)ret,
                                                 NULL)) {
-        if (mir_operand_struct_home_size(g, ir_function, &in->dest) == 0) {
+        /* The eightbytes come back in registers and are spilled into the
+         * destination's home. A destination whose own size cannot be recovered
+         * from the IR still gets one, sized from the callee's return type. */
+        if (in->dest.kind != IR_OPERAND_TEMP &&
+            in->dest.kind != IR_OPERAND_SYMBOL) {
           mir_call_trace("sysv_extern_aggregate_ret");
           return 0;
         }
@@ -6261,6 +6265,10 @@ static int mir_emit_call_result(MirFunction *fn, CodeGenerator *g,
               ? code_generator_find_ir_function_binary(g, ctx->function_name)
               : NULL;
       int hb = mir_operand_struct_home_size(g, dirf, &in->dest);
+      int ret_home = (int)((sysv_ret->size + 7u) & ~(size_t)7);
+      if (ret_home > hb) {
+        hb = ret_home;
+      }
       if (hb > 0 && fn->vregs[dstsym.vreg].home_bytes < hb) {
         fn->vregs[dstsym.vreg].home_bytes = hb;
       }
