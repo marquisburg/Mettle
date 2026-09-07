@@ -2973,6 +2973,18 @@ static int mir_gate_indirect_aggregate(CodeGenerator *generator,
 static int mir_function_is_eligible_inner(CodeGenerator *generator,
                                           IRFunction *ir_function);
 
+static int mir_function_has_gpu_only_construct(const IRFunction *fn) {
+  if (!fn) {
+    return 0;
+  }
+  for (size_t i = 0; i < fn->instruction_count; i++) {
+    if (ir_gpu_only_construct_name(fn->instructions[i].op)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int mir_env_strict(void) {
   static int cached = -1;
   if (cached < 0) {
@@ -2993,8 +3005,13 @@ int mir_function_is_eligible(CodeGenerator *generator,
   /* METTLE_MIR_STRICT: prove nothing needs the baseline emitter any more. A
    * declined function becomes a named error instead of quietly falling back,
    * so a full test run either passes or says exactly which function and which
-   * gate still require the old path. */
-  if (!eligible && mir_env_strict() && !mir_env_mir() && !mir_env_skipfn()) {
+   * gate still require the old path.
+   *
+   * A function carrying a construct that only runs on a GPU is not a gap: the
+   * baseline refuses it too, with the diagnostic that tells the reader to
+   * compile the module with --emit-ptx. Let that error be the one they see. */
+  if (!eligible && mir_env_strict() && !mir_env_mir() && !mir_env_skipfn() &&
+      !mir_function_has_gpu_only_construct(ir_function)) {
     code_generator_set_error(
         generator, "METTLE_MIR_STRICT: '%s' declined by the register allocator (%s)",
         ir_function->name ? ir_function->name : "?", g_mir_last_bail);
