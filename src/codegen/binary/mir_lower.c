@@ -2336,6 +2336,11 @@ static int mir_gate_affine(CodeGenerator *generator,
                      in->arguments[k].kind == IR_OPERAND_SYMBOL)) {
         continue;
       }
+      if (in->arguments[k].kind == IR_OPERAND_TEMP ||
+          in->arguments[k].kind == IR_OPERAND_SYMBOL) {
+        *handled = 0;
+        return 1;
+      }
       return mir_trace_bail(ir_function, "affine_map:coeff");
     }
     break;
@@ -7103,6 +7108,14 @@ static int mir_lower_affine_map(MirFunction *fn, CodeGenerator *g,
   (void)map;
   (void)wb;
   *handled = 1;
+  if ((in->op == IR_OP_SIMD_AFFINE_MAP_F32 ||
+       in->op == IR_OP_SIMD_AFFINE_MAP_F64) &&
+      in->argument_count >= 4 &&
+      (in->arguments[2].kind != IR_OPERAND_FLOAT ||
+       in->arguments[3].kind != IR_OPERAND_FLOAT)) {
+    *handled = 0;
+    return 0;
+  }
   switch (in->op) {
   case IR_OP_SIMD_AFFINE_MAP_F32: {
     /* Inline float32 affine map: marshal src->RCX, dst->RDX, count->R8, then emit
@@ -11165,6 +11178,16 @@ int code_generator_binary_emit_function_via_mir(
             code_generator_binary_resolved_type_is_signed_integer(rt);
       }
     }
+  }
+
+  {
+    BinaryArgLocation slot_locs[MIR_PARAM_SLOTS];
+    size_t slot_first[MIR_MAX_PARAMS];
+    size_t slot_count = 0;
+    if (!mir_param_layout(&fn, abi, slot_locs, slot_first, &slot_count)) {
+      goto oom;
+    }
+    fn.incoming_arg_slots = slot_count;
   }
 
   /* Cache global scalars: load each referenced global once at entry into a vreg

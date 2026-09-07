@@ -1557,7 +1557,9 @@ static uint32_t mir_color_reg_mask(const MirFunction *fn, MirVregId v,
      * return pointer -- from every argument register the function actually
      * receives in removes that hazard at its source. Values defined later are
      * free to use those registers: by then homing is finished. */
-    size_t incoming = fn->param_count + (fn->returns_indirect ? 1 : 0);
+    size_t incoming = fn->incoming_arg_slots
+                          ? fn->incoming_arg_slots
+                          : fn->param_count + (fn->returns_indirect ? 1 : 0);
     for (size_t i = 0; i < n; i++) {
       BinaryGpRegister reg = pool[i];
       if (fn->reserve_rbx && reg == BINARY_GP_RBX) {

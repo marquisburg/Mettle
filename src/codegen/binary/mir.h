@@ -651,6 +651,8 @@ typedef struct {
 
   int reserve_rbx;
 
+  size_t incoming_arg_slots;
+
   int returns_sysv_registers;
   int sysv_return_eightbytes;
   int sysv_return_sse[2];
