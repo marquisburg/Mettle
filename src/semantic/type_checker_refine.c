@@ -481,237 +481,14 @@ static void narrow_by_monotone(TypeChecker *checker, const char *name,
 static void narrow_by_relation(TypeChecker *checker, const Type *declared,
                                Range *out, int depth);
 
-static int range_of(TypeChecker *checker, ASTNode *expr, Range *out,
+static int range_of_call(TypeChecker *checker, ASTNode *expr, Range *out,
                     int depth) {
-  if (checker) {
-    checker->proof_steps++;
-    if (checker->proof_steps > TYPE_CHECKER_PROOF_CEILING) {
-      checker->proof_ceiling_hit = 1;
-      *out = range_unknown();
-      return 0;
-    }
-  }
   const char *op = NULL;
   ASTNode *left = NULL;
   ASTNode *right = NULL;
   ASTNode *operand = NULL;
+
   *out = range_unknown();
-  if (!expr || depth > 32) {
-    return 0;
-  }
-  switch (expr->type) {
-  case AST_NUMBER_LITERAL: {
-    NumberLiteral *literal = (NumberLiteral *)expr->data;
-    if (!literal || literal->is_float) {
-      return 0;
-    }
-    *out = range_exact(literal->int_value);
-    return 1;
-  }
-  case AST_IDENTIFIER: {
-    Identifier *identifier = (Identifier *)expr->data;
-    Symbol *symbol = identifier
-                         ? type_checker_resolve_identifier(checker, identifier)
-                         : NULL;
-    if (symbol && symbol->kind == SYMBOL_CONSTANT) {
-      *out = range_exact(symbol->data.constant.value);
-      return 1;
-    }
-    if (symbol && symbol->has_constant_value && !symbol->constant_is_float) {
-      *out = range_exact(symbol->constant_integer_value);
-      return 1;
-    }
-    {
-      Type *type = expr->resolved_type ? expr->resolved_type
-                                       : (symbol ? symbol->type : NULL);
-      if (!type || type->kind == TYPE_ENUM ||
-          !type_checker_is_integer_type(type)) {
-        return 0;
-      }
-      *out = range_of_type(type);
-    }
-    if (identifier && identifier->name &&
-        narrowing_enter(checker, identifier->name)) {
-      Type *declared = expr->resolved_type ? expr->resolved_type
-                                           : (symbol ? symbol->type : NULL);
-      narrow_by_guards(checker, identifier->name, out, depth);
-      narrow_by_monotone(checker, identifier->name, out, depth);
-      narrow_by_relation(checker, declared, out, depth);
-      narrowing_leave(checker);
-    }
-    return out->has_min || out->has_max;
-  }
-  case AST_BINARY_EXPRESSION: {
-    Range l;
-    Range r;
-    if (!binary_parts(expr, &op, &left, &right)) {
-      return 0;
-    }
-    if (is_comparison(op) || strcmp(op, "&&") == 0 || strcmp(op, "||") == 0) {
-      out->has_min = 1;
-      out->has_max = 1;
-      out->min = 0;
-      out->max = 1;
-      return 1;
-    }
-    {
-      int have_l = range_of(checker, left, &l, depth + 1);
-      int have_r = range_of(checker, right, &r, depth + 1);
-      if (strcmp(op, "+") == 0 && have_l && have_r) {
-        if (l.has_min && r.has_min && add_checked(l.min, r.min, &out->min)) {
-          out->has_min = 1;
-        }
-        if (l.has_max && r.has_max && add_checked(l.max, r.max, &out->max)) {
-          out->has_max = 1;
-        }
-      } else if (strcmp(op, "-") == 0 && have_l && have_r) {
-        if (l.has_min && r.has_max && sub_checked(l.min, r.max, &out->min)) {
-          out->has_min = 1;
-        }
-        if (l.has_max && r.has_min && sub_checked(l.max, r.min, &out->max)) {
-          out->has_max = 1;
-        }
-      } else if (strcmp(op, "*") == 0 && have_l && have_r && l.has_min &&
-                 l.has_max && r.has_min && r.has_max) {
-        long long products[4];
-        int ok = mul_checked(l.min, r.min, &products[0]) &&
-                 mul_checked(l.min, r.max, &products[1]) &&
-                 mul_checked(l.max, r.min, &products[2]) &&
-                 mul_checked(l.max, r.max, &products[3]);
-        if (ok) {
-          out->min = products[0];
-          out->max = products[0];
-          for (int i = 1; i < 4; i++) {
-            if (products[i] < out->min) {
-              out->min = products[i];
-            }
-            if (products[i] > out->max) {
-              out->max = products[i];
-            }
-          }
-          out->has_min = 1;
-          out->has_max = 1;
-        }
-      } else if (strcmp(op, "%") == 0 && have_r && r.has_min && r.has_max &&
-                 r.min > 0) {
-        out->has_min = 1;
-        out->has_max = 1;
-        out->max = r.max - 1;
-        out->min = have_l && l.has_min && l.min >= 0 ? 0 : -(r.max - 1);
-      } else if (strcmp(op, "/") == 0 && have_l && have_r && r.has_min &&
-                 r.has_max && r.min == r.max && r.min > 0) {
-        if (l.has_min) {
-          out->has_min = 1;
-          out->min = l.min / r.min;
-        }
-        if (l.has_max) {
-          out->has_max = 1;
-          out->max = l.max / r.min;
-        }
-      } else if (strcmp(op, "&") == 0) {
-        long long mask = 0;
-        int have_mask = 0;
-        if (have_r && r.has_min && r.has_max && r.min == r.max &&
-            r.min >= 0) {
-          mask = r.min;
-          have_mask = 1;
-        } else if (have_l && l.has_min && l.has_max && l.min == l.max &&
-                   l.min >= 0) {
-          mask = l.min;
-          have_mask = 1;
-        }
-        if (have_mask) {
-          out->has_min = 1;
-          out->has_max = 1;
-          out->min = 0;
-          out->max = mask;
-        } else if (have_l && have_r && l.has_min && r.has_min && l.min >= 0 &&
-                   r.min >= 0 && (l.has_max || r.has_max)) {
-          out->has_min = 1;
-          out->min = 0;
-          out->has_max = 1;
-          out->max = l.has_max && r.has_max ? (l.max < r.max ? l.max : r.max)
-                                            : (l.has_max ? l.max : r.max);
-        }
-      } else if (strcmp(op, ">>") == 0 && have_l && have_r && l.has_min &&
-                 r.has_min && r.has_max && r.min == r.max && r.min >= 0 &&
-                 r.min < 63) {
-        out->has_min = 1;
-        out->min = shift_right_floor(l.min, (int)r.min);
-        if (l.has_max) {
-          out->has_max = 1;
-          out->max = shift_right_floor(l.max, (int)r.min);
-        }
-      }
-    }
-    if (!out->has_min && !out->has_max) {
-      Range fallback = range_of_type(expr->resolved_type);
-      *out = fallback;
-    }
-    return out->has_min || out->has_max;
-  }
-  case AST_UNARY_EXPRESSION: {
-    if (!unary_parts(expr, &op, &operand)) {
-      return 0;
-    }
-    if (strcmp(op, "-") == 0) {
-      Range inner;
-      if (range_of(checker, operand, &inner, depth + 1)) {
-        if (inner.has_max && inner.max > LLONG_MIN) {
-          out->has_min = 1;
-          out->min = -inner.max;
-        }
-        if (inner.has_min && inner.min > LLONG_MIN) {
-          out->has_max = 1;
-          out->max = -inner.min;
-        }
-      }
-      return out->has_min || out->has_max;
-    }
-    if (strcmp(op, "!") == 0) {
-      out->has_min = 1;
-      out->has_max = 1;
-      out->min = 0;
-      out->max = 1;
-      return 1;
-    }
-    return 0;
-  }
-  case AST_CAST_EXPRESSION: {
-    CastExpression *cast = (CastExpression *)expr->data;
-    Range target = range_of_type(expr->resolved_type);
-    Range inner;
-    if (cast && cast->operand && range_of(checker, cast->operand, &inner,
-                                          depth + 1) &&
-        inner.has_min && inner.has_max && target.has_min && target.has_max &&
-        inner.min >= target.min && inner.max <= target.max) {
-      *out = inner;
-      return 1;
-    }
-    *out = target;
-    return out->has_min || out->has_max;
-  }
-  case AST_MEMBER_ACCESS: {
-    MemberAccess *member = (MemberAccess *)expr->data;
-    Type *object_type = member && member->object
-                            ? member->object->resolved_type
-                            : NULL;
-    if (member && member->member && strcmp(member->member, "length") == 0 &&
-        object_type) {
-      if (object_type->kind == TYPE_ARRAY) {
-        *out = range_exact((long long)object_type->array_size);
-        return 1;
-      }
-      if (object_type->kind == TYPE_SLICE || object_type->kind == TYPE_STRING) {
-        out->has_min = 1;
-        out->min = 0;
-        return 1;
-      }
-    }
-    *out = range_of_type(expr->resolved_type);
-    return out->has_min || out->has_max;
-  }
-  case AST_FUNCTION_CALL: {
     CallExpression *call = (CallExpression *)expr->data;
     Symbol *callee = NULL;
     *out = range_of_type(expr->resolved_type);
@@ -772,7 +549,346 @@ static int range_of(TypeChecker *checker, ASTNode *expr, Range *out,
       range_meet(out, &post);
     }
     return out->has_min || out->has_max;
+}
+
+static int range_of_member(TypeChecker *checker, ASTNode *expr, Range *out,
+                    int depth) {
+  const char *op = NULL;
+  ASTNode *left = NULL;
+  ASTNode *right = NULL;
+  ASTNode *operand = NULL;
+
+  *out = range_unknown();
+    MemberAccess *member = (MemberAccess *)expr->data;
+    Type *object_type = member && member->object
+                            ? member->object->resolved_type
+                            : NULL;
+    if (member && member->member && strcmp(member->member, "length") == 0 &&
+        object_type) {
+      if (object_type->kind == TYPE_ARRAY) {
+        *out = range_exact((long long)object_type->array_size);
+        return 1;
+      }
+      if (object_type->kind == TYPE_SLICE || object_type->kind == TYPE_STRING) {
+        out->has_min = 1;
+        out->min = 0;
+        return 1;
+      }
+    }
+    *out = range_of_type(expr->resolved_type);
+    return out->has_min || out->has_max;
+}
+
+static int range_of_cast(TypeChecker *checker, ASTNode *expr, Range *out,
+                    int depth) {
+  const char *op = NULL;
+  ASTNode *left = NULL;
+  ASTNode *right = NULL;
+  ASTNode *operand = NULL;
+
+  *out = range_unknown();
+    CastExpression *cast = (CastExpression *)expr->data;
+    Range target = range_of_type(expr->resolved_type);
+    Range inner;
+    if (cast && cast->operand && range_of(checker, cast->operand, &inner,
+                                          depth + 1) &&
+        inner.has_min && inner.has_max && target.has_min && target.has_max &&
+        inner.min >= target.min && inner.max <= target.max) {
+      *out = inner;
+      return 1;
+    }
+    *out = target;
+    return out->has_min || out->has_max;
+}
+
+static int range_of_unary(TypeChecker *checker, ASTNode *expr, Range *out,
+                    int depth) {
+  const char *op = NULL;
+  ASTNode *left = NULL;
+  ASTNode *right = NULL;
+  ASTNode *operand = NULL;
+
+  *out = range_unknown();
+    if (!unary_parts(expr, &op, &operand)) {
+      return 0;
+    }
+    if (strcmp(op, "-") == 0) {
+      Range inner;
+      if (range_of(checker, operand, &inner, depth + 1)) {
+        if (inner.has_max && inner.max > LLONG_MIN) {
+          out->has_min = 1;
+          out->min = -inner.max;
+        }
+        if (inner.has_min && inner.min > LLONG_MIN) {
+          out->has_max = 1;
+          out->max = -inner.min;
+        }
+      }
+      return out->has_min || out->has_max;
+    }
+    if (strcmp(op, "!") == 0) {
+      out->has_min = 1;
+      out->has_max = 1;
+      out->min = 0;
+      out->max = 1;
+      return 1;
+    }
+    return 0;
+}
+
+static void range_binary_add(const Range *l, const Range *r, Range *out) {
+  if (l->has_min && r->has_min && add_checked(l->min, r->min, &out->min)) {
+    out->has_min = 1;
   }
+  if (l->has_max && r->has_max && add_checked(l->max, r->max, &out->max)) {
+    out->has_max = 1;
+  }
+}
+
+static void range_binary_sub(const Range *l, const Range *r, Range *out) {
+  if (l->has_min && r->has_max && sub_checked(l->min, r->max, &out->min)) {
+    out->has_min = 1;
+  }
+  if (l->has_max && r->has_min && sub_checked(l->max, r->min, &out->max)) {
+    out->has_max = 1;
+  }
+}
+
+static void range_binary_mul(const Range *l, const Range *r, Range *out) {
+  long long products[4];
+
+  if (!l->has_min || !l->has_max || !r->has_min || !r->has_max) {
+    return;
+  }
+  if (!mul_checked(l->min, r->min, &products[0]) ||
+      !mul_checked(l->min, r->max, &products[1]) ||
+      !mul_checked(l->max, r->min, &products[2]) ||
+      !mul_checked(l->max, r->max, &products[3])) {
+    return;
+  }
+  out->min = products[0];
+  out->max = products[0];
+  for (int i = 1; i < 4; i++) {
+    if (products[i] < out->min) {
+      out->min = products[i];
+    }
+    if (products[i] > out->max) {
+      out->max = products[i];
+    }
+  }
+  out->has_min = 1;
+  out->has_max = 1;
+}
+
+static void range_binary_modulo(const Range *l, const Range *r, int have_l,
+                                Range *out) {
+  if (!r->has_min || !r->has_max || r->min <= 0) {
+    return;
+  }
+  out->has_min = 1;
+  out->has_max = 1;
+  out->max = r->max - 1;
+  out->min = have_l && l->has_min && l->min >= 0 ? 0 : -(r->max - 1);
+}
+
+static void range_binary_divide(const Range *l, const Range *r, Range *out) {
+  if (!r->has_min || !r->has_max || r->min != r->max || r->min <= 0) {
+    return;
+  }
+  if (l->has_min) {
+    out->has_min = 1;
+    out->min = l->min / r->min;
+  }
+  if (l->has_max) {
+    out->has_max = 1;
+    out->max = l->max / r->min;
+  }
+}
+
+static int range_constant_mask(const Range *range, long long *mask) {
+  if (!range->has_min || !range->has_max || range->min != range->max ||
+      range->min < 0) {
+    return 0;
+  }
+  *mask = range->min;
+  return 1;
+}
+
+static void range_binary_and(const Range *l, const Range *r, int have_l,
+                             int have_r, Range *out) {
+  long long mask = 0;
+
+  if ((have_r && range_constant_mask(r, &mask)) ||
+      (have_l && range_constant_mask(l, &mask))) {
+    out->has_min = 1;
+    out->has_max = 1;
+    out->min = 0;
+    out->max = mask;
+    return;
+  }
+  if (!have_l || !have_r || !l->has_min || !r->has_min || l->min < 0 ||
+      r->min < 0 || (!l->has_max && !r->has_max)) {
+    return;
+  }
+  out->has_min = 1;
+  out->min = 0;
+  out->has_max = 1;
+  out->max = l->has_max && r->has_max ? (l->max < r->max ? l->max : r->max)
+                                      : (l->has_max ? l->max : r->max);
+}
+
+static void range_binary_shift_right(const Range *l, const Range *r,
+                                     Range *out) {
+  if (!l->has_min || !r->has_min || !r->has_max || r->min != r->max ||
+      r->min < 0 || r->min >= 63) {
+    return;
+  }
+  out->has_min = 1;
+  out->min = shift_right_floor(l->min, (int)r->min);
+  if (l->has_max) {
+    out->has_max = 1;
+    out->max = shift_right_floor(l->max, (int)r->min);
+  }
+}
+
+static void range_binary_operator(const char *op, const Range *l,
+                                  const Range *r, int have_l, int have_r,
+                                  Range *out) {
+  int both = have_l && have_r;
+
+  if (strcmp(op, "+") == 0 && both) {
+    range_binary_add(l, r, out);
+  } else if (strcmp(op, "-") == 0 && both) {
+    range_binary_sub(l, r, out);
+  } else if (strcmp(op, "*") == 0 && both) {
+    range_binary_mul(l, r, out);
+  } else if (strcmp(op, "%") == 0 && have_r) {
+    range_binary_modulo(l, r, have_l, out);
+  } else if (strcmp(op, "/") == 0 && both) {
+    range_binary_divide(l, r, out);
+  } else if (strcmp(op, "&") == 0) {
+    range_binary_and(l, r, have_l, have_r, out);
+  } else if (strcmp(op, ">>") == 0 && both) {
+    range_binary_shift_right(l, r, out);
+  }
+}
+
+static int range_of_binary(TypeChecker *checker, ASTNode *expr, Range *out,
+                           int depth) {
+  const char *op = NULL;
+  ASTNode *left = NULL;
+  ASTNode *right = NULL;
+  Range l;
+  Range r;
+  int have_l;
+  int have_r;
+
+  *out = range_unknown();
+  if (!binary_parts(expr, &op, &left, &right)) {
+    return 0;
+  }
+  if (is_comparison(op) || strcmp(op, "&&") == 0 || strcmp(op, "||") == 0) {
+    out->has_min = 1;
+    out->has_max = 1;
+    out->min = 0;
+    out->max = 1;
+    return 1;
+  }
+  have_l = range_of(checker, left, &l, depth + 1);
+  have_r = range_of(checker, right, &r, depth + 1);
+  range_binary_operator(op, &l, &r, have_l, have_r, out);
+  if (!out->has_min && !out->has_max) {
+    *out = range_of_type(expr->resolved_type);
+  }
+  return out->has_min || out->has_max;
+}
+
+static int range_of_identifier(TypeChecker *checker, ASTNode *expr, Range *out,
+                    int depth) {
+  const char *op = NULL;
+  ASTNode *left = NULL;
+  ASTNode *right = NULL;
+  ASTNode *operand = NULL;
+
+  *out = range_unknown();
+    Identifier *identifier = (Identifier *)expr->data;
+    Symbol *symbol = identifier
+                         ? type_checker_resolve_identifier(checker, identifier)
+                         : NULL;
+    if (symbol && symbol->kind == SYMBOL_CONSTANT) {
+      *out = range_exact(symbol->data.constant.value);
+      return 1;
+    }
+    if (symbol && symbol->has_constant_value && !symbol->constant_is_float) {
+      *out = range_exact(symbol->constant_integer_value);
+      return 1;
+    }
+    {
+      Type *type = expr->resolved_type ? expr->resolved_type
+                                       : (symbol ? symbol->type : NULL);
+      if (!type || type->kind == TYPE_ENUM ||
+          !type_checker_is_integer_type(type)) {
+        return 0;
+      }
+      *out = range_of_type(type);
+    }
+    if (identifier && identifier->name &&
+        narrowing_enter(checker, identifier->name)) {
+      Type *declared = expr->resolved_type ? expr->resolved_type
+                                           : (symbol ? symbol->type : NULL);
+      narrow_by_guards(checker, identifier->name, out, depth);
+      narrow_by_monotone(checker, identifier->name, out, depth);
+      narrow_by_relation(checker, declared, out, depth);
+      narrowing_leave(checker);
+    }
+    return out->has_min || out->has_max;
+}
+
+static int range_of(TypeChecker *checker, ASTNode *expr, Range *out,
+                    int depth) {
+  if (checker) {
+    checker->proof_steps++;
+    if (checker->proof_steps > TYPE_CHECKER_PROOF_CEILING) {
+      checker->proof_ceiling_hit = 1;
+      *out = range_unknown();
+      return 0;
+    }
+  }
+  const char *op = NULL;
+  ASTNode *left = NULL;
+  ASTNode *right = NULL;
+  ASTNode *operand = NULL;
+  *out = range_unknown();
+  if (!expr || depth > 32) {
+    return 0;
+  }
+  switch (expr->type) {
+  case AST_NUMBER_LITERAL: {
+    NumberLiteral *literal = (NumberLiteral *)expr->data;
+    if (!literal || literal->is_float) {
+      return 0;
+    }
+    *out = range_exact(literal->int_value);
+    return 1;
+  }
+  case AST_IDENTIFIER:
+    return range_of_identifier(checker, expr, out, depth);
+
+  case AST_BINARY_EXPRESSION:
+    return range_of_binary(checker, expr, out, depth);
+
+  case AST_UNARY_EXPRESSION:
+    return range_of_unary(checker, expr, out, depth);
+
+  case AST_CAST_EXPRESSION:
+    return range_of_cast(checker, expr, out, depth);
+
+  case AST_MEMBER_ACCESS:
+    return range_of_member(checker, expr, out, depth);
+
+  case AST_FUNCTION_CALL:
+    return range_of_call(checker, expr, out, depth);
+
   default:
     *out = range_of_type(expr->resolved_type);
     return out->has_min || out->has_max;
@@ -1357,55 +1473,13 @@ static void fnarrow_by_guards(TypeChecker *checker, const char *name,
   }
 }
 
-static int frange_of(TypeChecker *checker, ASTNode *expr, FRange *out,
+static int frange_of_binary(TypeChecker *checker, ASTNode *expr, FRange *out,
                      int depth) {
   const char *op = NULL;
   ASTNode *left = NULL;
   ASTNode *right = NULL;
-  ASTNode *operand = NULL;
-  if (checker) {
-    checker->proof_steps++;
-    if (checker->proof_steps > TYPE_CHECKER_PROOF_CEILING) {
-      checker->proof_ceiling_hit = 1;
-      *out = frange_unknown();
-      return 0;
-    }
-  }
+
   *out = frange_unknown();
-  if (!expr || depth > 32) {
-    return 0;
-  }
-  switch (expr->type) {
-  case AST_NUMBER_LITERAL: {
-    NumberLiteral *literal = (NumberLiteral *)expr->data;
-    if (!literal) {
-      return 0;
-    }
-    *out = frange_exact(literal->is_float ? literal->float_value
-                                          : (double)literal->int_value);
-    return 1;
-  }
-  case AST_IDENTIFIER: {
-    Identifier *identifier = (Identifier *)expr->data;
-    Symbol *symbol = identifier
-                         ? type_checker_resolve_identifier(checker, identifier)
-                         : NULL;
-    Type *type = expr->resolved_type ? expr->resolved_type
-                                     : (symbol ? symbol->type : NULL);
-    if (symbol && symbol->has_constant_value && symbol->constant_is_float) {
-      *out = frange_exact(symbol->constant_float_value);
-      return 1;
-    }
-    *out = frange_of_type(type);
-    if (identifier && identifier->name &&
-        narrowing_enter(checker, identifier->name)) {
-      fnarrow_by_accumulator(checker, identifier->name, out, depth);
-      fnarrow_by_guards(checker, identifier->name, out, depth);
-      narrowing_leave(checker);
-    }
-    return out->has_min || out->has_max;
-  }
-  case AST_BINARY_EXPRESSION: {
     FRange l;
     FRange r;
     double eps;
@@ -1459,7 +1533,69 @@ static int frange_of(TypeChecker *checker, ASTNode *expr, FRange *out,
       return 1;
     }
     return 0;
+}
+
+static int frange_of_identifier(TypeChecker *checker, ASTNode *expr, FRange *out,
+                     int depth) {
+  const char *op = NULL;
+  ASTNode *left = NULL;
+  ASTNode *right = NULL;
+
+  *out = frange_unknown();
+    Identifier *identifier = (Identifier *)expr->data;
+    Symbol *symbol = identifier
+                         ? type_checker_resolve_identifier(checker, identifier)
+                         : NULL;
+    Type *type = expr->resolved_type ? expr->resolved_type
+                                     : (symbol ? symbol->type : NULL);
+    if (symbol && symbol->has_constant_value && symbol->constant_is_float) {
+      *out = frange_exact(symbol->constant_float_value);
+      return 1;
+    }
+    *out = frange_of_type(type);
+    if (identifier && identifier->name &&
+        narrowing_enter(checker, identifier->name)) {
+      fnarrow_by_accumulator(checker, identifier->name, out, depth);
+      fnarrow_by_guards(checker, identifier->name, out, depth);
+      narrowing_leave(checker);
+    }
+    return out->has_min || out->has_max;
+}
+
+static int frange_of(TypeChecker *checker, ASTNode *expr, FRange *out,
+                     int depth) {
+  const char *op = NULL;
+  ASTNode *left = NULL;
+  ASTNode *right = NULL;
+  ASTNode *operand = NULL;
+  if (checker) {
+    checker->proof_steps++;
+    if (checker->proof_steps > TYPE_CHECKER_PROOF_CEILING) {
+      checker->proof_ceiling_hit = 1;
+      *out = frange_unknown();
+      return 0;
+    }
   }
+  *out = frange_unknown();
+  if (!expr || depth > 32) {
+    return 0;
+  }
+  switch (expr->type) {
+  case AST_NUMBER_LITERAL: {
+    NumberLiteral *literal = (NumberLiteral *)expr->data;
+    if (!literal) {
+      return 0;
+    }
+    *out = frange_exact(literal->is_float ? literal->float_value
+                                          : (double)literal->int_value);
+    return 1;
+  }
+  case AST_IDENTIFIER:
+    return frange_of_identifier(checker, expr, out, depth);
+
+  case AST_BINARY_EXPRESSION:
+    return frange_of_binary(checker, expr, out, depth);
+
   case AST_UNARY_EXPRESSION: {
     FRange inner;
     if (!unary_parts(expr, &op, &operand) || strcmp(op, "-") != 0) {
@@ -1724,6 +1860,29 @@ static int nodes_equal_children(const ASTNode *a, const ASTNode *b,
   return 1;
 }
 
+static int nodes_equal_call(const ASTNode *a, const ASTNode *b, const char *hole,
+                       const ASTNode *filler, int depth) {
+    const CallExpression *ca = (const CallExpression *)a->data;
+    const CallExpression *cb = (const CallExpression *)b->data;
+    if (!ca || !cb || !ca->function_name || !cb->function_name ||
+        strcmp(ca->function_name, cb->function_name) != 0 ||
+        ca->argument_count != cb->argument_count ||
+        (ca->object == NULL) != (cb->object == NULL)) {
+      return 0;
+    }
+    if (ca->object && !nodes_equal(ca->object, cb->object, hole, filler,
+                                   depth + 1)) {
+      return 0;
+    }
+    for (size_t i = 0; i < ca->argument_count; i++) {
+      if (!nodes_equal(ca->arguments[i], cb->arguments[i], hole, filler,
+                       depth + 1)) {
+        return 0;
+      }
+    }
+    return 1;
+}
+
 static int nodes_equal(const ASTNode *a, const ASTNode *b, const char *hole,
                        const ASTNode *filler, int depth) {
   if (!a || !b || depth > 32) {
@@ -1793,27 +1952,9 @@ static int nodes_equal(const ASTNode *a, const ASTNode *b, const char *hole,
     }
     return nodes_equal(ma->object, mb->object, hole, filler, depth + 1);
   }
-  case AST_FUNCTION_CALL: {
-    const CallExpression *ca = (const CallExpression *)a->data;
-    const CallExpression *cb = (const CallExpression *)b->data;
-    if (!ca || !cb || !ca->function_name || !cb->function_name ||
-        strcmp(ca->function_name, cb->function_name) != 0 ||
-        ca->argument_count != cb->argument_count ||
-        (ca->object == NULL) != (cb->object == NULL)) {
-      return 0;
-    }
-    if (ca->object && !nodes_equal(ca->object, cb->object, hole, filler,
-                                   depth + 1)) {
-      return 0;
-    }
-    for (size_t i = 0; i < ca->argument_count; i++) {
-      if (!nodes_equal(ca->arguments[i], cb->arguments[i], hole, filler,
-                       depth + 1)) {
-        return 0;
-      }
-    }
-    return 1;
-  }
+  case AST_FUNCTION_CALL:
+    return nodes_equal_call(a, b, hole, filler, depth);
+
   case AST_INDEX_EXPRESSION:
   case AST_CAST_EXPRESSION:
     return nodes_equal_children(a, b, hole, filler, depth);
