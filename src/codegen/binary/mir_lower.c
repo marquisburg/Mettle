@@ -37,26 +37,6 @@ static int mir_env_trace(void) {
   return cached;
 }
 
-static const char *mir_env_mir(void) {
-  static const char *cached = NULL;
-  static int resolved = 0;
-  if (!resolved) {
-    cached = getenv("METTLE_MIR");
-    resolved = 1;
-  }
-  return cached;
-}
-
-static const char *mir_env_skipfn(void) {
-  static const char *cached = NULL;
-  static int resolved = 0;
-  if (!resolved) {
-    cached = getenv("METTLE_MIR_SKIPFN");
-    resolved = 1;
-  }
-  return cached;
-}
-
 static int g_mir_gate_reported = 0;
 
 static const char *mir_operand_kind_name(int kind);
@@ -2508,7 +2488,6 @@ static int mir_gate_silu(CodeGenerator *generator,
   return 1;
 }
 
-
 static int mir_gate_inline_kernel(const IRFunction *ir_function,
                                   const IRInstruction *in) {
   /* A kernel in the inline-kernel table runs in place (MIR_IR_KERNEL): it
@@ -2527,40 +2506,6 @@ static int mir_gate_inline_kernel(const IRFunction *ir_function,
   char buf[40];
   snprintf(buf, sizeof(buf), "op:%d", (int)in->op);
   return mir_trace_bail(ir_function, buf);
-}
-
-static int mir_gate_function_shape(CodeGenerator *generator,
-                                   const IRFunction *ir_function) {
-  /* Kill switch for bisecting MIR vs legacy regressions. */
-  {
-    const char *off = mir_env_mir();
-    if (off && off[0] == '0') {
-      return 0;
-    }
-    /* Bisect: comma-separated list of function names forced to fallback. */
-    const char *skip = mir_env_skipfn();
-    if (skip && ir_function->name) {
-      const char *nm = ir_function->name;
-      size_t nl = strlen(nm);
-      const char *p = skip;
-      while (*p) {
-        const char *c = strchr(p, ',');
-        size_t seg = c ? (size_t)(c - p) : strlen(p);
-        if (seg == nl && strncmp(p, nm, nl) == 0) {
-          return 0;
-        }
-        if (!c) break;
-        p = c + 1;
-      }
-    }
-  }
-  /* An `asm` block is written against named stack homes and clobbers whatever
-   * registers it likes. The allocated frame has neither, so the whole function
-   * goes to the baseline emitter, which keeps every value in its own slot. */
-  if (ir_function->is_naked) {
-    return mir_trace_bail(ir_function, "naked");
-  }
-  return 1;
 }
 
 static int mir_sysv_bind_param(CodeGenerator *g, const char *fn_name,
@@ -2977,50 +2922,49 @@ static int mir_gate_indirect_aggregate(CodeGenerator *generator,
 static int mir_function_is_eligible_inner(CodeGenerator *generator,
                                           IRFunction *ir_function);
 
-static int mir_function_has_gpu_only_construct(const IRFunction *fn) {
-  if (!fn) {
-    return 0;
-  }
+static const char *mir_function_gpu_only_construct(const IRFunction *fn) {
   for (size_t i = 0; i < fn->instruction_count; i++) {
-    if (ir_gpu_only_construct_name(fn->instructions[i].op)) {
-      return 1;
+    const char *name = ir_gpu_only_construct_name(fn->instructions[i].op);
+    if (name) {
+      return name;
     }
   }
-  return 0;
+  return NULL;
 }
 
-static int mir_env_strict(void) {
-  static int cached = -1;
-  if (cached < 0) {
-    cached = getenv("METTLE_MIR_STRICT") ? 1 : 0;
+static void mir_report_declined(CodeGenerator *generator,
+                                const IRFunction *ir_function) {
+  const char *name = ir_function->name ? ir_function->name : "?";
+  const char *gpu_construct = mir_function_gpu_only_construct(ir_function);
+
+  if (gpu_construct) {
+    generator->has_user_error = 1;
+    code_generator_set_error(
+        generator,
+        "'%s' in function '%s' runs on a GPU and has no CPU translation. "
+        "Compile the module that defines this kernel with --emit-ptx "
+        "(NVIDIA) or --emit-spirv (OpenCL), and keep it out of the host "
+        "program",
+        gpu_construct, name);
+    return;
   }
-  return cached;
+  code_generator_set_error(
+      generator, "Direct object backend cannot compile function '%s' (%s)",
+      name, g_mir_last_bail);
 }
 
-int mir_function_is_eligible(CodeGenerator *generator,
-                             IRFunction *ir_function) {
-  int eligible;
+static int mir_function_is_eligible(CodeGenerator *generator,
+                                    IRFunction *ir_function) {
   g_mir_gate_reported = 0;
   g_mir_last_bail[0] = '\0';
-  eligible = mir_function_is_eligible_inner(generator, ir_function);
-  if (!eligible && !g_mir_gate_reported) {
+  if (mir_function_is_eligible_inner(generator, ir_function)) {
+    return 1;
+  }
+  if (!g_mir_gate_reported) {
     mir_trace_bail(ir_function, "unreported");
   }
-  /* METTLE_MIR_STRICT: prove nothing needs the baseline emitter any more. A
-   * declined function becomes a named error instead of quietly falling back,
-   * so a full test run either passes or says exactly which function and which
-   * gate still require the old path.
-   *
-   * A function carrying a construct that only runs on a GPU is not a gap: the
-   * baseline refuses it too, with the diagnostic that tells the reader to
-   * compile the module with --emit-ptx. Let that error be the one they see. */
-  if (!eligible && mir_env_strict() && !mir_env_mir() && !mir_env_skipfn() &&
-      !mir_function_has_gpu_only_construct(ir_function)) {
-    code_generator_set_error(
-        generator, "METTLE_MIR_STRICT: '%s' declined by the register allocator (%s)",
-        ir_function->name ? ir_function->name : "?", g_mir_last_bail);
-  }
-  return eligible;
+  mir_report_declined(generator, ir_function);
+  return 0;
 }
 
 static int mir_function_is_eligible_inner(CodeGenerator *generator,
@@ -3036,8 +2980,7 @@ static int mir_function_is_eligible_inner(CodeGenerator *generator,
       }
     }
   }
-  if (!mir_gate_function_shape(generator, ir_function) ||
-      !mir_gate_signature(generator, ir_function) ||
+  if (!mir_gate_signature(generator, ir_function) ||
       !mir_gate_globals(generator, ir_function)) {
     return 0;
   }
@@ -4265,6 +4208,28 @@ static int mir_lower_compare_branch(MirFunction *fn, CodeGenerator *g,
   return mir_emit1(fn, MIR_CMPBR, mir_op_label(br->text), a, b, w, uns, cc);
 }
 
+static int mir_operand_is_temp(const IROperand *operand, const char *name) {
+  return operand->kind == IR_OPERAND_TEMP && operand->name &&
+         operand->name[0] == name[0] && strcmp(operand->name, name) == 0;
+}
+
+static int mir_temp_use_count(const IRFunction *function, const char *name) {
+  int count = 0;
+
+  for (size_t i = 0; i < function->instruction_count; i++) {
+    const IRInstruction *in = &function->instructions[i];
+    count += mir_operand_is_temp(&in->lhs, name);
+    count += mir_operand_is_temp(&in->rhs, name);
+    if (in->op == IR_OP_STORE) {
+      count += mir_operand_is_temp(&in->dest, name);
+    }
+    for (size_t a = 0; a < in->argument_count; a++) {
+      count += mir_operand_is_temp(&in->arguments[a], name);
+    }
+  }
+  return count;
+}
+
 /* True when instruction i is a single-use comparison (integer or ordered float)
  * whose result is consumed only by an immediately-following branch_zero. */
 static int mir_fuses_compare_branch(CodeGenerator *g, IRFunction *function,
@@ -4290,8 +4255,7 @@ static int mir_fuses_compare_branch(CodeGenerator *g, IRFunction *function,
     return 0;
   }
   (void)g;
-  return code_generator_binary_function_temp_use_count(function,
-                                                       cmp->dest.name) == 1;
+  return mir_temp_use_count(function, cmp->dest.name) == 1;
 }
 
 /* ---- generic inline kernel (MIR_IR_KERNEL) ------------------------------- */
@@ -5860,7 +5824,6 @@ static int mir_marshal_stack_args(const MirCallArgs *c) {
   const BinaryArgLocation *locs = c->locs;
   const int *indirect_off = c->indirect_off;
   const int *arg_is_float = c->arg_is_float;
-  int hidden = c->hidden;
   (void)g;
   (void)ctx;
   (void)map;
@@ -5969,7 +5932,6 @@ static int mir_marshal_gp_args(const MirCallArgs *c) {
   const BinaryArgLocation *locs = c->locs;
   const int *indirect_off = c->indirect_off;
   const int *arg_is_float = c->arg_is_float;
-  int hidden = c->hidden;
   (void)g;
   (void)ctx;
   (void)map;
@@ -6039,7 +6001,6 @@ static int mir_marshal_xmm_args(const MirCallArgs *c) {
   const BinaryArgLocation *locs = c->locs;
   const int *indirect_off = c->indirect_off;
   const int *arg_is_float = c->arg_is_float;
-  int hidden = c->hidden;
   (void)g;
   (void)ctx;
   (void)map;
@@ -9112,24 +9073,6 @@ static void mir_operand_reads_pair(const MirOperand *op, MirVregId out[2]) {
   }
 }
 
-/* Rewrite every vreg an operand READS from `from` to `to`. */
-static void mir_operand_rename_read(MirOperand *op, MirVregId from,
-                                    MirVregId to) {
-  if (!op) {
-    return;
-  }
-  if (op->kind == MIR_OPK_VREG && op->vreg == from) {
-    op->vreg = to;
-  } else if (op->kind == MIR_OPK_MEM) {
-    if (op->mem.base == from) {
-      op->mem.base = to;
-    }
-    if (op->mem.index == from) {
-      op->mem.index = to;
-    }
-  }
-}
-
 /* ---- fold a constant address adjustment into the access -----------------
  *
  * Reading a struct field lowers to "compute the base, add the field offset,
@@ -9498,7 +9441,6 @@ static void mir_cse_loads(MirFunction *fn) {
   free(snap_n);
   free(snap_seen);
 }
-
 
 /* ---- float64 pair vectorizer (SLP) --------------------------------------- */
 /*
@@ -10577,7 +10519,7 @@ static void mir_label_index_build(MirFunction *fn) {
 }
 
 /* Answered from an index built in one walk. This was a full scan of the
- * instruction stream per lookup, and mir_enclosing_loop resolves every branch
+ * instruction stream per lookup, and the back-edge table resolves every branch
  * target through it while itself being called once per branch, so an N-arm
  * if/else function cost O(N^3): at 1600 arms, 2.56M calls totalling 13.7
  * BILLION compares, and codegen was 99.8% of the compile. */
@@ -10681,20 +10623,6 @@ static int mir_enclosing_loop_from(const MirBackEdge *edges, size_t edge_count,
     }
   }
   return found;
-}
-
-static int mir_enclosing_loop(const MirFunction *fn, size_t p, size_t *lo,
-                              size_t *hi) {
-  MirBackEdge *edges = NULL;
-  size_t edge_count = mir_collect_back_edges(fn, &edges);
-  int found = mir_enclosing_loop_from(edges, edge_count, p, lo, hi);
-  free(edges);
-  return found;
-}
-
-static int mir_index_in_loop(const MirFunction *fn, size_t p) {
-  size_t lo = 0, hi = 0;
-  return mir_enclosing_loop(fn, p, &lo, &hi);
 }
 
 static int mir_operand_uses_vreg(const MirOperand *op, MirVregId v) {
@@ -11214,6 +11142,9 @@ int code_generator_binary_emit_function_via_mir(
   MirFunction fn;
   MirNameMap map;
   void *vr_oracle = NULL;
+  if (!mir_function_is_eligible(generator, ir_function)) {
+    return 0;
+  }
   mir_function_init(&fn, context);
   fn.generator = generator;
   fn.ir_function = ir_function;

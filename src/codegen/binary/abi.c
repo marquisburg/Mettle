@@ -108,7 +108,6 @@ const CgSym *code_generator_binary_value_symbol(CodeGenerator *generator,
   return symbol;
 }
 
-
 int code_generator_binary_resolved_type_is_stack_scalar(const MtlcType *type) {
   if (!type) {
     return 0;
@@ -190,13 +189,6 @@ MtlcType *code_generator_binary_get_resolved_type(CodeGenerator *generator,
   return code_generator_named_type(generator, resolved_name);
 }
 
-int code_generator_binary_named_type_is_float64(CodeGenerator *generator,
-                                                       const char *type_name,
-                                                       int allow_void) {
-  return code_generator_binary_resolved_type_is_float64(
-      code_generator_binary_get_resolved_type(generator, type_name, allow_void));
-}
-
 /* Float width (0/32/64) of a named type, e.g. a parameter/local type name. */
 int code_generator_binary_named_type_float_bits(CodeGenerator *generator,
                                                        const char *type_name) {
@@ -245,11 +237,6 @@ int code_generator_binary_mark_float_symbol(
                                      (bits == 32) ? 32 : 64);
 }
 
-int code_generator_binary_mark_float64_symbol(
-    BinaryFunctionContext *context, const char *name) {
-  return code_generator_binary_mark_float_symbol(context, name, 64);
-}
-
 int code_generator_binary_symbol_is_scalar_accessible(
     CodeGenerator *generator, const char *name) {
   const CgSym *symbol = NULL;
@@ -281,48 +268,6 @@ int code_generator_binary_symbol_is_scalar_accessible(
 int code_generator_binary_immediate_fits_signed_32(long long value) {
   return value >= INT32_MIN && value <= INT32_MAX;
 }
-
-int code_generator_binary_extract_positive_power_of_two(
-    long long value, unsigned int *shift_out, unsigned long long *mask_out) {
-  unsigned long long uvalue = 0;
-  unsigned int shift = 0;
-
-  if (!shift_out || !mask_out || value <= 0) {
-    return 0;
-  }
-
-  uvalue = (unsigned long long)value;
-  if ((uvalue & (uvalue - 1ULL)) != 0ULL) {
-    return 0;
-  }
-
-  while (uvalue > 1ULL) {
-    uvalue >>= 1ULL;
-    shift++;
-  }
-
-  *shift_out = shift;
-  *mask_out = ((unsigned long long)value) - 1ULL;
-  return 1;
-}
-
-int code_generator_binary_emit_and_mask(BinaryFunctionContext *context,
-                                               BinaryGpRegister target_register,
-                                               unsigned long long mask) {
-  if (!context) {
-    return 0;
-  }
-
-  if (mask <= 0x7fffffffULL) {
-    return binary_emit_and_reg_imm32(&context->code, target_register,
-                                     (uint32_t)mask);
-  }
-
-  return binary_emit_mov_reg_imm64(&context->code, BINARY_GP_R10, mask) &&
-         binary_emit_alu_reg_reg(&context->code, 0x21, target_register,
-                                 BINARY_GP_R10);
-}
-
 
 int code_generator_binary_gp_register_is_win64_nonvolatile(
     BinaryGpRegister reg) {
@@ -546,32 +491,6 @@ int code_generator_binary_operand_mentions_symbol_or_alias(
   alias_target =
       binary_symbol_alias_table_get(&context->symbol_aliases, operand->name);
   return alias_target && strcmp(alias_target, name) == 0;
-}
-
-int code_generator_binary_instruction_in_backward_loop(
-    const IRFunction *function, size_t instruction_index) {
-  if (!function || instruction_index >= function->instruction_count) {
-    return 0;
-  }
-
-  for (size_t jump_index = instruction_index + 1;
-       jump_index < function->instruction_count; jump_index++) {
-    const IRInstruction *jump = &function->instructions[jump_index];
-    if (!jump || jump->op != IR_OP_JUMP || !jump->text) {
-      continue;
-    }
-
-    for (size_t label_index = 0; label_index <= instruction_index;
-         label_index++) {
-      const IRInstruction *label = &function->instructions[label_index];
-      if (label && label->op == IR_OP_LABEL && label->text &&
-          strcmp(label->text, jump->text) == 0) {
-        return 1;
-      }
-    }
-  }
-
-  return 0;
 }
 
 /* Label name -> the earliest instruction index that defines it.
@@ -1742,7 +1661,6 @@ int code_generator_binary_validate_signature(CodeGenerator *generator,
   return 1;
 }
 
-
 static int code_generator_binary_mark_float_globals(
     CodeGenerator *generator, IRFunction *ir_function,
     BinaryFunctionContext *context) {
@@ -2395,52 +2313,6 @@ int code_generator_binary_prepare_function_context(
   return 1;
 }
 
-int code_generator_binary_instruction_compare_width(
-    CodeGenerator *generator, BinaryFunctionContext *context,
-    const IRInstruction *instruction) {
-  MtlcType *type = NULL;
-
-  if (!generator || !instruction) {
-    return 8;
-  }
-
-  /* Result type baked onto the IR at lowering (was: inferred from ast_ref). */
-  type = instruction->value_type;
-  if (!type) {
-    MtlcType *lhs_type = code_generator_binary_get_operand_type_in_context(
-        generator, context, &instruction->lhs);
-    MtlcType *rhs_type = code_generator_binary_get_operand_type_in_context(
-        generator, context, &instruction->rhs);
-    if (lhs_type && rhs_type) {
-      int lhs_size = code_generator_binary_resolved_type_scalar_size(lhs_type);
-      int rhs_size = code_generator_binary_resolved_type_scalar_size(rhs_type);
-      if (lhs_size == rhs_size && lhs_size == 4) {
-        return 4;
-      }
-    }
-  }
-  if (type && !instruction->is_float) {
-    int size = code_generator_binary_resolved_type_scalar_size(type);
-    if (size == 4) {
-      return 4;
-    }
-  }
-
-  return 8;
-}
-
-int code_generator_binary_emit_reg_reg_compare(
-    BinaryCodeBuffer *buffer, BinaryGpRegister lhs, BinaryGpRegister rhs,
-    int width) {
-  if (!buffer) {
-    return 0;
-  }
-  if (width == 4) {
-    return binary_emit_cmp_reg_reg32(buffer, lhs, rhs);
-  }
-  return binary_emit_cmp_reg_reg(buffer, lhs, rhs);
-}
-
 int code_generator_binary_emit_reg_reg_move(
     BinaryCodeBuffer *buffer, BinaryGpRegister destination,
     BinaryGpRegister source, MtlcType *type) {
@@ -2507,25 +2379,6 @@ int code_generator_binary_emit_temp_stack_load(
   }
   return binary_emit_mov_reg_mem(&context->code, target_register,
                                  BINARY_GP_RBP, -stack_offset);
-}
-
-int code_generator_binary_emit_temp_stack_store(
-    CodeGenerator *generator, BinaryFunctionContext *context, int stack_offset,
-    BinaryGpRegister source_register, MtlcType *type) {
-  int width = code_generator_binary_type_scalar_width(type);
-  if (type && (type->kind == MTLC_TYPE_FLOAT16 || type->kind == MTLC_TYPE_BFLOAT16)) {
-    width = 4;
-  }
-
-  if (!generator || !context || stack_offset <= 0) {
-    return 0;
-  }
-  if (width == 4) {
-    return binary_emit_mov_mem_reg32(&context->code, BINARY_GP_RBP, -stack_offset,
-                                     source_register);
-  }
-  return binary_emit_mov_mem_reg(&context->code, BINARY_GP_RBP, -stack_offset,
-                                 source_register);
 }
 
 int code_generator_binary_emit_symbol_stack_load(
@@ -2616,16 +2469,6 @@ int code_generator_binary_emit_symbol_stack_store(
     return binary_emit_mov_mem_reg(&context->code, BINARY_GP_RBP, -stack_offset,
                                    source_register);
   }
-}
-
-int code_generator_binary_symbol_move_width(const CgSym *symbol) {
-  if (!symbol || !symbol->type) {
-    return 8;
-  }
-  if ((symbol->type->kind == MTLC_TYPE_FLOAT16 || symbol->type->kind == MTLC_TYPE_BFLOAT16)) {
-    return 4;
-  }
-  return code_generator_binary_resolved_type_scalar_size(symbol->type);
 }
 
 int code_generator_binary_type_scalar_width(MtlcType *type) {

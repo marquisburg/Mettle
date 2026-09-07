@@ -88,7 +88,6 @@ void mir_annotate_record_ir(const IRFunction *ir_fn, int ir_index,
 /* Record a zero-byte label marker (the baseline backend emits labels as no
  * bytes, so they never reach record_ir; without them, loop recovery cannot find
  * a backward branch's target). No-op unless enabled and a function is open. */
-void mir_annotate_record_ir_label(const char *name, size_t byte_off);
 
 /* Flush everything captured so far: write <stem>.annot.json and print the
  * human-readable listing to stdout. Called once after codegen. */

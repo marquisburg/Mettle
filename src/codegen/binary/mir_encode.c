@@ -1060,18 +1060,6 @@ static int dst_is_xmm_reg(MirFunction *fn, const MirOperand *dst,
   return 0;
 }
 
-static int xmm_operand_in_phys(MirFunction *fn, const MirOperand *op,
-                               BinaryXmmRegister D) {
-  if (op->kind == MIR_OPK_VREG) {
-    const MirVreg *v = &fn->vregs[op->vreg];
-    return v->in_register && (BinaryXmmRegister)v->phys == D;
-  }
-  if (op->kind == MIR_OPK_PHYS) {
-    return (BinaryXmmRegister)op->phys == D;
-  }
-  return 0;
-}
-
 /* xmm dst <- xmm src, scalar (movss for width 4, movsd for width 8). */
 static int xmm_mov(BinaryCodeBuffer *code, BinaryXmmRegister dst,
                    BinaryXmmRegister src, int width) {
@@ -1197,27 +1185,6 @@ static BinaryXmmRegister xmm_value(MirFunction *fn, const MirOperand *op,
   }
 }
 
-static int materialize_xmm_into(MirFunction *fn, const MirOperand *op,
-                                BinaryXmmRegister target, int width) {
-  switch (op->kind) {
-  case MIR_OPK_VREG: {
-    const MirVreg *v = &fn->vregs[op->vreg];
-    if (v->in_register) {
-      return xmm_mov(&fn->context->code, target, (BinaryXmmRegister)v->phys,
-                     width);
-    }
-    return xmm_spill_load(fn, v, target);
-  }
-  case MIR_OPK_PHYS:
-    return xmm_mov(&fn->context->code, target, (BinaryXmmRegister)op->phys,
-                   width);
-  case MIR_OPK_FIMM:
-    return xmm_load_fimm(fn, (uint64_t)op->imm, target, width);
-  default:
-    return enc_err(fn, "unsupported float operand in materialize");
-  }
-}
-
 static int xmm_store(MirFunction *fn, const MirOperand *dst,
                      BinaryXmmRegister src, int width) {
   switch (dst->kind) {
@@ -1232,30 +1199,6 @@ static int xmm_store(MirFunction *fn, const MirOperand *dst,
     return xmm_mov(&fn->context->code, (BinaryXmmRegister)dst->phys, src, width);
   default:
     return enc_err(fn, "unsupported float destination");
-  }
-}
-
-/* target OP= src for a scalar float op. */
-static int sse_arith(MirFunction *fn, MirOpcode op, int width,
-                     BinaryXmmRegister target, BinaryXmmRegister src) {
-  BinaryCodeBuffer *code = &fn->context->code;
-  if (width == 4) {
-    switch (op) {
-    case MIR_FADD: return binary_emit_addss_xmm_xmm(code, target, src);
-    case MIR_FSUB: return binary_emit_subss_xmm_xmm(code, target, src);
-    case MIR_FMUL: return binary_emit_mulss_xmm_xmm(code, target, src);
-    case MIR_FDIV: return binary_emit_divss_xmm_xmm(code, target, src);
-    case MIR_FXOR: return binary_emit_xorpd_xmm_xmm(code, target, src);
-    default: return 0;
-    }
-  }
-  switch (op) {
-  case MIR_FADD: return binary_emit_addsd_xmm_xmm(code, target, src);
-  case MIR_FSUB: return binary_emit_subsd_xmm_xmm(code, target, src);
-  case MIR_FMUL: return binary_emit_mulsd_xmm_xmm(code, target, src);
-  case MIR_FDIV: return binary_emit_divsd_xmm_xmm(code, target, src);
-  case MIR_FXOR: return binary_emit_xorpd_xmm_xmm(code, target, src);
-  default: return 0;
   }
 }
 

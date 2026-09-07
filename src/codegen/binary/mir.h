@@ -743,9 +743,7 @@ MirOperand mir_op_imm(long long value);
 MirOperand mir_op_fimm(uint64_t ieee_bits);
 MirOperand mir_op_label(const char *name);
 MirOperand mir_op_symbol(const char *name);
-MirOperand mir_op_stackhome(const char *name, int rbp_disp);
 MirOperand mir_op_mem_vreg(MirVregId base, MirVregId index, int scale, int disp);
-MirOperand mir_op_mem_rbp(int rbp_disp);
 
 /* Debug dump of a MIR function to a FILE (used under METTLE_MIR_DUMP). */
 void mir_function_dump(const MirFunction *fn, FILE *out);
@@ -801,15 +799,9 @@ int mir_encode(MirFunction *fn);
 
 /* ---- driver hooks (defined in mir_lower.c) ------------------------------ */
 
-/* True if every instruction and the signature of `ir_function` are in the
- * Stage 2 supported scalar-integer subset (no calls/floats/aggregates/
- * address-of, <=4 GP params, plain --release). */
-int mir_function_is_eligible(CodeGenerator *generator,
-                             IRFunction *ir_function);
-
 int mir_rewrite_string_concat_calls(IRFunction *ir_function);
 
-/* Lower + allocate + encode an eligible function into context->code (full
+/* Lower + allocate + encode a function into context->code (full
  * prologue..epilogue, fixups resolved). Returns 0 on failure. */
 int code_generator_binary_emit_function_via_mir(
     CodeGenerator *generator,

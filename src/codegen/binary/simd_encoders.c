@@ -100,14 +100,6 @@ int wcs_or_reg_reg(BinaryCodeBuffer *b, int dst, int src) {
              b, (unsigned char)(0xC0 | ((src & 7) << 3) | (dst & 7)));
 }
 
-/* 01 /r: add r32, r32 (dst += src). */
-int wcs_add_reg_reg32(BinaryCodeBuffer *b, int dst, int src) {
-  return binary_emit_rex(b, 0, src >> 3, 0, dst >> 3) &&
-         binary_code_buffer_append_u8(b, 0x01) &&
-         binary_code_buffer_append_u8(
-             b, (unsigned char)(0xC0 | ((src & 7) << 3) | (dst & 7)));
-}
-
 /* REX.W 29 /r: sub r64, r64 (dst -= src; pointer differences need 64-bit). */
 int wcs_sub_reg_reg64(BinaryCodeBuffer *b, int dst, int src) {
   return binary_emit_rex(b, 1, src >> 3, 0, dst >> 3) &&
@@ -244,15 +236,6 @@ int wcs_cmp_reg_reg32(BinaryCodeBuffer *b, int dst, int src) {
              b, (unsigned char)(0xC0 | ((src & 7) << 3) | (dst & 7)));
 }
 
-/* movdqu xmm, [gpr+0] */
-int wcs_movdqu_xmm_mem(BinaryCodeBuffer *b, int xmm, int gpr) {
-  return binary_code_buffer_append_u8(b, 0xF3) &&
-         binary_code_buffer_append_u8(b, 0x0F) &&
-         binary_code_buffer_append_u8(b, 0x6F) &&
-         binary_code_buffer_append_u8(
-             b, (unsigned char)(0x00 | ((xmm & 7) << 3) | (gpr & 7)));
-}
-
 int simd_emit_prefixed_xmm_mem_disp(BinaryCodeBuffer *b, unsigned char prefix,
                                     unsigned char opcode, int xmm, int gpr,
                                     int displacement) {
@@ -308,12 +291,6 @@ int simd_movdqu_mem_xmm_disp(BinaryCodeBuffer *b, int gpr,
   return simd_emit_xmm_mem_disp(b, 0x7F, xmm, gpr, displacement);
 }
 
-int simd_movd_xmm_mem32_disp(BinaryCodeBuffer *b, int xmm, int gpr,
-                             int displacement) {
-  return simd_emit_prefixed_xmm_mem_disp(b, 0x66, 0x6E, xmm, gpr,
-                                         displacement);
-}
-
 /* 66 0F 7E /r - movd r32, xmm */
 int wcs_movd_reg_xmm(BinaryCodeBuffer *b, int gpr, int xmm) {
   return binary_code_buffer_append_u8(b, 0x66) &&
@@ -332,11 +309,6 @@ int wcs_sub_reg_reg32(BinaryCodeBuffer *b, int dst, int src) {
              b, (unsigned char)(0xC0 | ((src & 7) << 3) | (dst & 7)));
 }
 
-/* 66 0F F4 /r: pmuludq xmm, xmm */
-int wcs_pmuludq(BinaryCodeBuffer *b, int dst, int src) {
-  return wcs_sse_66(b, 0xF4, dst, src);
-}
-
 /* 66 0F FE /r: paddd xmm, xmm */
 int wcs_paddd(BinaryCodeBuffer *b, int dst, int src) {
   return wcs_sse_66(b, 0xFE, dst, src);
@@ -353,10 +325,6 @@ int wcs_sse_66_38(BinaryCodeBuffer *b, unsigned char op, int dst,
              b, (unsigned char)(0xC0 | ((dst & 7) << 3) | (src & 7)));
 }
 
-int wcs_pmulld(BinaryCodeBuffer *b, int dst, int src) {
-  return wcs_sse_66_38(b, 0x40, dst, src);
-}
-
 /* 66 0F 38 39 /r: pminsd xmm, xmm (SSE4.1) */
 int wcs_pminsd(BinaryCodeBuffer *b, int dst, int src) {
   return wcs_sse_66_38(b, 0x39, dst, src);
@@ -365,10 +333,6 @@ int wcs_pminsd(BinaryCodeBuffer *b, int dst, int src) {
 /* 66 0F 38 3D /r: pmaxsd xmm, xmm (SSE4.1) */
 int wcs_pmaxsd(BinaryCodeBuffer *b, int dst, int src) {
   return wcs_sse_66_38(b, 0x3D, dst, src);
-}
-
-int wcs_broadcast_i32_to_xmm(BinaryCodeBuffer *b, int xmm, int gpr) {
-  return wcs_movd_xmm_reg(b, xmm, gpr) && wcs_pshufd(b, xmm, xmm, 0x00);
 }
 
 int wcs_accumulate_xmm0_i32_to_rax(BinaryCodeBuffer *b) {
@@ -382,48 +346,11 @@ int wcs_accumulate_xmm0_i32_to_rax(BinaryCodeBuffer *b) {
   return 1;
 }
 
-int wcs_fold_xmm6_i32_sum_to_rax(BinaryCodeBuffer *b) {
-  if (!wcs_sse_66(b, 0x6F, 0, 6) || !wcs_accumulate_xmm0_i32_to_rax(b)) {
-    return 0;
-  }
-  return 1;
-}
-
-/* 66 0F 73 /2 ib: psrlq xmm, imm8 */
-int wcs_psrlq_imm(BinaryCodeBuffer *b, int xmm, unsigned char imm) {
-  return binary_code_buffer_append_u8(b, 0x66) &&
-         binary_code_buffer_append_u8(b, 0x0F) &&
-         binary_code_buffer_append_u8(b, 0x73) &&
-         binary_code_buffer_append_u8(
-             b, (unsigned char)(0xC0 | (2 << 3) | (xmm & 7))) &&
-         binary_code_buffer_append_u8(b, imm);
-}
-
 /* Fixed 32x32 int32 matrix multiply, SSE2 4-column kernel, N=32. */
-/* 66 0F 73 /3 ib - psrldq xmm, imm8 */
-int wcs_psrldq_imm(BinaryCodeBuffer *b, int xmm, unsigned char imm) {
-  return binary_code_buffer_append_u8(b, 0x66) &&
-         binary_code_buffer_append_u8(b, 0x0F) &&
-         binary_code_buffer_append_u8(b, 0x73) &&
-         binary_code_buffer_append_u8(
-             b, (unsigned char)(0xC0 | (3 << 3) | (xmm & 7))) &&
-         binary_code_buffer_append_u8(b, imm);
-}
 
 /* 66 0F D4 /r - paddq xmm, xmm */
 int wcs_paddq(BinaryCodeBuffer *b, int dst, int src) {
   return wcs_sse_66(b, 0xD4, dst, src);
-}
-
-/* 66 0F 38 28 /r - pmuldq xmm, xmm (signed dword -> qword). */
-int wcs_pmuldq(BinaryCodeBuffer *b, int dst, int src) {
-  return binary_code_buffer_append_u8(b, 0x66) &&
-         binary_emit_rex(b, 0, dst >> 3, 0, src >> 3) &&
-         binary_code_buffer_append_u8(b, 0x0F) &&
-         binary_code_buffer_append_u8(b, 0x38) &&
-         binary_code_buffer_append_u8(b, 0x28) &&
-         binary_code_buffer_append_u8(
-             b, (unsigned char)(0xC0 | ((dst & 7) << 3) | (src & 7)));
 }
 
 int wcs_vex3(BinaryCodeBuffer *b, int map, int pp, int len256, int w,

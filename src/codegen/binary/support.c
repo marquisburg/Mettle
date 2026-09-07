@@ -509,25 +509,6 @@ void binary_call_relocation_table_destroy(
   table->capacity = 0;
 }
 
-int binary_offset_table_add(BinaryOffsetTable *table, size_t offset) {
-  if (!table) {
-    return 0;
-  }
-
-  if (table->count >= table->capacity) {
-    size_t new_capacity = table->capacity == 0 ? 8 : table->capacity * 2;
-    size_t *grown = realloc(table->items, new_capacity * sizeof(size_t));
-    if (!grown) {
-      return 0;
-    }
-    table->items = grown;
-    table->capacity = new_capacity;
-  }
-
-  table->items[table->count++] = offset;
-  return 1;
-}
-
 void binary_offset_table_destroy(BinaryOffsetTable *table) {
   if (!table) {
     return;

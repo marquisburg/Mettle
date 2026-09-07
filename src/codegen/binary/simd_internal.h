@@ -137,7 +137,6 @@ int wcs_movsd_xmm_mem(BinaryCodeBuffer *b, int xmm, int gpr, int disp);
 int wcs_movsd_mem_xmm(BinaryCodeBuffer *b, int gpr, int disp, int xmm);
 int wcs_movss_xmm_mem(BinaryCodeBuffer *b, int xmm, int gpr, int disp);
 int wcs_movss_mem_xmm(BinaryCodeBuffer *b, int gpr, int disp, int xmm);
-int simd_movd_xmm_mem32_disp(BinaryCodeBuffer *b, int xmm, int gpr, int disp);
 int simd_emit_prefixed_xmm_mem_disp(BinaryCodeBuffer *b, unsigned char prefix,
                                     unsigned char opcode, int xmm, int gpr,
                                     int displacement);

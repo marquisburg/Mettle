@@ -2676,38 +2676,6 @@ static int silu_vec(BinaryCodeBuffer *b, int has_mul) {
   return 1;
 }
 
-/* IR_OP_SIMD_SILU_F32: out[i] = silu(g[i]) * u[i] over a float32 array.
- * dest = out base, lhs = g base, rhs = u base ("" => plain SiLU, no multiply),
- * arguments[0] = element count. */
-int code_generator_binary_emit_simd_silu_f32(CodeGenerator *generator,
-                                             BinaryFunctionContext *context,
-                                             const IRInstruction *instruction) {
-  BinaryCodeBuffer *b = NULL;
-  int has_mul;
-  if (!generator || !context || !instruction ||
-      instruction->argument_count < 1 || !instruction->arguments) {
-    code_generator_set_error(generator, "Malformed simd_silu_f32");
-    return 0;
-  }
-  b = &context->code;
-  has_mul = !(instruction->rhs.kind == IR_OPERAND_STRING ||
-              instruction->rhs.kind == IR_OPERAND_NONE);
-  /* RCX = out/g base (in-place), RDX = u base (has_mul), R8 = count. */
-  if (!code_generator_binary_emit_operand_load(generator, context,
-                                               &instruction->lhs,
-                                               BINARY_GP_RCX) ||
-      !code_generator_binary_emit_operand_load(generator, context,
-                                               &instruction->arguments[0],
-                                               BINARY_GP_R8)) {
-    return 0;
-  }
-  if (has_mul && !code_generator_binary_emit_operand_load(
-                     generator, context, &instruction->rhs, BINARY_GP_RDX)) {
-    return 0;
-  }
-  return code_generator_binary_emit_simd_silu_f32_inline(b, has_mul);
-}
-
 /* The SiLU/SwiGLU compute body, assuming RCX = out/g base, RDX = u base (when
  * has_mul), R8 = count are already marshalled: R9 = end pointer, the exp
  * constant pool, the 8-wide overlap loop, and the n<8 scratch path. Shared by

@@ -234,7 +234,6 @@ int binary_emit_xor_reg_reg32(BinaryCodeBuffer *buffer,
   return 1;
 }
 
-
 int binary_emit_alu_rsp_imm32(BinaryCodeBuffer *buffer,
                                      unsigned char subopcode,
                                      uint32_t immediate) {
@@ -909,21 +908,6 @@ int binary_emit_shift_reg_imm8_32(BinaryCodeBuffer *buffer,
   return 1;
 }
 
-int binary_emit_lea_reg_reg(BinaryCodeBuffer *buffer,
-                                   BinaryGpRegister destination,
-                                   BinaryGpRegister lhs,
-                                   BinaryGpRegister rhs) {
-  if (rhs != BINARY_GP_RSP) {
-    return binary_emit_lea_reg_base_index_scale_disp(buffer, destination, lhs,
-                                                    rhs, 1, 0);
-  }
-  if (lhs != BINARY_GP_RSP) {
-    return binary_emit_lea_reg_base_index_scale_disp(buffer, destination, rhs,
-                                                    lhs, 1, 0);
-  }
-  return 0;
-}
-
 int binary_emit_lea_reg_rip_placeholder(BinaryCodeBuffer *buffer,
                                                BinaryGpRegister destination,
                                                size_t *displacement_offset_out) {
@@ -1166,21 +1150,6 @@ int binary_emit_imul_reg_reg32(BinaryCodeBuffer *buffer,
          binary_code_buffer_append_u8(
              buffer, (unsigned char)(0xC0 | ((destination & 7) << 3) |
                                      (source & 7)));
-}
-
-int binary_emit_imul_reg_reg_imm32_w32(BinaryCodeBuffer *buffer,
-                                       BinaryGpRegister destination,
-                                       BinaryGpRegister source,
-                                       uint32_t immediate) {
-  if (!buffer) {
-    return 0;
-  }
-  return binary_emit_rex(buffer, 0, destination >> 3, 0, source >> 3) &&
-         binary_code_buffer_append_u8(buffer, 0x69) &&
-         binary_code_buffer_append_u8(
-             buffer, (unsigned char)(0xC0 | ((destination & 7) << 3) |
-                                     (source & 7))) &&
-         binary_code_buffer_append_u32(buffer, immediate);
 }
 
 int binary_emit_imul_reg_reg(BinaryCodeBuffer *buffer,
@@ -1620,21 +1589,6 @@ int binary_emit_cqo(BinaryCodeBuffer *buffer) {
   return 1;
 }
 
-int binary_emit_setcc_al(BinaryCodeBuffer *buffer,
-                                unsigned char condition_opcode) {
-  if (!buffer) {
-    return 0;
-  }
-
-  if (!binary_code_buffer_append_u8(buffer, 0x0F) ||
-      !binary_code_buffer_append_u8(buffer, condition_opcode) ||
-      !binary_code_buffer_append_u8(buffer, 0xC0)) {
-    return 0;
-  }
-
-  return 1;
-}
-
 int binary_emit_movzx_eax_al(BinaryCodeBuffer *buffer) {
   if (!buffer) {
     return 0;
@@ -1642,50 +1596,6 @@ int binary_emit_movzx_eax_al(BinaryCodeBuffer *buffer) {
 
   if (!binary_code_buffer_append_u8(buffer, 0x0F) ||
       !binary_code_buffer_append_u8(buffer, 0xB6) ||
-      !binary_code_buffer_append_u8(buffer, 0xC0)) {
-    return 0;
-  }
-
-  return 1;
-}
-
-int binary_emit_movzx_eax_ax(BinaryCodeBuffer *buffer) {
-  if (!buffer) {
-    return 0;
-  }
-
-  if (!binary_code_buffer_append_u8(buffer, 0x0F) ||
-      !binary_code_buffer_append_u8(buffer, 0xB7) ||
-      !binary_code_buffer_append_u8(buffer, 0xC0)) {
-    return 0;
-  }
-
-  return 1;
-}
-
-int binary_emit_movsx_rax_al(BinaryCodeBuffer *buffer) {
-  if (!buffer) {
-    return 0;
-  }
-
-  if (!binary_emit_rex(buffer, 1, 0, 0, 0) ||
-      !binary_code_buffer_append_u8(buffer, 0x0F) ||
-      !binary_code_buffer_append_u8(buffer, 0xBE) ||
-      !binary_code_buffer_append_u8(buffer, 0xC0)) {
-    return 0;
-  }
-
-  return 1;
-}
-
-int binary_emit_movsx_rax_ax(BinaryCodeBuffer *buffer) {
-  if (!buffer) {
-    return 0;
-  }
-
-  if (!binary_emit_rex(buffer, 1, 0, 0, 0) ||
-      !binary_code_buffer_append_u8(buffer, 0x0F) ||
-      !binary_code_buffer_append_u8(buffer, 0xBF) ||
       !binary_code_buffer_append_u8(buffer, 0xC0)) {
     return 0;
   }
@@ -1793,19 +1703,6 @@ int binary_emit_movsxd_reg_reg32(BinaryCodeBuffer *buffer,
       !binary_code_buffer_append_u8(
           buffer,
           (unsigned char)(0xC0 | ((destination & 7) << 3) | (source & 7)))) {
-    return 0;
-  }
-
-  return 1;
-}
-
-int binary_emit_mov_eax_eax(BinaryCodeBuffer *buffer) {
-  if (!buffer) {
-    return 0;
-  }
-
-  if (!binary_code_buffer_append_u8(buffer, 0x89) ||
-      !binary_code_buffer_append_u8(buffer, 0xC0)) {
     return 0;
   }
 
@@ -1921,18 +1818,6 @@ int binary_emit_pxor_xmm_xmm(BinaryCodeBuffer *buffer,
                                     BinaryXmmRegister destination,
                                     BinaryXmmRegister source) {
   return binary_emit_sse_reg_reg(buffer, 0x66, 0, 0x0F, 0xEF, destination,
-                                 source);
-}
-
-/* Bitwise XOR over the whole register, in the float domain. Negation is a
- * sign-bit flip rather than `0 - x`, because IEEE 754 says -(+0.0) is -0.0
- * while 0.0 - 0.0 is +0.0, and because a subtract cannot flip the sign of a
- * NaN. Used at both widths: the mask for a float32 has zeros above bit 31, so
- * the wider operation touches nothing that matters. */
-int binary_emit_xorpd_xmm_xmm(BinaryCodeBuffer *buffer,
-                                     BinaryXmmRegister destination,
-                                     BinaryXmmRegister source) {
-  return binary_emit_sse_reg_reg(buffer, 0x66, 0, 0x0F, 0x57, destination,
                                  source);
 }
 
@@ -2236,11 +2121,6 @@ int binary_emit_jcc_placeholder(BinaryCodeBuffer *buffer,
 
   *displacement_offset_out = buffer->size;
   return binary_code_buffer_append_u32(buffer, 0);
-}
-
-int binary_emit_je_placeholder(BinaryCodeBuffer *buffer,
-                                      size_t *displacement_offset_out) {
-  return binary_emit_jcc_placeholder(buffer, 0x84, displacement_offset_out);
 }
 
 int binary_emit_ret(BinaryCodeBuffer *buffer) {

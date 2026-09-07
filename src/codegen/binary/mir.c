@@ -214,14 +214,6 @@ MirOperand mir_op_symbol(const char *name) {
   return op;
 }
 
-MirOperand mir_op_stackhome(const char *name, int rbp_disp) {
-  MirOperand op = mir_op_none();
-  op.kind = MIR_OPK_STACKHOME;
-  op.sym = name;
-  op.disp = rbp_disp;
-  return op;
-}
-
 MirOperand mir_op_mem_vreg(MirVregId base, MirVregId index, int scale,
                            int disp) {
   MirOperand op = mir_op_none();
@@ -231,18 +223,6 @@ MirOperand mir_op_mem_vreg(MirVregId base, MirVregId index, int scale,
   op.mem.scale = scale;
   op.mem.disp = disp;
   op.mem.phys_base_valid = 0;
-  return op;
-}
-
-MirOperand mir_op_mem_rbp(int rbp_disp) {
-  MirOperand op = mir_op_none();
-  op.kind = MIR_OPK_MEM;
-  op.mem.base = MIR_VREG_NONE;
-  op.mem.index = MIR_VREG_NONE;
-  op.mem.scale = 0;
-  op.mem.disp = rbp_disp;
-  op.mem.phys_base_valid = 1;
-  op.mem.phys_base = BINARY_GP_RBP;
   return op;
 }
 
