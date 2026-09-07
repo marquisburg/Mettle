@@ -1535,34 +1535,188 @@ static const char *mir_operand_kind_name(int kind) {
   }
 }
 
-static int mir_call_is_supported(CodeGenerator *g,
-                                 const IRFunction *ir_function,
-                                 const IRInstruction *in) {
-  if (!in->text || in->text[0] == '\0') {
-    mir_call_trace("no_name");
-    return 0;
+static int mir_runtime_trap_is_supported(CodeGenerator *g,
+                                         const IRInstruction *in) {
+  if (!g->generate_stack_trace_support) {
+    return 1;
   }
-  /* Runtime safety-check traps are terminal and lowered specially (MIR_TRAP),
-   * so they bypass the normal known-function / argument-shape requirements. */
-  if (mir_call_is_runtime_trap(in)) {
-    if (g->generate_stack_trace_support) {
-      int is_ex = strcmp(in->text, "mettle_crash_trap_ex") == 0;
-      if (is_ex) {
-        for (size_t a = 2; a < in->argument_count && a < 4; a++) {
-          int kind = in->arguments[a].kind;
-          if (kind != IR_OPERAND_INT && kind != IR_OPERAND_TEMP &&
-              kind != IR_OPERAND_SYMBOL) {
-            mir_call_trace("trap_detail_kind");
-            return 0;
-          }
-        }
-      } else if (in->argument_count < 1 ||
-                 in->arguments[0].kind != IR_OPERAND_STRING) {
-        mir_call_trace("trap_message_kind");
+  if (strcmp(in->text, "mettle_crash_trap_ex") == 0) {
+    for (size_t a = 2; a < in->argument_count && a < 4; a++) {
+      int kind = in->arguments[a].kind;
+      if (kind != IR_OPERAND_INT && kind != IR_OPERAND_TEMP &&
+          kind != IR_OPERAND_SYMBOL) {
+        mir_call_trace("trap_detail_kind");
         return 0;
       }
     }
     return 1;
+  }
+  if (in->argument_count < 1 ||
+      in->arguments[0].kind != IR_OPERAND_STRING) {
+    mir_call_trace("trap_message_kind");
+    return 0;
+  }
+  return 1;
+}
+
+static int mir_syscall_is_supported(const IRInstruction *in) {
+  const BinaryGpRegister *registers = NULL;
+  size_t register_count = 0;
+  size_t stacked = 0;
+
+  if (!mir_syscall_operand_split(in, &registers, &register_count, &stacked)) {
+    mir_call_trace("syscall_args>max");
+    return 0;
+  }
+  for (size_t a = 0; a < in->argument_count; a++) {
+    if (in->arguments[a].kind == IR_OPERAND_STRING) {
+      mir_call_trace("syscall_string_operand");
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int mir_unknown_callee_is_supported(CodeGenerator *g,
+                                           const IRFunction *ir_function,
+                                           const IRInstruction *in) {
+  const BinaryAbi *abi = code_generator_binary_active_abi();
+  size_t float_slot = 0;
+
+  for (size_t a = 0; a < in->argument_count; a++) {
+    const IROperand *arg = &in->arguments[a];
+    if (!mir_arg_kind_is_value(arg, 1, 0)) {
+      mir_call_trace_named("unknown_arg_kind", in->text);
+      return 0;
+    }
+    if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
+        (mir_name_is_global_aggregate(g, ir_function, arg->name) ||
+         mir_name_is_indirect_aggregate(g, ir_function, arg->name))) {
+      mir_call_trace_named("unknown_arg_aggregate", in->text);
+      return 0;
+    }
+    if (mir_arg_float_bits(g, ir_function, arg) != 0 ||
+        (arg->kind == IR_OPERAND_TEMP &&
+         mir_temp_is_float(g, (IRFunction *)ir_function, arg->name, 0))) {
+      size_t slot = abi->counts_classes_separately ? float_slot++ : a;
+      if (mir_float_slot_is_encoder_scratch(abi, slot)) {
+        mir_call_trace_named("unknown_arg_float_scratch_register", in->text);
+        return 0;
+      }
+    }
+  }
+  if (!mir_indirect_dest_kind_supported(in)) {
+    mir_call_trace_named("unknown_dest_kind", in->text);
+    return 0;
+  }
+  if (mir_operand_struct_home_size(g, ir_function, &in->dest) > 0 ||
+      (in->value_type &&
+       (code_generator_type_is_aggregate(in->value_type) ||
+        code_generator_binary_type_is_string(in->value_type)))) {
+    mir_call_trace_named("unknown_ret_aggregate", in->text);
+    return 0;
+  }
+  return 1;
+}
+
+static int mir_sysv_extern_call_is_supported(CodeGenerator *g,
+                                             const IRFunction *ir_function,
+                                             const IRInstruction *in,
+                                             const MtlcType *ret,
+                                             int *returns_in_gp) {
+  const BinaryAbi *abi = code_generator_binary_active_abi();
+
+  *returns_in_gp = 0;
+  if (!abi->counts_classes_separately ||
+      !code_generator_binary_function_is_abi_public(g, in->text)) {
+    return 1;
+  }
+  if (ret && code_generator_type_is_aggregate(ret) &&
+      mir_call_sysv_returns_in_gp_registers(g, in->text, (MtlcType *)ret,
+                                            NULL)) {
+    if (in->dest.kind != IR_OPERAND_TEMP &&
+        in->dest.kind != IR_OPERAND_SYMBOL) {
+      mir_call_trace("sysv_extern_aggregate_ret");
+      return 0;
+    }
+    *returns_in_gp = 1;
+  }
+  for (size_t a = 0; a < in->argument_count; a++) {
+    BinarySysvAggregate agg;
+    if (mir_call_sysv_arg_class(g, in, a, &agg) &&
+        !mir_indirect_source_is_supported(g, ir_function, &in->arguments[a])) {
+      mir_call_trace("sysv_extern_aggregate_arg");
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int mir_known_arg_is_supported(CodeGenerator *g,
+                                      const IRFunction *ir_function,
+                                      const IROperand *arg, MtlcType *pt,
+                                      const BinaryAbi *abi, size_t index,
+                                      int hidden, size_t *float_slot) {
+  if (!pt) {
+    mir_call_trace("arg_no_type");
+    return 0;
+  }
+  if (code_generator_binary_resolved_type_float_bits(pt) != 0) {
+    size_t slot = abi && abi->counts_classes_separately
+                      ? (*float_slot)++
+                      : index + (size_t)hidden;
+    if (mir_float_slot_is_encoder_scratch(abi, slot)) {
+      mir_call_trace("arg_float_scratch_register");
+      return 0;
+    }
+    if (!mir_arg_kind_is_value(arg, 1, 0)) {
+      mir_call_trace("arg_float_operand_kind");
+      return 0;
+    }
+    if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
+        mir_name_is_global_aggregate(g, ir_function, arg->name)) {
+      mir_call_trace("arg_aggregate_scalar_param");
+      return 0;
+    }
+    return 1;
+  }
+  if (code_generator_abi_classify(pt) == ABI_PASS_INDIRECT) {
+    if (!mir_indirect_source_is_supported(g, ir_function, arg)) {
+      mir_call_trace("arg_struct_nonlocal");
+      return 0;
+    }
+    return 1;
+  }
+  if (!mir_arg_kind_is_value(arg, 1, 1)) {
+    mir_call_trace_named("arg_operand_kind",
+                         mir_operand_kind_name((int)arg->kind));
+    return 0;
+  }
+  if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
+      mir_name_is_global_aggregate(g, ir_function, arg->name) &&
+      !mir_indirect_source_is_supported(g, ir_function, arg)) {
+    mir_call_trace("arg_aggregate_scalar_param");
+    return 0;
+  }
+  return 1;
+}
+
+static int mir_call_is_supported(CodeGenerator *g,
+                                 const IRFunction *ir_function,
+                                 const IRInstruction *in) {
+  const CgSym *callee = NULL;
+  const MtlcType *ret = NULL;
+  const BinaryAbi *abi = NULL;
+  size_t float_slot = 0;
+  int sysv_gp_return = 0;
+  int hidden = 0;
+
+  if (!in->text || in->text[0] == '\0') {
+    mir_call_trace("no_name");
+    return 0;
+  }
+  if (mir_call_is_runtime_trap(in)) {
+    return mir_runtime_trap_is_supported(g, in);
   }
   if (mir_call_is_runtime_hook(in)) {
     return mir_runtime_hook_is_supported(in);
@@ -1571,200 +1725,46 @@ static int mir_call_is_supported(CodeGenerator *g,
     return 1;
   }
   if (mir_call_is_syscall(in)) {
-    const BinaryGpRegister *registers = NULL;
-    size_t register_count = 0;
-    size_t stacked = 0;
-    if (!mir_syscall_operand_split(in, &registers, &register_count, &stacked)) {
-      mir_call_trace("syscall_args>max");
-      return 0;
-    }
-    for (size_t a = 0; a < in->argument_count; a++) {
-      if (in->arguments[a].kind == IR_OPERAND_STRING) {
-        mir_call_trace("syscall_string_operand");
-        return 0;
-      }
-    }
-    return 1;
+    return mir_syscall_is_supported(in);
   }
   if (in->argument_count > MIR_MAX_PARAMS) {
     mir_call_trace("args>max");
     return 0;
   }
-  const CgSym *callee =
-      g->ir_program ? code_generator_lookup_symbol(g, in->text) : NULL;
+  callee = g->ir_program ? code_generator_lookup_symbol(g, in->text) : NULL;
   if (!callee || callee->kind != CG_SYM_FUNCTION) {
-    const BinaryAbi *ua = code_generator_binary_active_abi();
-    size_t ufloat = 0;
-    for (size_t a = 0; a < in->argument_count; a++) {
-      const IROperand *arg = &in->arguments[a];
-      if (arg->kind != IR_OPERAND_TEMP && arg->kind != IR_OPERAND_SYMBOL &&
-          arg->kind != IR_OPERAND_INT && arg->kind != IR_OPERAND_FLOAT) {
-        mir_call_trace_named("unknown_arg_kind", in->text);
-        return 0;
-      }
-      if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
-          (mir_name_is_global_aggregate(g, ir_function, arg->name) ||
-           mir_name_is_indirect_aggregate(g, ir_function, arg->name))) {
-        mir_call_trace_named("unknown_arg_aggregate", in->text);
-        return 0;
-      }
-      if (mir_arg_float_bits(g, ir_function, arg) != 0 ||
-          (arg->kind == IR_OPERAND_TEMP &&
-           mir_temp_is_float(g, (IRFunction *)ir_function, arg->name, 0))) {
-        size_t slot = ua->counts_classes_separately ? ufloat++ : a;
-        if (ua->float_param_registers && slot < ua->float_param_count &&
-            mir_xmm_is_encoder_scratch(ua->float_param_registers[slot])) {
-          mir_call_trace_named("unknown_arg_float_scratch_register", in->text);
-          return 0;
-        }
-      }
-    }
-    if (in->dest.kind != IR_OPERAND_NONE && in->dest.kind != IR_OPERAND_TEMP &&
-        in->dest.kind != IR_OPERAND_SYMBOL) {
-      mir_call_trace_named("unknown_dest_kind", in->text);
-      return 0;
-    }
-    if (mir_operand_struct_home_size(g, ir_function, &in->dest) > 0 ||
-        (in->value_type && (code_generator_type_is_aggregate(in->value_type) ||
-                            code_generator_binary_type_is_string(
-                                in->value_type)))) {
-      mir_call_trace_named("unknown_ret_aggregate", in->text);
-      return 0;
-    }
-    return 1;
+    return mir_unknown_callee_is_supported(g, ir_function, in);
   }
-  const MtlcType *ret = callee->data.function.return_type
-                  ? callee->data.function.return_type
-                  : callee->type;
-  /* An aggregate crossing to a foreign function on SysV has to be classified
-   * into eightbytes: 16 bytes or less travels in registers, and a float-only
-   * eightbyte travels in an XMM. MIR knows only the Microsoft rule, so those
-   * calls go to the baseline emitter, which does classify them. Calls between
-   * Mettle functions keep the fast path: both sides agree on the convention
-   * whatever it is, and `string` is a 16-byte aggregate that would otherwise
-   * drag most of the standard library off MIR. */
-  int sysv_gp_return = 0;
-  {
-    const BinaryAbi *sysv_probe = code_generator_binary_active_abi();
-    if (sysv_probe->counts_classes_separately &&
-        code_generator_binary_function_is_abi_public(g, in->text)) {
-      size_t a = 0;
-      if (ret && code_generator_type_is_aggregate(ret) &&
-          mir_call_sysv_returns_in_gp_registers(g, in->text, (MtlcType *)ret,
-                                                NULL)) {
-        /* The eightbytes come back in registers and are spilled into the
-         * destination's home. A destination whose own size cannot be recovered
-         * from the IR still gets one, sized from the callee's return type. */
-        if (in->dest.kind != IR_OPERAND_TEMP &&
-            in->dest.kind != IR_OPERAND_SYMBOL) {
-          mir_call_trace("sysv_extern_aggregate_ret");
-          return 0;
-        }
-        sysv_gp_return = 1;
-      }
-      for (a = 0; a < in->argument_count; a++) {
-        BinarySysvAggregate agg;
-        if (mir_call_sysv_arg_class(g, in, a, &agg) &&
-            !mir_indirect_source_is_supported(g, ir_function,
-                                              &in->arguments[a])) {
-          mir_call_trace("sysv_extern_aggregate_arg");
-          return 0;
-        }
-      }
-    }
+  ret = callee->data.function.return_type ? callee->data.function.return_type
+                                          : callee->type;
+  if (!mir_sysv_extern_call_is_supported(g, ir_function, in, ret,
+                                         &sysv_gp_return)) {
+    return 0;
   }
-
-  int hidden = 0;
   if (!sysv_gp_return && ret &&
       code_generator_abi_classify(ret) == ABI_PASS_INDIRECT) {
-    /* struct-by-value return: the caller passes a hidden out-pointer as the
-     * first integer arg, pointed at the destination struct's home (a struct
-     * LOCAL or a struct TEMP), so the callee writes the result directly there. */
     if (mir_operand_struct_home_size(g, ir_function, &in->dest) == 0) {
       mir_call_trace("ret_indirect");
       return 0;
     }
-    hidden = 1; /* hidden out-pointer occupies the first positional ABI slot */
+    hidden = 1;
   }
   if (callee->data.function.parameter_count != in->argument_count) {
     mir_call_trace("arity_mismatch");
-    return 0; /* variadic / arity mismatch: not yet */
+    return 0;
   }
-  /* The positional ABI slot count that lands in a register (Win64: 4 shared
-   * int/float; SysV draws int and float from separate larger pools). Float args
-   * are homed only when they fall in an XMM register; a float STACK arg (5th+
-   * positional under Win64) is still deferred to the fallback. */
-  const BinaryAbi *call_abi = code_generator_binary_active_abi();
-  size_t float_slot = 0;
+  abi = code_generator_binary_active_abi();
   for (size_t a = 0; a < in->argument_count; a++) {
-    MtlcType *pt = callee->data.function.parameter_types
-                   ? callee->data.function.parameter_types[a]
-                   : NULL;
-    const IROperand *arg = &in->arguments[a];
-    if (!pt) {
-      mir_call_trace("arg_no_type");
-      return 0;
-    }
-    if (code_generator_binary_resolved_type_float_bits(pt) != 0) {
-      /* XMM4/XMM5 are the encoder's float scratch. Where the convention also
-       * makes them argument registers -- SysV's fifth and sixth float -- the
-       * value staged for a later argument lands in the register an earlier one
-       * was already marshalled into, so such a call stays on the baseline. */
-      size_t slot = call_abi && call_abi->counts_classes_separately
-                        ? float_slot++
-                        : a + (size_t)hidden;
-      if (call_abi && call_abi->float_param_registers &&
-          slot < call_abi->float_param_count &&
-          mir_xmm_is_encoder_scratch(call_abi->float_param_registers[slot])) {
-        mir_call_trace("arg_float_scratch_register");
-        return 0;
-      }
-      /* Float parameter: any scalar source works (literals fold, float values
-       * width-convert, int values cvtsi2sd -- coerce_float_operand). */
-      if (arg->kind != IR_OPERAND_TEMP && arg->kind != IR_OPERAND_SYMBOL &&
-          arg->kind != IR_OPERAND_INT && arg->kind != IR_OPERAND_FLOAT) {
-        mir_call_trace("arg_float_operand_kind");
-        return 0;
-      }
-      if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
-          mir_name_is_global_aggregate(g, ir_function, arg->name)) {
-        mir_call_trace("arg_aggregate_scalar_param");
-        return 0;
-      }
-      continue;
-    }
-    if (code_generator_abi_classify(pt) == ABI_PASS_INDIRECT) {
-      /* struct passed BY VALUE: the caller copies it to an outgoing temp and
-       * passes the temp's address. The copy can source from a struct LOCAL or
-       * TEMP's home, a by-ref param's pointer, or a string literal's .rdata
-       * record. */
-      if (!mir_indirect_source_is_supported(g, ir_function, arg)) {
-        mir_call_trace("arg_struct_nonlocal");
-        return 0;
-      }
-      continue;
-    }
-    if (arg->kind != IR_OPERAND_TEMP && arg->kind != IR_OPERAND_SYMBOL &&
-        arg->kind != IR_OPERAND_INT && arg->kind != IR_OPERAND_STRING &&
-        arg->kind != IR_OPERAND_FLOAT) {
-      mir_call_trace_named("arg_operand_kind",
-                           mir_operand_kind_name((int)arg->kind));
-      return 0;
-    }
-    /* A global AGGREGATE has no cached value vreg: memory is authoritative and
-     * its VALUE is its address, which is what a pointer-shaped parameter wants
-     * (a global `string` handed to the safety runtime, an array decaying to a
-     * pointer). The marshalling materializes that address, so admit it wherever
-     * the indirect-source machinery can produce one. */
-    if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
-        mir_name_is_global_aggregate(g, ir_function, arg->name) &&
-        !mir_indirect_source_is_supported(g, ir_function, arg)) {
-      mir_call_trace("arg_aggregate_scalar_param");
+    if (!mir_known_arg_is_supported(
+            g, ir_function, &in->arguments[a],
+            callee->data.function.parameter_types
+                ? callee->data.function.parameter_types[a]
+                : NULL,
+            abi, a, hidden, &float_slot)) {
       return 0;
     }
   }
-  if (in->dest.kind != IR_OPERAND_NONE && in->dest.kind != IR_OPERAND_TEMP &&
-      in->dest.kind != IR_OPERAND_SYMBOL) {
+  if (!mir_indirect_dest_kind_supported(in)) {
     mir_call_trace("dest_kind");
     return 0;
   }
@@ -5511,185 +5511,179 @@ static int mir_lower_alloc(MirFunction *fn, CodeGenerator *g,
   return 0;
 }
 
+static int mir_emit_ret(MirFunction *fn) {
+  return mir_emit1(fn, MIR_RET, mir_op_none(), mir_op_none(), mir_op_none(), 8,
+                   0, 0);
+}
+
+static const IRFunction *mir_returning_ir_function(CodeGenerator *g,
+                                                   BinaryFunctionContext *ctx) {
+  return ctx && ctx->function_name
+             ? code_generator_find_ir_function_binary(g, ctx->function_name)
+             : NULL;
+}
+
+static int mir_return_sysv_registers(MirFunction *fn, CodeGenerator *g,
+                                     BinaryFunctionContext *ctx,
+                                     MirNameMap *map, const IRInstruction *in,
+                                     const MirGlobalWriteback *wb) {
+  MirVregId base = mir_emit_indirect_source_addr(
+      fn, g, ctx, map, mir_returning_ir_function(g, ctx), &in->lhs,
+      fn->sysv_return_size);
+  MirVregId parts[2] = {MIR_VREG_NONE, MIR_VREG_NONE};
+  int ints = 0;
+  int sses = 0;
+
+  if (base == MIR_VREG_NONE) {
+    return 0;
+  }
+  for (int e = 0; e < fn->sysv_return_eightbytes; e++) {
+    MirOperand src = mir_op_mem_vreg(base, MIR_VREG_NONE, 1, e * 8);
+    parts[e] = mir_new_vreg(fn, fn->sysv_return_sse[e] ? MIR_RC_XMM : MIR_RC_GP,
+                            8);
+    if (parts[e] == MIR_VREG_NONE) {
+      return 0;
+    }
+    if (fn->sysv_return_sse[e]) {
+      if (!mir_emit_fmov(fn, mir_op_vreg(parts[e]), src, 8)) {
+        return 0;
+      }
+    } else if (!mir_emit1(fn, MIR_MOV, mir_op_vreg(parts[e]), src,
+                          mir_op_none(), 8, 0, 0)) {
+      return 0;
+    }
+  }
+  if (!mir_emit_global_writebacks(fn, g, map, wb)) {
+    return 0;
+  }
+  for (int e = 0; e < fn->sysv_return_eightbytes; e++) {
+    if (fn->sysv_return_sse[e]) {
+      BinaryXmmRegister x = sses++ == 0 ? BINARY_XMM0 : BINARY_XMM1;
+      if (!mir_emit_fmov(fn, mir_op_phys(x, MIR_RC_XMM), mir_op_vreg(parts[e]),
+                         8)) {
+        return 0;
+      }
+    } else {
+      BinaryGpRegister r = ints++ == 0 ? BINARY_GP_RAX : BINARY_GP_RDX;
+      if (!mir_emit1(fn, MIR_MOV, mir_op_phys(r, MIR_RC_GP),
+                     mir_op_vreg(parts[e]), mir_op_none(), 8, 0, 0)) {
+        return 0;
+      }
+    }
+  }
+  return mir_emit_ret(fn);
+}
+
+static int mir_return_indirect_copy(MirFunction *fn, CodeGenerator *g,
+                                    BinaryFunctionContext *ctx,
+                                    MirNameMap *map, const IRInstruction *in,
+                                    const MirGlobalWriteback *wb) {
+  MirVregId src_base;
+
+  if (fn->indirect_return_vreg == MIR_VREG_NONE) {
+    fn->has_error = 1;
+    return 0;
+  }
+  src_base = mir_emit_indirect_source_addr(fn, g, ctx, map,
+                                           mir_returning_ir_function(g, ctx),
+                                           &in->lhs,
+                                           fn->indirect_return_size);
+  if (src_base == MIR_VREG_NONE ||
+      !mir_emit_struct_copy(fn, fn->indirect_return_vreg, src_base,
+                            fn->indirect_return_size) ||
+      !mir_emit_global_writebacks(fn, g, map, wb) ||
+      !mir_emit1(fn, MIR_MOV, mir_op_phys(BINARY_GP_RAX, MIR_RC_GP),
+                 mir_op_vreg(fn->indirect_return_vreg), mir_op_none(), 8, 0,
+                 0)) {
+    return 0;
+  }
+  return mir_emit_ret(fn);
+}
+
+static int mir_return_float_value(MirFunction *fn, MirOperand src,
+                                  int value_bits) {
+  int want = fn->float_return_bits ? fn->float_return_bits : value_bits;
+
+  if (want != value_bits) {
+    MirVregId tmp = mir_new_vreg(fn, MIR_RC_XMM, want / 8);
+    if (tmp == MIR_VREG_NONE ||
+        !mir_emit1(fn, MIR_CVTF2F, mir_op_vreg(tmp), src, mir_op_none(),
+                   want / 8, 0, 0)) {
+      return 0;
+    }
+    src = mir_op_vreg(tmp);
+  }
+  return mir_emit_fmov(fn, mir_op_phys(BINARY_XMM0, MIR_RC_XMM), src,
+                       want / 8);
+}
+
+static int mir_return_scalar_value(MirFunction *fn, CodeGenerator *g,
+                                   BinaryFunctionContext *ctx, MirNameMap *map,
+                                   const IRInstruction *in) {
+  MirOperand src = mir_value_operand(fn, g, ctx, map, &in->lhs);
+  int float_bits = code_generator_binary_operand_float_bits(g, ctx, &in->lhs);
+  int narrow = fn->scalar_return_width == 1 || fn->scalar_return_width == 2 ||
+               fn->scalar_return_width == 4;
+
+  if (float_bits) {
+    return mir_return_float_value(fn, src, float_bits);
+  }
+  if (narrow && !mir_return_literal_is_canonical(fn, &in->lhs)) {
+    return mir_emit1(fn, fn->scalar_return_signed ? MIR_MOVSX : MIR_MOVZX,
+                     mir_op_phys(BINARY_GP_RAX, MIR_RC_GP), src, mir_op_none(),
+                     fn->scalar_return_width, !fn->scalar_return_signed, 0);
+  }
+  return mir_emit1(fn, MIR_MOV, mir_op_phys(BINARY_GP_RAX, MIR_RC_GP), src,
+                   mir_op_none(), 8, 0, 0);
+}
+
 static int mir_lower_return(MirFunction *fn, CodeGenerator *g,
-                        BinaryFunctionContext *ctx, MirNameMap *map,
-                        const IRInstruction *in,
-                        const MirGlobalWriteback *wb, int *handled) {
-  (void)g;
-  (void)ctx;
-  (void)map;
-  (void)wb;
-  *handled = 1;
-  switch (in->op) {
-  case IR_OP_RETURN: {
-    if (fn->returns_sysv_registers && in->lhs.kind != IR_OPERAND_NONE) {
-      const IRFunction *rirf =
-          ctx && ctx->function_name
-              ? code_generator_find_ir_function_binary(g, ctx->function_name)
-              : NULL;
-      MirVregId base = mir_emit_indirect_source_addr(
-          fn, g, ctx, map, rirf, &in->lhs, fn->sysv_return_size);
-      MirVregId parts[2] = {MIR_VREG_NONE, MIR_VREG_NONE};
-      int ints = 0;
-      int sses = 0;
-      if (base == MIR_VREG_NONE) {
-        return 0;
-      }
-      for (int e = 0; e < fn->sysv_return_eightbytes; e++) {
-        MirOperand src = mir_op_mem_vreg(base, MIR_VREG_NONE, 1, e * 8);
-        if (fn->sysv_return_sse[e]) {
-          parts[e] = mir_new_vreg(fn, MIR_RC_XMM, 8);
-          if (parts[e] == MIR_VREG_NONE ||
-              !mir_emit_fmov(fn, mir_op_vreg(parts[e]), src, 8)) {
-            return 0;
-          }
-        } else {
-          parts[e] = mir_new_vreg(fn, MIR_RC_GP, 8);
-          if (parts[e] == MIR_VREG_NONE ||
-              !mir_emit1(fn, MIR_MOV, mir_op_vreg(parts[e]), src,
-                         mir_op_none(), 8, 0, 0)) {
-            return 0;
-          }
-        }
-      }
-      if (!mir_emit_global_writebacks(fn, g, map, wb)) {
-        return 0;
-      }
-      for (int e = 0; e < fn->sysv_return_eightbytes; e++) {
-        if (fn->sysv_return_sse[e]) {
-          BinaryXmmRegister x = sses++ == 0 ? BINARY_XMM0 : BINARY_XMM1;
-          if (!mir_emit_fmov(fn, mir_op_phys(x, MIR_RC_XMM),
-                             mir_op_vreg(parts[e]), 8)) {
-            return 0;
-          }
-        } else {
-          BinaryGpRegister r = ints++ == 0 ? BINARY_GP_RAX : BINARY_GP_RDX;
-          if (!mir_emit1(fn, MIR_MOV, mir_op_phys(r, MIR_RC_GP),
-                         mir_op_vreg(parts[e]), mir_op_none(), 8, 0, 0)) {
-            return 0;
-          }
-        }
-      }
-      return mir_emit1(fn, MIR_RET, mir_op_none(), mir_op_none(), mir_op_none(),
-                       8, 0, 0);
+                            BinaryFunctionContext *ctx, MirNameMap *map,
+                            const IRInstruction *in,
+                            const MirGlobalWriteback *wb, int *handled) {
+  int indirect_value = in->lhs.kind == IR_OPERAND_SYMBOL ||
+                       in->lhs.kind == IR_OPERAND_TEMP ||
+                       in->lhs.kind == IR_OPERAND_STRING;
+
+  *handled = in->op == IR_OP_RETURN;
+  if (!*handled) {
+    return 0;
+  }
+  if (fn->returns_sysv_registers && in->lhs.kind != IR_OPERAND_NONE) {
+    return mir_return_sysv_registers(fn, g, ctx, map, in, wb);
+  }
+  if (!fn->returns_indirect && in->lhs.kind == IR_OPERAND_STRING) {
+    if (!mir_emit_global_writebacks(fn, g, map, wb) ||
+        !mir_emit1(fn, MIR_LEA_CSTR, mir_op_phys(BINARY_GP_RAX, MIR_RC_GP),
+                   mir_op_symbol(in->lhs.name ? in->lhs.name : ""),
+                   mir_op_none(), 8, 0, 0)) {
+      return 0;
     }
-    if (!fn->returns_indirect && in->lhs.kind == IR_OPERAND_STRING) {
-      if (!mir_emit_global_writebacks(fn, g, map, wb) ||
-          !mir_emit1(fn, MIR_LEA_CSTR, mir_op_phys(BINARY_GP_RAX, MIR_RC_GP),
-                     mir_op_symbol(in->lhs.name ? in->lhs.name : ""),
-                     mir_op_none(), 8, 0, 0)) {
-        return 0;
-      }
-      return mir_emit1(fn, MIR_RET, mir_op_none(), mir_op_none(), mir_op_none(),
-                       8, 0, 0);
-    }
-    /* The valueless fall-through of a struct-returning function: hand back the
-     * out-pointer the caller gave us, which is all the ABI asks for, and let
-     * the epilogue run. Nothing was computed to copy. */
-    if (fn->returns_indirect && in->lhs.kind == IR_OPERAND_NONE) {
-      if (!mir_emit_global_writebacks(fn, g, map, wb)) {
-        return 0;
-      }
-      if (fn->indirect_return_vreg != MIR_VREG_NONE &&
-          !mir_emit1(fn, MIR_MOV, mir_op_phys(BINARY_GP_RAX, MIR_RC_GP),
-                     mir_op_vreg(fn->indirect_return_vreg), mir_op_none(), 8,
-                     0, 0)) {
-        return 0;
-      }
-      return mir_emit1(fn, MIR_RET, mir_op_none(), mir_op_none(),
-                       mir_op_none(), 8, 0, 0);
-    }
-    if (fn->returns_indirect && (in->lhs.kind == IR_OPERAND_SYMBOL ||
-                                 in->lhs.kind == IR_OPERAND_TEMP ||
-                                 in->lhs.kind == IR_OPERAND_STRING)) {
-      /* INDIRECT struct return: copy the struct into the caller's hidden slot
-       * (whose pointer the prologue homed into indirect_return_vreg), then
-       * leave that pointer in RAX as the Win64/SysV ABI requires. The source
-       * is a struct local's stack home or a by-ref param's pointer. */
-      const IRFunction *rirf =
-          ctx && ctx->function_name
-              ? code_generator_find_ir_function_binary(g, ctx->function_name)
-              : NULL;
-      if (fn->indirect_return_vreg == MIR_VREG_NONE) {
-        fn->has_error = 1;
-        return 0;
-      }
-      MirVregId src_base = mir_emit_indirect_source_addr(
-          fn, g, ctx, map, rirf, &in->lhs, fn->indirect_return_size);
-      if (src_base == MIR_VREG_NONE ||
-          !mir_emit_struct_copy(fn, fn->indirect_return_vreg, src_base,
-                                fn->indirect_return_size)) {
-        return 0;
-      }
-      /* Writeback before the RAX move (the flush uses RAX as scratch). */
-      if (!mir_emit_global_writebacks(fn, g, map, wb)) {
-        return 0;
-      }
-      if (!mir_emit1(fn, MIR_MOV, mir_op_phys(BINARY_GP_RAX, MIR_RC_GP),
-                     mir_op_vreg(fn->indirect_return_vreg), mir_op_none(), 8, 0,
-                     0)) {
-        return 0;
-      }
-      return mir_emit1(fn, MIR_RET, mir_op_none(), mir_op_none(), mir_op_none(),
-                       8, 0, 0);
-    }
-    /* Flush register-promoted globals to memory BEFORE materializing the return
-     * value. The writeback uses RAX as scratch to store spilled (memory-homed)
-     * global caches, so doing it after the return value is placed in RAX would
-     * clobber that value (e.g. `return some_global` corrupted by a later cache
-     * flush). The writeback only reads cache vregs and stores to memory, so the
-     * return source vreg is still valid afterwards. */
+    return mir_emit_ret(fn);
+  }
+  if (fn->returns_indirect && in->lhs.kind == IR_OPERAND_NONE) {
     if (!mir_emit_global_writebacks(fn, g, map, wb)) {
       return 0;
     }
-    if (in->lhs.kind != IR_OPERAND_NONE) {
-      MirOperand src = mir_value_operand(fn, g, ctx, map, &in->lhs);
-      int rfb = code_generator_binary_operand_float_bits(g, ctx, &in->lhs);
-      if (rfb) {
-        /* Float return value goes in XMM0, converted to the DECLARED return
-         * width: a float64-tracked temp returned from a float32 function
-         * narrows via cvtsd2ss (a raw movss would hand the caller the low
-         * dword of a double). */
-        int want = fn->float_return_bits ? fn->float_return_bits : rfb;
-        if (want != rfb) {
-          MirVregId tmp = mir_new_vreg(fn, MIR_RC_XMM, want / 8);
-          if (tmp == MIR_VREG_NONE ||
-              !mir_emit1(fn, MIR_CVTF2F, mir_op_vreg(tmp), src, mir_op_none(),
-                         want / 8, 0, 0)) {
-            return 0;
-          }
-          src = mir_op_vreg(tmp);
-        }
-        if (!mir_emit_fmov(fn, mir_op_phys(BINARY_XMM0, MIR_RC_XMM), src,
-                           want / 8)) {
-          return 0;
-        }
-      } else if ((fn->scalar_return_width == 1 || fn->scalar_return_width == 2 ||
-                  fn->scalar_return_width == 4) &&
-                 !mir_return_literal_is_canonical(fn, &in->lhs)) {
-        /* Canonicalize a narrow integer return to 64 bits (the high RAX bits
-         * are ABI-undefined for a sub-64-bit return, and MIR may have left
-         * garbage there) so a caller using the full register is correct. */
-        if (!mir_emit1(fn,
-                       fn->scalar_return_signed ? MIR_MOVSX : MIR_MOVZX,
-                       mir_op_phys(BINARY_GP_RAX, MIR_RC_GP), src, mir_op_none(),
-                       fn->scalar_return_width, !fn->scalar_return_signed, 0)) {
-          return 0;
-        }
-      } else if (!mir_emit1(fn, MIR_MOV, mir_op_phys(BINARY_GP_RAX, MIR_RC_GP),
-                            src, mir_op_none(), 8, 0, 0)) {
-        return 0;
-      }
+    if (fn->indirect_return_vreg != MIR_VREG_NONE &&
+        !mir_emit1(fn, MIR_MOV, mir_op_phys(BINARY_GP_RAX, MIR_RC_GP),
+                   mir_op_vreg(fn->indirect_return_vreg), mir_op_none(), 8, 0,
+                   0)) {
+      return 0;
     }
-    return mir_emit1(fn, MIR_RET, mir_op_none(), mir_op_none(), mir_op_none(), 8,
-                     0, 0);
+    return mir_emit_ret(fn);
   }
-
-  default:
-    *handled = 0;
-    break;
+  if (fn->returns_indirect && indirect_value) {
+    return mir_return_indirect_copy(fn, g, ctx, map, in, wb);
   }
-  return 0;
+  if (!mir_emit_global_writebacks(fn, g, map, wb)) {
+    return 0;
+  }
+  if (in->lhs.kind != IR_OPERAND_NONE &&
+      !mir_return_scalar_value(fn, g, ctx, map, in)) {
+    return 0;
+  }
+  return mir_emit_ret(fn);
 }
 
 typedef struct {
@@ -6388,242 +6382,247 @@ static int mir_call_return_classification(CodeGenerator *g,
   return sysv_gp_return;
 }
 
-static int mir_lower_call(MirFunction *fn, CodeGenerator *g,
-                        BinaryFunctionContext *ctx, MirNameMap *map,
-                        const IRInstruction *in,
-                        const MirGlobalWriteback *wb, int *handled) {
-  (void)g;
-  (void)ctx;
-  (void)map;
-  (void)wb;
-  *handled = 1;
-  switch (in->op) {
-  case IR_OP_CALL: {
-    /* A failed-safety-check trap: lower to a terminal MIR_TRAP carrying the
-     * abort message (the STRING argument). MIR only runs without stack-trace
-     * support, so the trap degrades to puts(message)+exit(1); the remaining
-     * trap arguments (kind, pc, rbp) are unused on that path. */
-    if (mir_call_is_runtime_trap(in)) {
-      return mir_lower_runtime_trap(fn, g, ctx, map, in);
-    }
-    if (mir_call_is_runtime_hook(in)) {
-      return mir_lower_runtime_hook(fn, g, ctx, map, in);
-    }
-    if (mir_call_is_syscall(in)) {
-      return mir_lower_syscall(fn, g, ctx, map, in);
-    }
-    /* Declare external callees so the linker resolves the relocation. */
-    IRFunction *target = code_generator_find_ir_function_binary(g, in->text);
-    if (!target) {
-      const char *link = code_generator_get_link_symbol_name(g, in->text);
-      if (link && !code_generator_binary_declare_external_symbol(g, link)) {
-        fn->has_error = 1;
-        return 0;
-      }
-    }
-    /* Marshal arguments per the ABI layout. Arguments up to the ABI's
-     * argument-register count go into registers (GP, or XMM for float args); the
-     * rest are stored into the outgoing stack-argument region (reserved once in
-     * the prologue). Eligibility guarantees every float arg lands in an XMM
-     * register (float stack args still bail). */
-    const BinaryAbi *abi = code_generator_binary_active_abi();
-    /* Caller-side INDIRECT return: the callee returns a struct by value, so the
-     * ABI passes a hidden out-pointer as the first integer arg, shifting every
-     * user arg up one slot. We point the hidden arg at the destination struct
-     * LOCAL's home so the callee writes the result there directly. */
-    int ret_indirect = 0;
-    /* SysV brings a small aggregate back in RAX/RDX instead, so the call takes
-     * no hidden out-pointer and the result is spilled into the destination's
-     * home after it returns. */
-    BinarySysvAggregate sysv_ret = {0};
-    int sysv_gp_return = mir_call_return_classification(
-        g, in, &ret_indirect, &sysv_ret);
-    int hidden = ret_indirect ? 1 : 0;
-    int arg_is_float[MIR_PARAM_SLOTS] = {0};
-    int force_stack[MIR_PARAM_SLOTS] = {0};
-    size_t stack_slots[MIR_PARAM_SLOTS] = {0};
-    size_t first_slot[MIR_MAX_PARAMS] = {0};
-    BinarySysvAggregate sysv[MIR_MAX_PARAMS];
-    MirVregId agg_base[MIR_MAX_PARAMS];
-    BinaryArgLocation locs[MIR_PARAM_SLOTS];
-    int stack_bytes = 0;
-    size_t nlocs = (size_t)hidden;
-    for (size_t a = 0; a < in->argument_count; a++) {
-      agg_base[a] = MIR_VREG_NONE;
-      first_slot[a] = nlocs;
-      if (mir_call_sysv_arg_class(g, in, a, &sysv[a])) {
-        if (sysv[a].in_memory) {
-          if (nlocs >= MIR_PARAM_SLOTS) {
-            fn->has_error = 1;
-            return 0;
-          }
-          force_stack[nlocs] = 1;
-          stack_slots[nlocs] = (sysv[a].size + 7u) / 8u;
-          nlocs++;
-          continue;
+typedef struct {
+  int arg_is_float[MIR_PARAM_SLOTS];
+  int force_stack[MIR_PARAM_SLOTS];
+  size_t stack_slots[MIR_PARAM_SLOTS];
+  size_t first_slot[MIR_MAX_PARAMS];
+  BinarySysvAggregate sysv[MIR_MAX_PARAMS];
+  MirVregId agg_base[MIR_MAX_PARAMS];
+  BinaryArgLocation locs[MIR_PARAM_SLOTS];
+  size_t slot_count;
+  int stack_bytes;
+} MirCallLayout;
+
+static int mir_call_declare_external(MirFunction *fn, CodeGenerator *g,
+                                     const IRInstruction *in) {
+  const char *link = NULL;
+
+  if (code_generator_find_ir_function_binary(g, in->text)) {
+    return 1;
+  }
+  link = code_generator_get_link_symbol_name(g, in->text);
+  if (link && !code_generator_binary_declare_external_symbol(g, link)) {
+    fn->has_error = 1;
+    return 0;
+  }
+  return 1;
+}
+
+static int mir_call_argument_is_float(CodeGenerator *g, const IRFunction *irf,
+                                      const IRInstruction *in, size_t a) {
+  const CgSym *callee =
+      g->ir_program ? code_generator_lookup_symbol(g, in->text) : NULL;
+  MtlcType *pt = (callee && callee->kind == CG_SYM_FUNCTION &&
+                  callee->data.function.parameter_types &&
+                  a < callee->data.function.parameter_count)
+                     ? callee->data.function.parameter_types[a]
+                     : NULL;
+  const IROperand *arg = &in->arguments[a];
+
+  if (pt) {
+    return code_generator_binary_resolved_type_float_bits(pt) != 0;
+  }
+  return mir_arg_float_bits(g, irf, arg) != 0 ||
+         (arg->kind == IR_OPERAND_TEMP &&
+          mir_temp_is_float(g, (IRFunction *)irf, arg->name, 0));
+}
+
+static int mir_call_plan_arguments(MirFunction *fn, CodeGenerator *g,
+                                   const IRInstruction *in,
+                                   const BinaryAbi *abi, int hidden,
+                                   MirCallLayout *layout) {
+  layout->slot_count = (size_t)hidden;
+  for (size_t a = 0; a < in->argument_count; a++) {
+    size_t slot = layout->slot_count;
+    layout->agg_base[a] = MIR_VREG_NONE;
+    layout->first_slot[a] = slot;
+    if (mir_call_sysv_arg_class(g, in, a, &layout->sysv[a])) {
+      if (layout->sysv[a].in_memory) {
+        if (slot >= MIR_PARAM_SLOTS) {
+          fn->has_error = 1;
+          return 0;
         }
-        for (size_t e = 0; e < sysv[a].eightbyte_count; e++) {
-          if (nlocs >= MIR_PARAM_SLOTS) {
-            fn->has_error = 1;
-            return 0;
-          }
-          arg_is_float[nlocs++] =
-              sysv[a].classes[e] == BINARY_EIGHTBYTE_SSE ? 1 : 0;
-        }
+        layout->force_stack[slot] = 1;
+        layout->stack_slots[slot] = (layout->sysv[a].size + 7u) / 8u;
+        layout->slot_count = slot + 1;
         continue;
       }
-      if (nlocs >= MIR_PARAM_SLOTS) {
-        fn->has_error = 1;
-        return 0;
+      for (size_t e = 0; e < layout->sysv[a].eightbyte_count; e++) {
+        if (layout->slot_count >= MIR_PARAM_SLOTS) {
+          fn->has_error = 1;
+          return 0;
+        }
+        layout->arg_is_float[layout->slot_count++] =
+            layout->sysv[a].classes[e] == BINARY_EIGHTBYTE_SSE ? 1 : 0;
       }
-      {
-        const CgSym *fc =
-            g->ir_program ? code_generator_lookup_symbol(g, in->text) : NULL;
-        MtlcType *pt = (fc && fc->kind == CG_SYM_FUNCTION &&
-                        fc->data.function.parameter_types &&
-                        a < fc->data.function.parameter_count)
-                           ? fc->data.function.parameter_types[a]
-                           : NULL;
-        const IROperand *ua = &in->arguments[a];
-        arg_is_float[nlocs] =
-            pt ? code_generator_binary_resolved_type_float_bits(pt) != 0
-               : (mir_arg_float_bits(g, fn->ir_function, ua) != 0 ||
-                  (ua->kind == IR_OPERAND_TEMP &&
-                   mir_temp_is_float(g, (IRFunction *)fn->ir_function,
-                                     ua->name, 0)));
-      }
-      nlocs++;
+      continue;
     }
-    if (nlocs > 0 &&
-        !code_generator_binary_compute_arg_layout_ex(abi, arg_is_float,
-                                                     force_stack, stack_slots,
-                                                     nlocs, locs,
-                                                     &stack_bytes)) {
+    if (slot >= MIR_PARAM_SLOTS) {
       fn->has_error = 1;
       return 0;
     }
-    if (stack_bytes > fn->outgoing_stack_bytes) {
-      fn->outgoing_stack_bytes = stack_bytes;
+    layout->arg_is_float[slot] =
+        mir_call_argument_is_float(g, fn->ir_function, in, a);
+    layout->slot_count = slot + 1;
+  }
+  if (layout->slot_count > 0 &&
+      !code_generator_binary_compute_arg_layout_ex(
+          abi, layout->arg_is_float, layout->force_stack, layout->stack_slots,
+          layout->slot_count, layout->locs, &layout->stack_bytes)) {
+    fn->has_error = 1;
+    return 0;
+  }
+  if (layout->stack_bytes > fn->outgoing_stack_bytes) {
+    fn->outgoing_stack_bytes = layout->stack_bytes;
+  }
+  return 1;
+}
+
+static int mir_call_aggregate_bases(MirFunction *fn, CodeGenerator *g,
+                                    BinaryFunctionContext *ctx,
+                                    MirNameMap *map, const IRInstruction *in,
+                                    MirCallLayout *layout) {
+  for (size_t a = 0; a < in->argument_count; a++) {
+    if (layout->sysv[a].size == 0) {
+      continue;
     }
-    for (size_t a = 0; a < in->argument_count; a++) {
-      if (sysv[a].size == 0) {
-        continue;
-      }
-      agg_base[a] = mir_emit_indirect_source_addr(
-          fn, g, ctx, map, fn->ir_function, &in->arguments[a],
-          (int)sysv[a].size);
-      if (agg_base[a] == MIR_VREG_NONE) {
-        return 0;
-      }
-    }
-    /* INDIRECT (by-value) struct arguments: the ABI passes a pointer to a
-     * caller-made copy. Lay out a copy slot per such arg in the outgoing
-     * indirect region (at the bottom of the frame), copy each struct there, and
-     * pass &slot as the (integer) argument value. Eligibility has proven every
-     * INDIRECT arg is a struct LOCAL, so its source is its stack home. */
-    int indirect_off[MIR_MAX_PARAMS] = {0};
-    const CgSym *call_callee =
-        g->ir_program ? code_generator_lookup_symbol(g, in->text) : NULL;
-    if (!mir_copy_indirect_args(fn, g, ctx, map, in, indirect_off)) {
+    layout->agg_base[a] = mir_emit_indirect_source_addr(
+        fn, g, ctx, map, fn->ir_function, &in->arguments[a],
+        (int)layout->sysv[a].size);
+    if (layout->agg_base[a] == MIR_VREG_NONE) {
       return 0;
     }
-    {
-      MirCallArgs args;
-      args.fn = fn;
-      args.g = g;
-      args.ctx = ctx;
-      args.map = map;
-      args.in = in;
-      args.abi = abi;
-      args.call_callee = call_callee;
-      args.locs = locs;
-      args.indirect_off = indirect_off;
-      args.arg_is_float = arg_is_float;
-      args.hidden = hidden;
-      args.first_slot = first_slot;
-      args.sysv = sysv;
-      args.agg_base = agg_base;
-      if (!mir_marshal_stack_args(&args) || !mir_marshal_gp_args(&args) ||
-          !mir_marshal_xmm_args(&args)) {
-        return 0;
-      }
-    }
-    /* Hidden INDIRECT-return pointer: lea the destination struct local's home
-     * into the ABI's out-pointer register (slot 0). The callee writes the
-     * returned struct directly there, so no post-call copy is needed. */
-    if (ret_indirect) {
-      MirOperand dstsym = mir_value_operand(fn, g, ctx, map, &in->dest);
-      if (dstsym.kind != MIR_OPK_VREG) {
-        fn->has_error = 1;
-        return 0;
-      }
-      fn->vregs[dstsym.vreg].address_taken = 1;
-      /* Size the dest's home to the whole struct (a struct LOCAL or struct TEMP
-       *: mir_operand_struct_home_size resolves a temp's size from the IR). */
-      {
-        const IRFunction *dirf =
-            ctx && ctx->function_name
-                ? code_generator_find_ir_function_binary(g, ctx->function_name)
-                : NULL;
-        int hb = mir_operand_struct_home_size(g, dirf, &in->dest);
-        if (hb > 0 && fn->vregs[dstsym.vreg].home_bytes < hb) {
-          fn->vregs[dstsym.vreg].home_bytes = hb;
-        }
-      }
-      if (!mir_emit1(fn, MIR_LEA_LOCAL,
-                     mir_op_phys(abi->indirect_return_register, MIR_RC_GP),
-                     dstsym, mir_op_none(), 8, 0, 0)) {
-        return 0;
-      }
-    }
-    /* memcpy/memset with the ordinary three arguments: the marshalling above
-     * already put them where the inline string operation wants them, so the
-     * call becomes the operation itself. Matches what the fallback emitter
-     * does; see MIR_REP_MOVSB. memmove keeps its call -- the overlap test is
-     * worth a real callee, and being slower than the fallback there is not a
-     * correctness matter. */
-    MirOpcode call_op = MIR_CALL;
-    if (in->argument_count == 3 && in->text && !ret_indirect) {
-      if (strcmp(in->text, "memcpy") == 0) {
-        call_op = MIR_REP_MOVSB;
-      } else if (strcmp(in->text, "memset") == 0) {
-        call_op = MIR_REP_STOSB;
-      }
-    }
-    if (!mir_emit1(fn, call_op, mir_op_symbol(in->text), mir_op_none(),
-                   mir_op_none(), 8, 0, 0)) {
-      return 0;
-    }
-    /* The two `--safe` runtime calls that sit in or around hot loops, marked by
-     * name because they are the ones the checking machinery puts there.
-     *
-     * The check is reached only when the comparison in front of it fails, which
-     * on a correct program is never, so saving anything around it is free. The
-     * span resolution does run, but once in front of the loop rather than per
-     * element, so it is worth eight instructions to leave the loop body's float
-     * registers alone. Span returns its answer in RAX and so cannot promise
-     * it. See MirVreg::crosses_preserving_only. */
-    if (call_op == MIR_CALL && in->text) {
-      MirInst *call = &fn->insns[fn->insn_count - 1];
-      if (strcmp(in->text, "mettle_safety_check") == 0) {
-        call->preserves_rax = 1;
-        call->preserves_xmm = 1;
-      } else if (strcmp(in->text, "mettle_safety_span") == 0) {
-        call->preserves_xmm = 1;
-      }
-    }
-    if (!mir_emit_call_result(fn, g, ctx, map, in, ret_indirect,
-                              sysv_gp_return, &sysv_ret)) {
-      return 0;
-    }
-    return 1;
+  }
+  return 1;
+}
+
+static int mir_call_hidden_return_pointer(MirFunction *fn, CodeGenerator *g,
+                                          BinaryFunctionContext *ctx,
+                                          MirNameMap *map,
+                                          const IRInstruction *in,
+                                          const BinaryAbi *abi) {
+  MirOperand dest = mir_value_operand(fn, g, ctx, map, &in->dest);
+  const IRFunction *irf = mir_returning_ir_function(g, ctx);
+  int home_bytes;
+
+  if (dest.kind != MIR_OPK_VREG) {
+    fn->has_error = 1;
+    return 0;
+  }
+  fn->vregs[dest.vreg].address_taken = 1;
+  home_bytes = mir_operand_struct_home_size(g, irf, &in->dest);
+  if (home_bytes > 0 && fn->vregs[dest.vreg].home_bytes < home_bytes) {
+    fn->vregs[dest.vreg].home_bytes = home_bytes;
+  }
+  return mir_emit1(fn, MIR_LEA_LOCAL,
+                   mir_op_phys(abi->indirect_return_register, MIR_RC_GP), dest,
+                   mir_op_none(), 8, 0, 0);
+}
+
+static MirOpcode mir_call_opcode(const IRInstruction *in, int ret_indirect) {
+  if (in->argument_count != 3 || !in->text || ret_indirect) {
+    return MIR_CALL;
+  }
+  if (strcmp(in->text, "memcpy") == 0) {
+    return MIR_REP_MOVSB;
+  }
+  if (strcmp(in->text, "memset") == 0) {
+    return MIR_REP_STOSB;
+  }
+  return MIR_CALL;
+}
+
+static void mir_call_mark_preserved(MirFunction *fn, const IRInstruction *in,
+                                    MirOpcode call_op) {
+  MirInst *call = &fn->insns[fn->insn_count - 1];
+
+  if (call_op != MIR_CALL || !in->text) {
+    return;
+  }
+  if (strcmp(in->text, "mettle_safety_check") == 0) {
+    call->preserves_rax = 1;
+    call->preserves_xmm = 1;
+  } else if (strcmp(in->text, "mettle_safety_span") == 0) {
+    call->preserves_xmm = 1;
+  }
+}
+
+static int mir_lower_call(MirFunction *fn, CodeGenerator *g,
+                          BinaryFunctionContext *ctx, MirNameMap *map,
+                          const IRInstruction *in,
+                          const MirGlobalWriteback *wb, int *handled) {
+  const BinaryAbi *abi = NULL;
+  BinarySysvAggregate sysv_ret = {0};
+  MirCallLayout layout;
+  MirCallArgs args;
+  int indirect_off[MIR_MAX_PARAMS] = {0};
+  int ret_indirect = 0;
+  int sysv_gp_return = 0;
+  int hidden = 0;
+  MirOpcode call_op;
+
+  (void)wb;
+  memset(&layout, 0, sizeof(layout));
+  *handled = in->op == IR_OP_CALL;
+  if (!*handled) {
+    return 0;
+  }
+  if (mir_call_is_runtime_trap(in)) {
+    return mir_lower_runtime_trap(fn, g, ctx, map, in);
+  }
+  if (mir_call_is_runtime_hook(in)) {
+    return mir_lower_runtime_hook(fn, g, ctx, map, in);
+  }
+  if (mir_call_is_syscall(in)) {
+    return mir_lower_syscall(fn, g, ctx, map, in);
+  }
+  if (!mir_call_declare_external(fn, g, in)) {
+    return 0;
   }
 
-  default:
-    *handled = 0;
-    break;
+  abi = code_generator_binary_active_abi();
+  sysv_gp_return = mir_call_return_classification(g, in, &ret_indirect,
+                                                  &sysv_ret);
+  hidden = ret_indirect ? 1 : 0;
+  if (!mir_call_plan_arguments(fn, g, in, abi, hidden, &layout) ||
+      !mir_call_aggregate_bases(fn, g, ctx, map, in, &layout) ||
+      !mir_copy_indirect_args(fn, g, ctx, map, in, indirect_off)) {
+    return 0;
   }
-  return 0;
+
+  args.fn = fn;
+  args.g = g;
+  args.ctx = ctx;
+  args.map = map;
+  args.in = in;
+  args.abi = abi;
+  args.call_callee =
+      g->ir_program ? code_generator_lookup_symbol(g, in->text) : NULL;
+  args.locs = layout.locs;
+  args.indirect_off = indirect_off;
+  args.arg_is_float = layout.arg_is_float;
+  args.hidden = hidden;
+  args.first_slot = layout.first_slot;
+  args.sysv = layout.sysv;
+  args.agg_base = layout.agg_base;
+  if (!mir_marshal_stack_args(&args) || !mir_marshal_gp_args(&args) ||
+      !mir_marshal_xmm_args(&args)) {
+    return 0;
+  }
+  if (ret_indirect &&
+      !mir_call_hidden_return_pointer(fn, g, ctx, map, in, abi)) {
+    return 0;
+  }
+
+  call_op = mir_call_opcode(in, ret_indirect);
+  if (!mir_emit1(fn, call_op, mir_op_symbol(in->text), mir_op_none(),
+                 mir_op_none(), 8, 0, 0)) {
+    return 0;
+  }
+  mir_call_mark_preserved(fn, in, call_op);
+  return mir_emit_call_result(fn, g, ctx, map, in, ret_indirect,
+                              sysv_gp_return, &sysv_ret);
 }
 
 static int mir_untyped_float_bits(CodeGenerator *g, const IRFunction *irf,
@@ -6777,130 +6776,148 @@ static int mir_marshal_indirect_xmm(MirFunction *fn, CodeGenerator *g,
   return 1;
 }
 
+static int mir_indirect_plan_arguments(MirFunction *fn, CodeGenerator *g,
+                                       const IRFunction *irf,
+                                       const IRInstruction *in, MtlcType *ft,
+                                       const BinaryAbi *abi, int *arg_is_float,
+                                       int *indirect_off,
+                                       BinaryArgLocation *locs) {
+  int stack_bytes = 0;
+
+  for (size_t a = 0; a < in->argument_count; a++) {
+    MtlcType *pt = (ft && ft->fn_param_types) ? ft->fn_param_types[a] : NULL;
+    const IROperand *arg = &in->arguments[a];
+    indirect_off[a] = -1;
+    arg_is_float[a] =
+        ft ? code_generator_binary_resolved_type_float_bits(pt) != 0
+           : (mir_arg_float_bits(g, irf, arg) != 0 ||
+              (arg->kind == IR_OPERAND_TEMP &&
+               mir_temp_is_float(g, (IRFunction *)irf, arg->name, 0)));
+  }
+  if (in->argument_count > 0 &&
+      !code_generator_binary_compute_arg_layout(abi, arg_is_float,
+                                                in->argument_count, locs,
+                                                &stack_bytes)) {
+    fn->has_error = 1;
+    return 0;
+  }
+  if (stack_bytes > fn->outgoing_stack_bytes) {
+    fn->outgoing_stack_bytes = stack_bytes;
+  }
+  return 1;
+}
+
+static int mir_indirect_copy_struct_result(MirFunction *fn, CodeGenerator *g,
+                                           BinaryFunctionContext *ctx,
+                                           MirNameMap *map,
+                                           const IRFunction *irf,
+                                           const IRInstruction *in,
+                                           int home_bytes) {
+  MirVregId returned = mir_new_vreg(fn, MIR_RC_GP, 8);
+  MirVregId home = mir_new_vreg(fn, MIR_RC_GP, 8);
+  MirOperand dest = mir_value_operand(fn, g, ctx, map, &in->dest);
+
+  (void)irf;
+  if (returned == MIR_VREG_NONE || home == MIR_VREG_NONE ||
+      dest.kind != MIR_OPK_VREG) {
+    fn->has_error = 1;
+    return 0;
+  }
+  fn->vregs[dest.vreg].address_taken = 1;
+  if (fn->vregs[dest.vreg].home_bytes < home_bytes) {
+    fn->vregs[dest.vreg].home_bytes = home_bytes;
+  }
+  return mir_emit1(fn, MIR_MOV, mir_op_vreg(returned),
+                   mir_op_phys(BINARY_GP_RAX, MIR_RC_GP), mir_op_none(), 8, 0,
+                   0) &&
+         mir_emit1(fn, MIR_LEA_LOCAL, mir_op_vreg(home), dest, mir_op_none(),
+                   8, 0, 0) &&
+         mir_emit_struct_copy(fn, home, returned, home_bytes);
+}
+
+static int mir_indirect_scalar_result(MirFunction *fn, CodeGenerator *g,
+                                      BinaryFunctionContext *ctx,
+                                      MirNameMap *map, const IRInstruction *in,
+                                      MtlcType *ft) {
+  int float_bits = code_generator_binary_resolved_type_float_bits(
+      ft ? ft->fn_return_type : in->value_type);
+  MirOperand dst;
+
+  if (float_bits && in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
+      !code_generator_binary_mark_float_symbol(ctx, in->dest.name,
+                                               float_bits)) {
+    fn->has_error = 1;
+    return 0;
+  }
+  dst = mir_value_operand(fn, g, ctx, map, &in->dest);
+  if (float_bits) {
+    return mir_emit_fmov(fn, dst, mir_op_phys(BINARY_XMM0, MIR_RC_XMM),
+                         float_bits / 8);
+  }
+  return mir_emit1(fn, MIR_MOV, dst, mir_op_phys(BINARY_GP_RAX, MIR_RC_GP),
+                   mir_op_none(), 8, 0, 0);
+}
+
 static int mir_lower_call_indirect(MirFunction *fn, CodeGenerator *g,
-                        BinaryFunctionContext *ctx, MirNameMap *map,
-                        const IRInstruction *in,
-                        const MirGlobalWriteback *wb, int *handled) {
-  (void)g;
-  (void)ctx;
-  (void)map;
+                                   BinaryFunctionContext *ctx,
+                                   MirNameMap *map, const IRInstruction *in,
+                                   const MirGlobalWriteback *wb,
+                                   int *handled) {
+  const IRFunction *irf = mir_returning_ir_function(g, ctx);
+  const BinaryAbi *abi = code_generator_binary_active_abi();
+  int arg_is_float[MIR_MAX_PARAMS] = {0};
+  int indirect_off[MIR_MAX_PARAMS];
+  BinaryArgLocation locs[MIR_MAX_PARAMS];
+  MirOperand callee;
+  MtlcType *ft = NULL;
+  int dest_is_value = in->dest.kind == IR_OPERAND_TEMP ||
+                      in->dest.kind == IR_OPERAND_SYMBOL;
+  int home_bytes;
+
   (void)wb;
-  *handled = 1;
-  switch (in->op) {
-  case IR_OP_CALL_INDIRECT: {
-    const IRFunction *irf =
-        ctx && ctx->function_name
-            ? code_generator_find_ir_function_binary(g, ctx->function_name)
-            : NULL;
-    MtlcType *ft = mir_indirect_call_type(g, irf, in);
-    if (ft && mir_indirect_call_uses_own_types(ft, in)) {
-      ft = NULL;
-    }
-    if (!ft && in->lhs.kind != IR_OPERAND_TEMP &&
-        in->lhs.kind != IR_OPERAND_SYMBOL) {
-      fn->has_error = 1;
-      return 0;
-    }
-    const BinaryAbi *abi = code_generator_binary_active_abi();
-    int arg_is_float[MIR_MAX_PARAMS] = {0};
-    int indirect_off[MIR_MAX_PARAMS];
-    BinaryArgLocation locs[MIR_MAX_PARAMS];
-    int stack_bytes = 0;
-    for (size_t a = 0; a < in->argument_count; a++) {
-      MtlcType *pt =
-          (ft && ft->fn_param_types) ? ft->fn_param_types[a] : NULL;
-      const IROperand *arg = &in->arguments[a];
-      indirect_off[a] = -1;
-      arg_is_float[a] =
-          ft ? code_generator_binary_resolved_type_float_bits(pt) != 0
-             : (mir_arg_float_bits(g, irf, arg) != 0 ||
-                (arg->kind == IR_OPERAND_TEMP &&
-                 mir_temp_is_float(g, (IRFunction *)irf, arg->name, 0)));
-    }
-    if (!ft && !mir_copy_untyped_aggregate_args(fn, g, ctx, map, irf, in,
-                                                indirect_off)) {
-      return 0;
-    }
-    if (in->argument_count > 0 &&
-        !code_generator_binary_compute_arg_layout(abi, arg_is_float,
-                                                  in->argument_count, locs,
-                                                  &stack_bytes)) {
-      fn->has_error = 1;
-      return 0;
-    }
-    if (stack_bytes > fn->outgoing_stack_bytes) {
-      fn->outgoing_stack_bytes = stack_bytes;
-    }
-
-    MirOperand callee = mir_value_operand(fn, g, ctx, map, &in->lhs);
-
-    if (!mir_marshal_indirect_stack(fn, g, ctx, map, in, ft, abi, locs,
-                                    arg_is_float, indirect_off) ||
-        !mir_marshal_indirect_gp(fn, g, ctx, map, in, ft, abi, locs,
-                                 arg_is_float, indirect_off) ||
-        !mir_marshal_indirect_xmm(fn, g, ctx, map, in, ft, abi, locs,
-                                  arg_is_float, indirect_off)) {
-      return 0;
-    }
-
-    if (!mir_emit1(fn, MIR_CALL_INDIRECT, mir_op_none(),
-                   callee, mir_op_none(), 8, 0, 0)) {
-      return 0;
-    }
-
-    if (!ft && (in->dest.kind == IR_OPERAND_TEMP ||
-                in->dest.kind == IR_OPERAND_SYMBOL) &&
-        mir_operand_struct_home_size(g, irf, &in->dest) > 0) {
-      int hsz = mir_operand_struct_home_size(g, irf, &in->dest);
-      MirVregId ptr = mir_new_vreg(fn, MIR_RC_GP, 8);
-      MirVregId db = mir_new_vreg(fn, MIR_RC_GP, 8);
-      MirOperand dsym = mir_value_operand(fn, g, ctx, map, &in->dest);
-      if (ptr == MIR_VREG_NONE || db == MIR_VREG_NONE ||
-          dsym.kind != MIR_OPK_VREG) {
-        fn->has_error = 1;
-        return 0;
-      }
-      fn->vregs[dsym.vreg].address_taken = 1;
-      if (fn->vregs[dsym.vreg].home_bytes < hsz) {
-        fn->vregs[dsym.vreg].home_bytes = hsz;
-      }
-      if (!mir_emit1(fn, MIR_MOV, mir_op_vreg(ptr),
-                     mir_op_phys(BINARY_GP_RAX, MIR_RC_GP), mir_op_none(), 8,
-                     0, 0) ||
-          !mir_emit1(fn, MIR_LEA_LOCAL, mir_op_vreg(db), dsym, mir_op_none(),
-                     8, 0, 0) ||
-          !mir_emit_struct_copy(fn, db, ptr, hsz)) {
-        return 0;
-      }
-      return 1;
-    }
-    if (in->dest.kind == IR_OPERAND_TEMP || in->dest.kind == IR_OPERAND_SYMBOL) {
-      int rfb = ft ? code_generator_binary_resolved_type_float_bits(
-                         ft->fn_return_type)
-                   : code_generator_binary_resolved_type_float_bits(
-                         in->value_type);
-      if (rfb && in->dest.kind == IR_OPERAND_TEMP && in->dest.name &&
-          !code_generator_binary_mark_float_symbol(ctx, in->dest.name, rfb)) {
-        fn->has_error = 1;
-        return 0;
-      }
-      MirOperand dst = mir_value_operand(fn, g, ctx, map, &in->dest);
-      if (rfb) {
-        return mir_emit_fmov(fn, dst, mir_op_phys(BINARY_XMM0, MIR_RC_XMM),
-                             rfb / 8);
-      }
-      return mir_emit1(fn, MIR_MOV, dst,
-                       mir_op_phys(BINARY_GP_RAX, MIR_RC_GP), mir_op_none(), 8,
-                       0, 0);
-    }
-    return 1;
+  *handled = in->op == IR_OP_CALL_INDIRECT;
+  if (!*handled) {
+    return 0;
   }
-
-  default:
-    *handled = 0;
-    break;
+  ft = mir_indirect_call_type(g, irf, in);
+  if (ft && mir_indirect_call_uses_own_types(ft, in)) {
+    ft = NULL;
   }
-  return 0;
+  if (!ft && in->lhs.kind != IR_OPERAND_TEMP &&
+      in->lhs.kind != IR_OPERAND_SYMBOL) {
+    fn->has_error = 1;
+    return 0;
+  }
+  if (!mir_indirect_plan_arguments(fn, g, irf, in, ft, abi, arg_is_float,
+                                   indirect_off, locs)) {
+    return 0;
+  }
+  if (!ft && !mir_copy_untyped_aggregate_args(fn, g, ctx, map, irf, in,
+                                              indirect_off)) {
+    return 0;
+  }
+  callee = mir_value_operand(fn, g, ctx, map, &in->lhs);
+  if (!mir_marshal_indirect_stack(fn, g, ctx, map, in, ft, abi, locs,
+                                  arg_is_float, indirect_off) ||
+      !mir_marshal_indirect_gp(fn, g, ctx, map, in, ft, abi, locs,
+                               arg_is_float, indirect_off) ||
+      !mir_marshal_indirect_xmm(fn, g, ctx, map, in, ft, abi, locs,
+                                arg_is_float, indirect_off) ||
+      !mir_emit1(fn, MIR_CALL_INDIRECT, mir_op_none(), callee, mir_op_none(),
+                 8, 0, 0)) {
+    return 0;
+  }
+  home_bytes = dest_is_value
+                   ? mir_operand_struct_home_size(g, irf, &in->dest)
+                   : 0;
+  if (!ft && home_bytes > 0) {
+    return mir_indirect_copy_struct_result(fn, g, ctx, map, irf, in,
+                                           home_bytes);
+  }
+  if (dest_is_value) {
+    return mir_indirect_scalar_result(fn, g, ctx, map, in, ft);
+  }
+  return 1;
 }
 
 static int mir_lower_slp_mac(MirFunction *fn, CodeGenerator *g,
