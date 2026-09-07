@@ -2413,12 +2413,23 @@ static int safety_emit_span_check(IRInstructionVector *out,
     goto done;
   }
 
+  /* An access with no offset operand starts at the span's own base, which is
+   * offset zero. Saying so explicitly keeps every instruction below with a
+   * real source: an absent operand reached codegen as an add and a compare
+   * with nothing on one side, which the register allocator refuses (and
+   * `--release` copy-propagates into an assignment from nothing). */
+  IROperand zero_offset = ir_operand_int(0);
+  const IROperand *offset =
+      (access->offset && access->offset->kind != IR_OPERAND_NONE)
+          ? access->offset
+          : &zero_offset;
+
   /* Where the pointer was reached through arithmetic, the displacement joins
    * the offset so both are measured from the same root. */
-  const IROperand *measured = access->offset;
-  if (delta) {
-    if (!safety_emit_binary(out, access->location, "+", total, access->offset,
-                            delta, 0)) {
+  const IROperand *measured = offset;
+  if (delta && delta->kind != IR_OPERAND_NONE) {
+    if (!safety_emit_binary(out, access->location, "+", total, offset, delta,
+                            0)) {
       goto done;
     }
     measured = &total_operand;
