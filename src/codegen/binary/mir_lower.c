@@ -1720,14 +1720,9 @@ static int mir_call_is_supported(CodeGenerator *g,
       mir_call_trace("arg_aggregate_scalar_param");
       return 0;
     }
-    /* A string literal reaching a parameter that is not a `cstring` is passed
-     * as the address of its {chars,length} record, which the lowering below
-     * does emit. It stays on the baseline for now regardless: routing these
-     * functions here made `--safe` report a false provenance failure on
-     * crc32's main, so the origin the safety pass registers for a literal and
-     * the address a call hands over do not yet agree under the allocator. */
     if (arg->kind == IR_OPERAND_STRING &&
-        !code_generator_binary_type_is_cstring(pt)) {
+        !code_generator_binary_type_is_cstring(pt) &&
+        !code_generator_binary_type_is_string(pt)) {
       mir_call_trace("arg_string_non_cstring");
       return 0;
     }
