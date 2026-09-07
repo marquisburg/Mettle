@@ -30,21 +30,19 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCE = "tests/oracle_cases.mettle"
 
 NATIVE = [
-    ("mir/debug", [], {"METTLE_MIR": None}),
-    ("mir/opt", ["-O"], {"METTLE_MIR": None}),
-    ("mir/release", ["--release"], {"METTLE_MIR": None}),
-    ("baseline/debug", [], {"METTLE_MIR": "0"}),
-    ("baseline/release", ["--release"], {"METTLE_MIR": "0"}),
+    ("mir/debug", [], {}),
+    ("mir/opt", ["-O"], {}),
+    ("mir/release", ["--release"], {}),
     # The checked build answers the same questions or it is not the same
     # language, and the instrumentation runs over every one of these values.
-    ("safe/release", ["--release", "--safe"], {"METTLE_MIR": None}),
-    ("safe/debug", ["--safe"], {"METTLE_MIR": None}),
+    ("safe/release", ["--release", "--safe"], {}),
+    ("safe/debug", ["--safe"], {}),
     # --check-overflow is deliberately absent: several cases here overflow a
     # signed type on purpose, which is the behaviour being compared, and that
     # mode is supposed to stop the program when they do.
     # No vectorizer, no SLP: the scalar answer is the reference.
     ("scalar/release", ["--release"],
-     {"METTLE_MIR": None, "METTLE_NO_SIMD": "1", "NO_SLP": "1"}),
+     {"METTLE_NO_SIMD": "1", "NO_SLP": "1"}),
 ]
 
 

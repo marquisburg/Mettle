@@ -14,7 +14,7 @@
 //      (cvtsd2ss at the call site, not a low-dword bit truncation).
 //
 // Exit code 1 = every result correct, 0 = some path miscompiled. Built debug,
-// release, and *_fallback (METTLE_MIR=0) so MIR and the legacy backend agree.
+// release.
 
 @noinline fn add2(a: float32, b: float32) -> float32 { return a + b; }
 @noinline fn iadd(a: int32, b: int32) -> int32 { return a + b; }

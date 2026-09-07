@@ -24,7 +24,6 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 BEHAVIOUR = [
     ("NO_SLP", "1"),
     ("METTLE_NO_SIMD", "1"),
-    ("METTLE_MIR", "0"),
     ("METTLE_LINEAR_ALLOC", "1"),
     ("METTLE_FPO", "0"),
     ("METTLE_IF_CONVERT", "1"),

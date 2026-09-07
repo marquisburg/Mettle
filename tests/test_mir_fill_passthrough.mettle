@@ -6,7 +6,7 @@
 //   - the live-induction-variable write-back (iv = max(count, 0)),
 //   - a non-leaf function (a call present) so xmm/arg-reg handling is exercised.
 // Exit code 1 = every result correct, 0 = some path miscompiled. Built debug,
-// release, and *_fallback (METTLE_MIR=0) so MIR and the legacy backend agree.
+// release.
 import "std/io";
 import "std/mem";
 

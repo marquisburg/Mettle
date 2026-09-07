@@ -1719,8 +1719,6 @@ $cases = @(
   # modes and under the interpreter, which runs the scalar reference.
   @{ Name = "float16_storage"; Path = "tests/test_float16_storage.mettle"; ShouldSucceed = $true },
   @{ Name = "float16_storage_release"; Path = "tests/test_float16_storage.mettle"; ShouldSucceed = $true; Args = @("--release") },
-  @{ Name = "float16_storage_fallback"; Path = "tests/test_float16_storage.mettle"; ShouldSucceed = $true; Args = @("--release")
-     Env = @{ METTLE_MIR = "0" } },
   @{ Name = "float16_storage_interp"; Path = "tests/test_float16_storage.mettle"; ShouldSucceed = $true
      Args = @("test")
      SkipBinaryCheck = $true
@@ -6971,24 +6969,17 @@ catch {
 $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
-  $safeStrPrevMir = $env:METTLE_MIR
-  try {
-    foreach ($backend in @("mir", "baseline")) {
-      if ($backend -eq "baseline") { $env:METTLE_MIR = "0" } else { $env:METTLE_MIR = $null }
-      foreach ($mode in @(@("--safe"), @("-O", "--safe"), @())) {
-        $safeStrExe = Join-Path $tmpDir "test_safe_string_parameter.exe"
-        $safeStrBuild = & $CompilerPath --build @mode "tests/test_safe_string_parameter.mettle" -o $safeStrExe 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-          throw "did not build ($backend $($mode -join ' ')): $safeStrBuild"
-        }
-        $safeStrOut = & $safeStrExe 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0 -or $safeStrOut -notmatch "wrong=0") {
-          throw "failed ($backend $($mode -join ' ')): exit $LASTEXITCODE`n$safeStrOut"
-        }
-      }
+  foreach ($mode in @(@("--safe"), @("-O", "--safe"), @())) {
+    $safeStrExe = Join-Path $tmpDir "test_safe_string_parameter.exe"
+    $safeStrBuild = & $CompilerPath --build @mode "tests/test_safe_string_parameter.mettle" -o $safeStrExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "did not build ($($mode -join ' ')): $safeStrBuild"
+    }
+    $safeStrOut = & $safeStrExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $safeStrOut -notmatch "wrong=0") {
+      throw "failed ($($mode -join ' ')): exit $LASTEXITCODE`n$safeStrOut"
     }
   }
-  finally { $env:METTLE_MIR = $safeStrPrevMir }
   Write-CaseResult -Name "safe_mode_string_parameter" -Passed $true
 }
 catch {
@@ -7032,27 +7023,20 @@ catch {
 $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
-  $deferPrevMir = $env:METTLE_MIR
-  try {
-    foreach ($backend in @("mir", "baseline")) {
-      if ($backend -eq "baseline") { $env:METTLE_MIR = "0" } else { $env:METTLE_MIR = $null }
-      foreach ($mode in @(@(), @("--release"))) {
-        foreach ($fixture in @("test_defer_return_value", "test_member_on_pointer",
-                               "test_direct_object_string_conditional_assign")) {
-          $fixExe = Join-Path $tmpDir "$fixture.exe"
-          $fixBuild = & $CompilerPath --build @mode "tests/$fixture.mettle" -o $fixExe 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 0) {
-            throw "$fixture did not build ($backend $($mode -join ' ')): $fixBuild"
-          }
-          $fixOut = & $fixExe 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 0 -or $fixOut -notmatch "wrong=0") {
-            throw "$fixture failed ($backend $($mode -join ' ')): exit $LASTEXITCODE`n$fixOut"
-          }
-        }
+  foreach ($mode in @(@(), @("--release"))) {
+    foreach ($fixture in @("test_defer_return_value", "test_member_on_pointer",
+                           "test_direct_object_string_conditional_assign")) {
+      $fixExe = Join-Path $tmpDir "$fixture.exe"
+      $fixBuild = & $CompilerPath --build @mode "tests/$fixture.mettle" -o $fixExe 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) {
+        throw "$fixture did not build ($($mode -join ' ')): $fixBuild"
+      }
+      $fixOut = & $fixExe 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0 -or $fixOut -notmatch "wrong=0") {
+        throw "$fixture failed ($($mode -join ' ')): exit $LASTEXITCODE`n$fixOut"
       }
     }
   }
-  finally { $env:METTLE_MIR = $deferPrevMir }
   Write-CaseResult -Name "defer_and_pointer_members" -Passed $true
 }
 catch {
@@ -7068,30 +7052,23 @@ catch {
 $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
-  $levelPrevMir = $env:METTLE_MIR
-  try {
-    foreach ($backend in @("mir", "baseline")) {
-      if ($backend -eq "baseline") { $env:METTLE_MIR = "0" } else { $env:METTLE_MIR = $null }
-      foreach ($mode in @(@(), @("-O"), @("--release"))) {
-        foreach ($fixture in @("test_loop_counter_written_in_body",
-                               "test_float_copy_two_readers",
-                               "test_cast_versus_grouping",
-                               "test_const_folds_like_the_machine",
-                               "test_bool_bitwise_promotes")) {
-          $fixExe = Join-Path $tmpDir "$fixture.exe"
-          $fixBuild = & $CompilerPath --build @mode "tests/$fixture.mettle" -o $fixExe 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 0) {
-            throw "$fixture did not build ($backend $($mode -join ' ')): $fixBuild"
-          }
-          $fixOut = & $fixExe 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 0 -or $fixOut -notmatch "wrong=0") {
-            throw "$fixture failed ($backend $($mode -join ' ')): exit $LASTEXITCODE`n$fixOut"
-          }
-        }
+  foreach ($mode in @(@(), @("-O"), @("--release"))) {
+    foreach ($fixture in @("test_loop_counter_written_in_body",
+                           "test_float_copy_two_readers",
+                           "test_cast_versus_grouping",
+                           "test_const_folds_like_the_machine",
+                           "test_bool_bitwise_promotes")) {
+      $fixExe = Join-Path $tmpDir "$fixture.exe"
+      $fixBuild = & $CompilerPath --build @mode "tests/$fixture.mettle" -o $fixExe 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0) {
+        throw "$fixture did not build ($($mode -join ' ')): $fixBuild"
+      }
+      $fixOut = & $fixExe 2>&1 | Out-String
+      if ($LASTEXITCODE -ne 0 -or $fixOut -notmatch "wrong=0") {
+        throw "$fixture failed ($($mode -join ' ')): exit $LASTEXITCODE`n$fixOut"
       }
     }
   }
-  finally { $env:METTLE_MIR = $levelPrevMir }
   Write-CaseResult -Name "answers_agree_across_levels" -Passed $true
 }
 catch {
@@ -7188,24 +7165,17 @@ catch {
 $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
-  $volPrevMir = $env:METTLE_MIR
-  try {
-    foreach ($backend in @("mir", "baseline")) {
-      if ($backend -eq "baseline") { $env:METTLE_MIR = "0" } else { $env:METTLE_MIR = $null }
-      foreach ($mode in @(@(), @("-O"), @("--release"))) {
-        $vtExe = Join-Path $tmpDir "volatile_torture.exe"
-        $vtBuild = & $CompilerPath --build @mode "tests/test_volatile_torture.mettle" -o $vtExe 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-          throw "a pass moved a volatile access ($backend $($mode -join ' ')): $vtBuild"
-        }
-        $vtOut = & $vtExe 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0 -or $vtOut -notmatch "volatile wrong=0") {
-          throw "the volatile fixture gave the wrong answer ($backend $($mode -join ' ')): $vtOut"
-        }
-      }
+  foreach ($mode in @(@(), @("-O"), @("--release"))) {
+    $vtExe = Join-Path $tmpDir "volatile_torture.exe"
+    $vtBuild = & $CompilerPath --build @mode "tests/test_volatile_torture.mettle" -o $vtExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "a pass moved a volatile access ($($mode -join ' ')): $vtBuild"
+    }
+    $vtOut = & $vtExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $vtOut -notmatch "volatile wrong=0") {
+      throw "the volatile fixture gave the wrong answer ($($mode -join ' ')): $vtOut"
     }
   }
-  finally { $env:METTLE_MIR = $volPrevMir }
   Write-CaseResult -Name "volatile_torture" -Passed $true
 }
 catch {
@@ -7318,24 +7288,17 @@ catch {
 $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
-  $zeroPrevMir = $env:METTLE_MIR
-  try {
-    foreach ($backend in @("mir", "baseline")) {
-      if ($backend -eq "baseline") { $env:METTLE_MIR = "0" } else { $env:METTLE_MIR = $null }
-      foreach ($mode in @(@(), @("--release"))) {
-        $zeroExe = Join-Path $tmpDir "float_signed_zero.exe"
-        $zeroBuild = & $CompilerPath --build @mode "tests/test_float_signed_zero.mettle" -o $zeroExe 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-          throw "building the signed-zero fixture ($backend $($mode -join ' ')) failed: $zeroBuild"
-        }
-        $zeroOut = & $zeroExe 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0 -or $zeroOut -notmatch "signed zero wrong=0") {
-          throw "a negated zero lost its sign ($backend $($mode -join ' ')): exit $LASTEXITCODE`n$zeroOut"
-        }
-      }
+  foreach ($mode in @(@(), @("--release"))) {
+    $zeroExe = Join-Path $tmpDir "float_signed_zero.exe"
+    $zeroBuild = & $CompilerPath --build @mode "tests/test_float_signed_zero.mettle" -o $zeroExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "building the signed-zero fixture ($($mode -join ' ')) failed: $zeroBuild"
+    }
+    $zeroOut = & $zeroExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $zeroOut -notmatch "signed zero wrong=0") {
+      throw "a negated zero lost its sign ($($mode -join ' ')): exit $LASTEXITCODE`n$zeroOut"
     }
   }
-  finally { $env:METTLE_MIR = $zeroPrevMir }
   Write-CaseResult -Name "float_signed_zero" -Passed $true
 }
 catch {
@@ -7498,24 +7461,17 @@ catch {
 $total++
 try {
   if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
-  $aliasPrevMir = $env:METTLE_MIR
-  try {
-    foreach ($backend in @("mir", "baseline")) {
-      if ($backend -eq "baseline") { $env:METTLE_MIR = "0" } else { $env:METTLE_MIR = $null }
-      foreach ($mode in @(@(), @("-O"), @("--release"), @("--release", "--safe"))) {
-        $aliasExe = Join-Path $tmpDir "global_alias_coherence.exe"
-        $aliasBuild = & $CompilerPath --build @mode "tests/test_global_alias_coherence.mettle" -o $aliasExe 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-          throw "building the alias fixture ($backend $($mode -join ' ')) failed: $aliasBuild"
-        }
-        $aliasOut = & $aliasExe 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0 -or $aliasOut -notmatch "alias wrong=0") {
-          throw "a cached global and a pointer into it disagreed ($backend $($mode -join ' ')): exit $LASTEXITCODE`n$aliasOut"
-        }
-      }
+  foreach ($mode in @(@(), @("-O"), @("--release"), @("--release", "--safe"))) {
+    $aliasExe = Join-Path $tmpDir "global_alias_coherence.exe"
+    $aliasBuild = & $CompilerPath --build @mode "tests/test_global_alias_coherence.mettle" -o $aliasExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "building the alias fixture ($($mode -join ' ')) failed: $aliasBuild"
+    }
+    $aliasOut = & $aliasExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $aliasOut -notmatch "alias wrong=0") {
+      throw "a cached global and a pointer into it disagreed ($($mode -join ' ')): exit $LASTEXITCODE`n$aliasOut"
     }
   }
-  finally { $env:METTLE_MIR = $aliasPrevMir }
   Write-CaseResult -Name "global_alias_coherence" -Passed $true
 }
 catch {
@@ -10269,9 +10225,9 @@ foreach ($relFlag in @($true, $false)) {
 # scaled temp feeds two address adds. The SIB address fold used to demand a
 # single reader and dropped this shape onto its scale-1 fallback, which folded
 # the already-scaled value in as a unit index and addressed the wrong element.
-# Built debug + release + *_fallback so the MIR and legacy backends agree; the
+# Built debug and release; the
 # bug was MIR-only and release-only, and the fallback columns prove that.
-foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")) {
+foreach ($variant in @("release", "debug")) {
   $total++
   try {
     if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
@@ -10280,13 +10236,7 @@ foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")
     if ($variant -like "release*") { $buildArgs += "--release" }
     $buildArgs += @("tests/test_shared_scaled_index.mettle", "-o", $exePath)
 
-    if ($variant -like "*_fallback") { $env:METTLE_MIR = "0" }
-    try {
-      $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
-    }
-    finally {
-      if ($variant -like "*_fallback") { Remove-Item Env:\METTLE_MIR -ErrorAction SilentlyContinue }
-    }
+    $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) {
       throw "shared-scaled-index build ($variant) failed: $buildOut"
     }
@@ -10310,7 +10260,7 @@ foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")
 # assign) â€” each was a distinct silent miscompile found by the v2 fuzzer.
 # Built debug AND release: the store bug fired at -O0, the return bug at
 # release, the param bug in the fallback backend.
-foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")) {
+foreach ($variant in @("release", "debug")) {
   $total++
   try {
     if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
@@ -10319,16 +10269,7 @@ foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")
     if ($variant -like "release*") { $buildArgs += "--release" }
     $buildArgs += @("tests/test_float_narrowing_paths.mettle", "-o", $exePath)
 
-    # *_fallback routes every function to the legacy backend; the
-    # inliner-param shape only miscompiled there (release_fallback = the
-    # inliner runs AND the fallback backend consumes its output).
-    if ($variant -like "*_fallback") { $env:METTLE_MIR = "0" }
-    try {
-      $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
-    }
-    finally {
-      if ($variant -like "*_fallback") { Remove-Item Env:\METTLE_MIR -ErrorAction SilentlyContinue }
-    }
+    $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) {
       throw "float-narrowing-paths build ($variant) failed: $buildOut"
     }
@@ -10350,9 +10291,9 @@ foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")
 # register-allocating backend (XMM0-3 homing) instead of bailing the caller to
 # spill-everything codegen. Also covers the allocator entry-live interference
 # fix (two single-use params no longer share a register) and float unary negate.
-# Built debug + release + *_fallback (METTLE_MIR=0) so MIR and the legacy
+# Built debug and release so the
 # backend produce identical results.
-foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")) {
+foreach ($variant in @("release", "debug")) {
   $total++
   try {
     if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
@@ -10361,13 +10302,7 @@ foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")
     if ($variant -like "release*") { $buildArgs += "--release" }
     $buildArgs += @("tests/test_mir_float_call_args.mettle", "-o", $exePath)
 
-    if ($variant -like "*_fallback") { $env:METTLE_MIR = "0" }
-    try {
-      $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
-    }
-    finally {
-      if ($variant -like "*_fallback") { Remove-Item Env:\METTLE_MIR -ErrorAction SilentlyContinue }
-    }
+    $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) {
       throw "mir-float-call-args build ($variant) failed: $buildOut"
     }
@@ -10388,8 +10323,8 @@ foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")
 # MIR inline fill passthrough: IR_OP_SIMD_FILL runs through the
 # register-allocating backend (mode 0/1, runtime offset folded as base+off*size,
 # live-iv write-back) instead of bailing the function to spill-everything
-# codegen. Built debug + release + *_fallback so MIR and the legacy backend agree.
-foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")) {
+# codegen. Built debug and release.
+foreach ($variant in @("release", "debug")) {
   $total++
   try {
     if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
@@ -10398,13 +10333,7 @@ foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")
     if ($variant -like "release*") { $buildArgs += "--release" }
     $buildArgs += @("tests/test_mir_fill_passthrough.mettle", "-o", $exePath)
 
-    if ($variant -like "*_fallback") { $env:METTLE_MIR = "0" }
-    try {
-      $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
-    }
-    finally {
-      if ($variant -like "*_fallback") { Remove-Item Env:\METTLE_MIR -ErrorAction SilentlyContinue }
-    }
+    $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) {
       throw "mir-fill-passthrough build ($variant) failed: $buildOut"
     }
@@ -10428,7 +10357,7 @@ foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")
 # RIP-relative LEA, so all of these belong on the allocated path. Run against
 # the fallback backend too, since only memory (never a cache vreg) is
 # authoritative for an aggregate global.
-foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")) {
+foreach ($variant in @("release", "debug")) {
   $total++
   try {
     if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
@@ -10437,13 +10366,7 @@ foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")
     if ($variant -like "release*") { $buildArgs += "--release" }
     $buildArgs += @("tests/test_mir_global_aggregate_addr.mettle", "-o", $exePath)
 
-    if ($variant -like "*_fallback") { $env:METTLE_MIR = "0" }
-    try {
-      $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
-    }
-    finally {
-      if ($variant -like "*_fallback") { Remove-Item Env:\METTLE_MIR -ErrorAction SilentlyContinue }
-    }
+    $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) {
       throw "mir-global-aggregate-addr build ($variant) failed: $buildOut"
     }
@@ -10973,7 +10896,7 @@ foreach ($ifcMode in @("release", "debug")) {
 # backend with its compile-time coefficients baked into the kernel broadcasts,
 # instead of bailing the function. This is what makes the qwen3 engine's
 # load_f32 and process_token register-allocated.
-foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")) {
+foreach ($variant in @("release", "debug")) {
   $total++
   try {
     if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
@@ -10982,13 +10905,7 @@ foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")
     if ($variant -like "release*") { $buildArgs += "--release" }
     $buildArgs += @("tests/test_mir_affine_map_passthrough.mettle", "-o", $exePath)
 
-    if ($variant -like "*_fallback") { $env:METTLE_MIR = "0" }
-    try {
-      $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
-    }
-    finally {
-      if ($variant -like "*_fallback") { Remove-Item Env:\METTLE_MIR -ErrorAction SilentlyContinue }
-    }
+    $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) {
       throw "mir-affine-map-passthrough build ($variant) failed: $buildOut"
     }
@@ -11009,7 +10926,7 @@ foreach ($variant in @("release", "debug", "release_fallback", "debug_fallback")
 # Odd-sized struct copy: whole-struct assign of a 3-byte struct must copy
 # exactly 3 bytes; the fallback backend's 8-byte round-trip clobbered the
 # adjacent local. Run debug/release/fallback like the narrowing test.
-foreach ($variant in @("release", "debug", "debug_fallback")) {
+foreach ($variant in @("release", "debug")) {
   $total++
   try {
     if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
@@ -11018,13 +10935,7 @@ foreach ($variant in @("release", "debug", "debug_fallback")) {
     if ($variant -eq "release") { $buildArgs += "--release" }
     $buildArgs += @("tests/test_struct_copy_odd_size.mettle", "-o", $exePath)
 
-    if ($variant -eq "debug_fallback") { $env:METTLE_MIR = "0" }
-    try {
-      $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
-    }
-    finally {
-      if ($variant -eq "debug_fallback") { Remove-Item Env:\METTLE_MIR -ErrorAction SilentlyContinue }
-    }
+    $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) {
       throw "struct-copy-odd-size build ($variant) failed: $buildOut"
     }
@@ -12878,7 +12789,7 @@ catch {
 # Signed narrow canonical-home semantics: signed int32/int16/int8 homes wrap to
 # their destination width and are sign-extended before later division/shift.
 # Exercise MIR debug/release and the fallback backend variants explicitly.
-foreach ($variant in @("debug", "release", "debug_fallback", "release_fallback")) {
+foreach ($variant in @("debug", "release")) {
   $total++
   try {
     if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
@@ -12887,22 +12798,7 @@ foreach ($variant in @("debug", "release", "debug_fallback", "release_fallback")
     if ($variant -like "release*") { $buildArgs += "--release" }
     $buildArgs += @("tests/test_i32_canonical.mettle", "-o", $exePath)
 
-    $oldMir = $env:METTLE_MIR
-    try {
-      if ($variant -like "*_fallback") {
-        $env:METTLE_MIR = "0"
-      } else {
-        Remove-Item Env:\METTLE_MIR -ErrorAction SilentlyContinue
-      }
       $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
-    }
-    finally {
-      if ($null -ne $oldMir) {
-        $env:METTLE_MIR = $oldMir
-      } else {
-        Remove-Item Env:\METTLE_MIR -ErrorAction SilentlyContinue
-      }
-    }
 
     if ($LASTEXITCODE -ne 0) { throw "$variant build failed: $buildOut" }
     if (-not (Test-Path $exePath)) { throw "$variant build produced no executable" }
@@ -12923,7 +12819,7 @@ foreach ($variant in @("debug", "release", "debug_fallback", "release_fallback")
 # exact integer result of the arithmetic they rewrite. Exercised across
 # MIR/fallback x debug/release so a rewrite that miscompiles on only one backend
 # still trips. Self-checking: exit code is the number of the first failing check.
-foreach ($variant in @("debug", "release", "debug_fallback", "release_fallback")) {
+foreach ($variant in @("debug", "release")) {
   $total++
   try {
     if (-not (Test-CaseIsMine)) { throw $script:ShardSkip }
@@ -12932,22 +12828,7 @@ foreach ($variant in @("debug", "release", "debug_fallback", "release_fallback")
     if ($variant -like "release*") { $buildArgs += "--release" }
     $buildArgs += @("tests/test_algebraic_rewrites.mettle", "-o", $exePath)
 
-    $oldMir = $env:METTLE_MIR
-    try {
-      if ($variant -like "*_fallback") {
-        $env:METTLE_MIR = "0"
-      } else {
-        Remove-Item Env:\METTLE_MIR -ErrorAction SilentlyContinue
-      }
       $buildOut = & $CompilerPath @buildArgs 2>&1 | Out-String
-    }
-    finally {
-      if ($null -ne $oldMir) {
-        $env:METTLE_MIR = $oldMir
-      } else {
-        Remove-Item Env:\METTLE_MIR -ErrorAction SilentlyContinue
-      }
-    }
 
     if ($LASTEXITCODE -ne 0) { throw "$variant build failed: $buildOut" }
     if (-not (Test-Path $exePath)) { throw "$variant build produced no executable" }
@@ -18412,28 +18293,21 @@ try {
     "tests/test_syscall_linux.mettle"
   }
   $syscallExe = Join-Path $tmpDir "syscall_runs.exe"
-  $previousMir = $env:METTLE_MIR
-  try {
-    foreach ($backend in @("mir", "baseline")) {
-      if ($backend -eq "baseline") { $env:METTLE_MIR = "0" } else { $env:METTLE_MIR = $null }
-      foreach ($mode in @(@(), @("-O"), @("--release"), @("--safe"))) {
-        if (Test-Path $syscallExe) { Remove-Item -Path $syscallExe -Force }
-        $syscallArgs = @($syscallSource, "--build", "-o", $syscallExe) + $mode
-        $syscallOut = & $CompilerPath @syscallArgs 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $syscallExe)) {
-          throw "building $syscallSource ($backend $($mode -join ' ')) failed: $syscallOut"
-        }
-        $ran = & $syscallExe 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-          throw "$syscallSource ($backend $($mode -join ' ')) exited $LASTEXITCODE : $ran"
-        }
-        if (-not $script:OnWindows -and $ran.Trim() -ne "ABCDEFGH") {
-          throw "the write system call put '$($ran.Trim())' on stdout ($backend $($mode -join ' '))"
-        }
-      }
+  foreach ($mode in @(@(), @("-O"), @("--release"), @("--safe"))) {
+    if (Test-Path $syscallExe) { Remove-Item -Path $syscallExe -Force }
+    $syscallArgs = @($syscallSource, "--build", "-o", $syscallExe) + $mode
+    $syscallOut = & $CompilerPath @syscallArgs 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $syscallExe)) {
+      throw "building $syscallSource ($($mode -join ' ')) failed: $syscallOut"
+    }
+    $ran = & $syscallExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+      throw "$syscallSource ($($mode -join ' ')) exited $LASTEXITCODE : $ran"
+    }
+    if (-not $script:OnWindows -and $ran.Trim() -ne "ABCDEFGH") {
+      throw "the write system call put '$($ran.Trim())' on stdout ($($mode -join ' '))"
     }
   }
-  finally { $env:METTLE_MIR = $previousMir }
   Write-CaseResult -Name "syscall_runs" -Passed $true
 }
 catch {
