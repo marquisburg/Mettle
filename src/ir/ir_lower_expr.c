@@ -3089,6 +3089,237 @@ static int ir_lower_cast_expression(IRLoweringContext *context,
                                     ASTNode *expression,
                                     IROperand *out_value);
 
+static int ir_lower_lambda(IRLoweringContext *context, IRFunction *function,
+                           ASTNode *expression, IROperand *out_value) {
+    FunctionDeclaration *lam = (FunctionDeclaration *)expression->data;
+    if (!lam || !lam->name) {
+      ir_set_error(context, "Internal: lambda was not converted");
+      return 0;
+    }
+    if (lam->captured_count > 0) {
+      /* Capturing closure value: call the synthesized constructor with the
+       * current value of each captured variable; it allocates and populates the
+       * environment record and returns the 8-byte closure pointer. */
+      IROperand dest = ir_operand_none();
+      if (!ir_make_temp_operand(context, &dest)) {
+        return 0;
+      }
+      IROperand *args = calloc(lam->captured_count, sizeof(IROperand));
+      if (!args) {
+        ir_operand_destroy(&dest);
+        return 0;
+      }
+      for (size_t i = 0; i < lam->captured_count; i++)
+        args[i] = ir_operand_symbol(
+            ir_local_ir_name(context, lam->captured_names[i]));
+      IRInstruction call = {0};
+      call.op = IR_OP_CALL;
+      call.location = expression->location;
+      call.dest = dest;
+      call.text = lam->name;
+      call.arguments = args;
+      call.argument_count = lam->captured_count;
+      int ok = ir_emit(context, function, &call);
+      for (size_t i = 0; i < lam->captured_count; i++)
+        ir_operand_destroy(&args[i]);
+      free(args);
+      if (!ok) {
+        ir_operand_destroy(&dest);
+        return 0;
+      }
+      *out_value = dest;
+      return 1;
+    }
+    /* A non-capturing lambda is the address of its lifted top-level function. */
+    return ir_emit_address_of_symbol(context, function, lam->name,
+                                     expression->location, out_value);
+}
+
+static int ir_lower_closure_adapt(IRLoweringContext *context, IRFunction *function,
+                                  ASTNode *expression, IROperand *out_value) {
+    /* A thin value (`&func` or a non-capturing lambda) wrapped by the
+     * closure-adapt pass to satisfy an `Fn(...)` boundary: lower the thin value,
+     * then call the generated adapter constructor with it as the sole argument
+     * to produce a real closure value. */
+    ClosureAdapt *adapt = (ClosureAdapt *)expression->data;
+    if (!adapt || !adapt->ctor_name || !adapt->inner) {
+      ir_set_error(context, "Internal: closure adapter was not synthesized");
+      return 0;
+    }
+    IROperand thin_val = ir_operand_none();
+    if (!ir_lower_expression(context, function, adapt->inner, &thin_val)) {
+      return 0;
+    }
+    IROperand dest = ir_operand_none();
+    if (!ir_make_temp_operand(context, &dest)) {
+      ir_operand_destroy(&thin_val);
+      return 0;
+    }
+    IROperand args[1];
+    args[0] = thin_val;
+    IRInstruction call = {0};
+    call.op = IR_OP_CALL;
+    call.location = expression->location;
+    call.dest = dest;
+    call.text = adapt->ctor_name;
+    call.arguments = args;
+    call.argument_count = 1;
+    int ok = ir_emit(context, function, &call);
+    ir_operand_destroy(&thin_val);
+    if (!ok) {
+      ir_operand_destroy(&dest);
+      return 0;
+    }
+    *out_value = dest;
+    return 1;
+}
+
+static int ir_lower_identifier_value(IRLoweringContext *context, IRFunction *function,
+                                     ASTNode *expression, IROperand *out_value) {
+    Identifier *identifier = (Identifier *)expression->data;
+    if (!identifier || !identifier->name) {
+      ir_set_error(context, "Malformed identifier expression");
+      return 0;
+    }
+    if (context->refine_binding_active && context->refine_binding_name &&
+        strcmp(identifier->name, context->refine_binding_name) == 0) {
+      *out_value = ir_operand_copy(&context->refine_binding_value);
+      return 1;
+    }
+    Symbol *symbol =
+        context->symbol_table
+            ? symbol_table_lookup(context->symbol_table, identifier->name)
+            : NULL;
+    if (symbol && symbol->kind == SYMBOL_CONSTANT) {
+      *out_value = ir_operand_int(symbol->data.constant.value);
+      return 1;
+    }
+
+    /* A bare nullary tagged-enum variant (e.g. `var a: Option = None`) names
+     * a constructor symbol, not a runtime value. Construct an enum local with
+     * just the tag set; payloadful variants must use call syntax `Some(x)`. */
+    if (symbol && symbol->kind == SYMBOL_TAGGED_ENUM_CONSTRUCTOR &&
+        symbol->data.constructor.payload_type == NULL) {
+      return ir_emit_tagged_enum_construct(context, function, symbol,
+                                           NULL, expression->location,
+                                           out_value);
+    }
+
+    /* A function's name in value position is its address, which is what the
+     * type checker read it as and what `&name` spells out. Falling through to
+     * the symbol read below named a local that was never declared, so
+     * `apply(twice, 7)` compiled and then jumped through whatever the slot
+     * happened to hold.
+     *
+     * The type the CHECKER settled on decides this, not the symbol table: by
+     * lowering time the local scopes are popped, so a local named after a
+     * function finds the function here. `var value: int32 = 3;` beside a
+     * `fn value()` would otherwise read the function's address. */
+    if (symbol && symbol->kind == SYMBOL_FUNCTION &&
+        expression->resolved_type &&
+        expression->resolved_type->kind == TYPE_FUNCTION_POINTER) {
+      return ir_emit_address_of_symbol(
+          context, function, ir_local_ir_name(context, identifier->name),
+          expression->location, out_value);
+    }
+
+    if (ir_small_float_local(context, function, identifier->name,
+                             ir_local_ir_name(context, identifier->name),
+                             expression->resolved_type)) {
+      return ir_emit_small_float_home_load(
+          context, function, ir_local_ir_name(context, identifier->name),
+          expression->resolved_type, expression->location, out_value);
+    }
+    *out_value =
+        ir_operand_symbol(ir_local_ir_name(context, identifier->name));
+    if (!out_value->name) {
+      ir_set_error(context, "Out of memory while lowering identifier");
+      return 0;
+    }
+    return 1;
+}
+
+static int ir_lower_member_or_index(IRLoweringContext *context,
+                                    IRFunction *function,
+                                    ASTNode *expression,
+                                    IROperand *out_value) {
+  if (expression->type == AST_MEMBER_ACCESS) {
+    MemberAccess *m = (MemberAccess *)expression->data;
+    /* Qualified enum variant: `EnumName.Variant` lowers to either an integer
+     * constant (plain enum) or a tagged-enum construction (tagged enum). */
+    if (m && m->object && m->object->type == AST_IDENTIFIER && m->member) {
+      Identifier *obj_id = (Identifier *)m->object->data;
+      if (obj_id && obj_id->name && context->symbol_table) {
+        Symbol *enum_sym =
+            symbol_table_lookup(context->symbol_table, obj_id->name);
+        if (enum_sym && enum_sym->kind == SYMBOL_ENUM) {
+          Symbol *variant_sym =
+              symbol_table_lookup(context->symbol_table, m->member);
+          if (variant_sym && variant_sym->kind == SYMBOL_CONSTANT) {
+            *out_value = ir_operand_int(variant_sym->data.constant.value);
+            return 1;
+          }
+          if (variant_sym &&
+              variant_sym->kind == SYMBOL_TAGGED_ENUM_CONSTRUCTOR &&
+              variant_sym->data.constructor.payload_type == NULL) {
+            return ir_emit_tagged_enum_construct(context, function, variant_sym,
+                                                 NULL, expression->location,
+                                                 out_value);
+          }
+        }
+      }
+    }
+    /* Fall through to the lvalue-load path for struct/array member access. */
+  }
+    IROperand address = ir_operand_none();
+    Type *value_type = NULL;
+    if (!ir_lower_lvalue_address(context, function, expression, &address,
+                                 &value_type)) {
+      return 0;
+    }
+    if (!value_type) {
+      ir_operand_destroy(&address);
+      ir_set_error(context, "Cannot determine type for load");
+      return 0;
+    }
+
+    IROperand destination = ir_operand_none();
+    if (!ir_make_temp_operand(context, &destination)) {
+      ir_operand_destroy(&address);
+      return 0;
+    }
+
+    {
+      int handled = ir_try_load_aggregate_by_value(
+          context, function, &address, value_type, expression->location,
+          out_value);
+      if (handled >= 0) {
+        ir_operand_destroy(&destination);
+        return handled;
+      }
+    }
+
+    IRInstruction load = {0};
+    load.op = IR_OP_LOAD;
+    load.location = expression->location;
+    load.dest = destination;
+    load.lhs = address;
+    load.rhs = ir_operand_int(ir_type_storage_size(value_type));
+    ir_load_apply_float_type(&load, value_type);
+    ir_load_apply_unsigned(&load, value_type);
+    ir_access_apply_alias_class(&load, value_type);
+    if (!ir_emit(context, function, &load)) {
+      ir_operand_destroy(&destination);
+      ir_operand_destroy(&address);
+      return 0;
+    }
+    destination.float_bits = load.dest.float_bits;
+
+    ir_operand_destroy(&address);
+    *out_value = destination;
+    return 1;
+}
+
 static int ir_lower_expression_inner(IRLoweringContext *context,
                                      IRFunction *function,
                                      ASTNode *expression,
@@ -3189,239 +3420,27 @@ static int ir_lower_expression_inner(IRLoweringContext *context,
     return 1;
   }
 
-  case AST_IDENTIFIER: {
-    Identifier *identifier = (Identifier *)expression->data;
-    if (!identifier || !identifier->name) {
-      ir_set_error(context, "Malformed identifier expression");
-      return 0;
-    }
-    if (context->refine_binding_active && context->refine_binding_name &&
-        strcmp(identifier->name, context->refine_binding_name) == 0) {
-      *out_value = ir_operand_copy(&context->refine_binding_value);
-      return 1;
-    }
-    Symbol *symbol =
-        context->symbol_table
-            ? symbol_table_lookup(context->symbol_table, identifier->name)
-            : NULL;
-    if (symbol && symbol->kind == SYMBOL_CONSTANT) {
-      *out_value = ir_operand_int(symbol->data.constant.value);
-      return 1;
-    }
-
-    /* A bare nullary tagged-enum variant (e.g. `var a: Option = None`) names
-     * a constructor symbol, not a runtime value. Construct an enum local with
-     * just the tag set; payloadful variants must use call syntax `Some(x)`. */
-    if (symbol && symbol->kind == SYMBOL_TAGGED_ENUM_CONSTRUCTOR &&
-        symbol->data.constructor.payload_type == NULL) {
-      return ir_emit_tagged_enum_construct(context, function, symbol,
-                                           NULL, expression->location,
-                                           out_value);
-    }
-
-    /* A function's name in value position is its address, which is what the
-     * type checker read it as and what `&name` spells out. Falling through to
-     * the symbol read below named a local that was never declared, so
-     * `apply(twice, 7)` compiled and then jumped through whatever the slot
-     * happened to hold.
-     *
-     * The type the CHECKER settled on decides this, not the symbol table: by
-     * lowering time the local scopes are popped, so a local named after a
-     * function finds the function here. `var value: int32 = 3;` beside a
-     * `fn value()` would otherwise read the function's address. */
-    if (symbol && symbol->kind == SYMBOL_FUNCTION &&
-        expression->resolved_type &&
-        expression->resolved_type->kind == TYPE_FUNCTION_POINTER) {
-      return ir_emit_address_of_symbol(
-          context, function, ir_local_ir_name(context, identifier->name),
-          expression->location, out_value);
-    }
-
-    if (ir_small_float_local(context, function, identifier->name,
-                             ir_local_ir_name(context, identifier->name),
-                             expression->resolved_type)) {
-      return ir_emit_small_float_home_load(
-          context, function, ir_local_ir_name(context, identifier->name),
-          expression->resolved_type, expression->location, out_value);
-    }
-    *out_value =
-        ir_operand_symbol(ir_local_ir_name(context, identifier->name));
-    if (!out_value->name) {
-      ir_set_error(context, "Out of memory while lowering identifier");
-      return 0;
-    }
-    return 1;
-  }
+  case AST_IDENTIFIER:
+    return ir_lower_identifier_value(context, function, expression, out_value);
 
   case AST_BINARY_EXPRESSION:
     return ir_lower_binary_expression(context, function, expression,
                                       out_value);
 
-  case AST_CLOSURE_ADAPT_EXPRESSION: {
-    /* A thin value (`&func` or a non-capturing lambda) wrapped by the
-     * closure-adapt pass to satisfy an `Fn(...)` boundary: lower the thin value,
-     * then call the generated adapter constructor with it as the sole argument
-     * to produce a real closure value. */
-    ClosureAdapt *adapt = (ClosureAdapt *)expression->data;
-    if (!adapt || !adapt->ctor_name || !adapt->inner) {
-      ir_set_error(context, "Internal: closure adapter was not synthesized");
-      return 0;
-    }
-    IROperand thin_val = ir_operand_none();
-    if (!ir_lower_expression(context, function, adapt->inner, &thin_val)) {
-      return 0;
-    }
-    IROperand dest = ir_operand_none();
-    if (!ir_make_temp_operand(context, &dest)) {
-      ir_operand_destroy(&thin_val);
-      return 0;
-    }
-    IROperand args[1];
-    args[0] = thin_val;
-    IRInstruction call = {0};
-    call.op = IR_OP_CALL;
-    call.location = expression->location;
-    call.dest = dest;
-    call.text = adapt->ctor_name;
-    call.arguments = args;
-    call.argument_count = 1;
-    int ok = ir_emit(context, function, &call);
-    ir_operand_destroy(&thin_val);
-    if (!ok) {
-      ir_operand_destroy(&dest);
-      return 0;
-    }
-    *out_value = dest;
-    return 1;
-  }
+  case AST_CLOSURE_ADAPT_EXPRESSION:
+    return ir_lower_closure_adapt(context, function, expression, out_value);
 
-  case AST_LAMBDA_EXPRESSION: {
-    FunctionDeclaration *lam = (FunctionDeclaration *)expression->data;
-    if (!lam || !lam->name) {
-      ir_set_error(context, "Internal: lambda was not converted");
-      return 0;
-    }
-    if (lam->captured_count > 0) {
-      /* Capturing closure value: call the synthesized constructor with the
-       * current value of each captured variable; it allocates and populates the
-       * environment record and returns the 8-byte closure pointer. */
-      IROperand dest = ir_operand_none();
-      if (!ir_make_temp_operand(context, &dest)) {
-        return 0;
-      }
-      IROperand *args = calloc(lam->captured_count, sizeof(IROperand));
-      if (!args) {
-        ir_operand_destroy(&dest);
-        return 0;
-      }
-      for (size_t i = 0; i < lam->captured_count; i++)
-        args[i] = ir_operand_symbol(
-            ir_local_ir_name(context, lam->captured_names[i]));
-      IRInstruction call = {0};
-      call.op = IR_OP_CALL;
-      call.location = expression->location;
-      call.dest = dest;
-      call.text = lam->name;
-      call.arguments = args;
-      call.argument_count = lam->captured_count;
-      int ok = ir_emit(context, function, &call);
-      for (size_t i = 0; i < lam->captured_count; i++)
-        ir_operand_destroy(&args[i]);
-      free(args);
-      if (!ok) {
-        ir_operand_destroy(&dest);
-        return 0;
-      }
-      *out_value = dest;
-      return 1;
-    }
-    /* A non-capturing lambda is the address of its lifted top-level function. */
-    return ir_emit_address_of_symbol(context, function, lam->name,
-                                     expression->location, out_value);
-  }
+  case AST_LAMBDA_EXPRESSION:
+    return ir_lower_lambda(context, function, expression, out_value);
 
   case AST_UNARY_EXPRESSION:
     return ir_lower_unary_expression(context, function, expression,
                                      out_value);
 
-  case AST_MEMBER_ACCESS: {
-    MemberAccess *m = (MemberAccess *)expression->data;
-    /* Qualified enum variant: `EnumName.Variant` lowers to either an integer
-     * constant (plain enum) or a tagged-enum construction (tagged enum). */
-    if (m && m->object && m->object->type == AST_IDENTIFIER && m->member) {
-      Identifier *obj_id = (Identifier *)m->object->data;
-      if (obj_id && obj_id->name && context->symbol_table) {
-        Symbol *enum_sym =
-            symbol_table_lookup(context->symbol_table, obj_id->name);
-        if (enum_sym && enum_sym->kind == SYMBOL_ENUM) {
-          Symbol *variant_sym =
-              symbol_table_lookup(context->symbol_table, m->member);
-          if (variant_sym && variant_sym->kind == SYMBOL_CONSTANT) {
-            *out_value = ir_operand_int(variant_sym->data.constant.value);
-            return 1;
-          }
-          if (variant_sym &&
-              variant_sym->kind == SYMBOL_TAGGED_ENUM_CONSTRUCTOR &&
-              variant_sym->data.constructor.payload_type == NULL) {
-            return ir_emit_tagged_enum_construct(context, function, variant_sym,
-                                                 NULL, expression->location,
-                                                 out_value);
-          }
-        }
-      }
-    }
-    /* Fall through to the lvalue-load path for struct/array member access. */
-  }
-  /* fallthrough */
-  case AST_INDEX_EXPRESSION: {
-    IROperand address = ir_operand_none();
-    Type *value_type = NULL;
-    if (!ir_lower_lvalue_address(context, function, expression, &address,
-                                 &value_type)) {
-      return 0;
-    }
-    if (!value_type) {
-      ir_operand_destroy(&address);
-      ir_set_error(context, "Cannot determine type for load");
-      return 0;
-    }
-
-    IROperand destination = ir_operand_none();
-    if (!ir_make_temp_operand(context, &destination)) {
-      ir_operand_destroy(&address);
-      return 0;
-    }
-
-    {
-      int handled = ir_try_load_aggregate_by_value(
-          context, function, &address, value_type, expression->location,
-          out_value);
-      if (handled >= 0) {
-        ir_operand_destroy(&destination);
-        return handled;
-      }
-    }
-
-    IRInstruction load = {0};
-    load.op = IR_OP_LOAD;
-    load.location = expression->location;
-    load.dest = destination;
-    load.lhs = address;
-    load.rhs = ir_operand_int(ir_type_storage_size(value_type));
-    ir_load_apply_float_type(&load, value_type);
-    ir_load_apply_unsigned(&load, value_type);
-    ir_access_apply_alias_class(&load, value_type);
-    if (!ir_emit(context, function, &load)) {
-      ir_operand_destroy(&destination);
-      ir_operand_destroy(&address);
-      return 0;
-    }
-    destination.float_bits = load.dest.float_bits;
-
-    ir_operand_destroy(&address);
-    *out_value = destination;
-    return 1;
-  }
+  case AST_MEMBER_ACCESS:
+  case AST_INDEX_EXPRESSION:
+    return ir_lower_member_or_index(context, function, expression,
+                                    out_value);
 
   case AST_NEW_EXPRESSION:
     return ir_lower_new_expression(context, function, expression, out_value);
