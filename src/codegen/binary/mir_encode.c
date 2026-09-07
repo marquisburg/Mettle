@@ -2004,158 +2004,194 @@ static int mir_home_float_params(MirFunction *fn, MirXmmMove *mv, int n) {
 }
 
 /* Home all parameters from their ABI incoming locations into their vregs. */
-static int mir_home_parameters(MirFunction *fn) {
-  size_t pc = fn->param_count;
-  const BinaryAbi *abi = code_generator_binary_active_abi();
-  /* An INDIRECT struct return prepends a hidden integer out-pointer argument
-   * (Win64: RCX, SysV: RDI); home it into the reserved vreg and shift every
-   * user parameter up one ABI slot in the layout. */
-  size_t hidden = fn->returns_indirect ? 1 : 0;
-  if (hidden) {
-    if (fn->indirect_return_vreg != MIR_VREG_NONE &&
-        fn->vregs[fn->indirect_return_vreg].assigned) {
-      MirOperand dst = mir_op_vreg(fn->indirect_return_vreg);
-      if (!store_from(fn, &dst, abi->indirect_return_register)) {
-        return enc_err(fn, "out of memory homing indirect-return pointer");
-      }
-    }
-  }
-  if (pc == 0) {
+static int mir_home_indirect_return(MirFunction *fn, const BinaryAbi *abi) {
+  MirOperand dst;
+
+  if (!fn->returns_indirect || fn->indirect_return_vreg == MIR_VREG_NONE ||
+      !fn->vregs[fn->indirect_return_vreg].assigned) {
     return 1;
   }
+  dst = mir_op_vreg(fn->indirect_return_vreg);
+  if (!store_from(fn, &dst, abi->indirect_return_register)) {
+    return enc_err(fn, "out of memory homing indirect-return pointer");
+  }
+  return 1;
+}
+
+static int mir_incoming_stack_offset(const BinaryAbi *abi,
+                                     const BinaryArgLocation *loc) {
+  return 16 + abi->shadow_space_size + loc->stack_offset;
+}
+
+static int mir_home_memory_param(MirFunction *fn, const MirParam *p,
+                                 const BinaryArgLocation *loc,
+                                 const BinaryAbi *abi) {
+  MirOperand dst = mir_op_vreg(p->vreg);
+
+  if (loc->kind != BINARY_ARG_ON_STACK ||
+      !binary_emit_lea_reg_mem(&fn->context->code, SCRATCH_A, frame_base(fn),
+                               frame_disp(fn,
+                                          mir_incoming_stack_offset(abi,
+                                                                    loc))) ||
+      !store_from(fn, &dst, SCRATCH_A)) {
+    return enc_err(fn, "out of memory homing a memory-class parameter");
+  }
+  return 1;
+}
+
+static int mir_home_eightbyte_param(MirFunction *fn, const MirParam *p,
+                                    const BinaryArgLocation *locs,
+                                    const BinaryAbi *abi) {
+  BinaryCodeBuffer *code = &fn->context->code;
+  MirOperand dst = mir_op_vreg(p->vreg);
+  int storage = spill_off(&fn->vregs[p->sysv_storage]);
+
+  for (int e = 0; e < p->sysv_eightbytes; e++) {
+    const BinaryArgLocation *loc = &locs[e];
+    int at = frame_disp(fn, -storage) + 8 * e;
+    int ok;
+
+    if (loc->kind == BINARY_ARG_IN_GP_REGISTER) {
+      ok = binary_emit_mov_mem_reg(code, frame_base(fn), at, loc->gp_register);
+    } else if (loc->kind == BINARY_ARG_IN_XMM_REGISTER) {
+      ok = binary_emit_movq_reg_xmm(code, SCRATCH_A, loc->xmm_register) &&
+           binary_emit_mov_mem_reg(code, frame_base(fn), at, SCRATCH_A);
+    } else {
+      ok = binary_emit_mov_reg_mem(
+               code, SCRATCH_A, frame_base(fn),
+               frame_disp(fn, mir_incoming_stack_offset(abi, loc))) &&
+           binary_emit_mov_mem_reg(code, frame_base(fn), at, SCRATCH_A);
+    }
+    if (!ok) {
+      return enc_err(fn, "out of memory rebuilding an aggregate parameter");
+    }
+  }
+  if (!binary_emit_lea_reg_mem(code, SCRATCH_A, frame_base(fn),
+                               frame_disp(fn, -storage)) ||
+      !store_from(fn, &dst, SCRATCH_A)) {
+    return enc_err(fn, "out of memory homing an aggregate parameter");
+  }
+  return 1;
+}
+
+static int mir_home_direct_sse_param(MirFunction *fn, const MirParam *p,
+                                     const BinaryArgLocation *loc) {
+  MirOperand dst = mir_op_vreg(p->vreg);
+
+  if (!binary_emit_movq_reg_xmm(&fn->context->code, SCRATCH_A,
+                                loc->xmm_register) ||
+      !store_from(fn, &dst, SCRATCH_A)) {
+    return enc_err(fn, "out of memory homing a float-class aggregate");
+  }
+  return 1;
+}
+
+static int mir_home_integer_param(MirFunction *fn, const MirParam *p,
+                                  const BinaryArgLocation *loc,
+                                  const BinaryAbi *abi) {
+  if (loc->kind == BINARY_ARG_IN_GP_REGISTER) {
+    return mir_home_gp_param(fn, p, loc->gp_register);
+  }
+  if (loc->kind == BINARY_ARG_ON_STACK) {
+    return mir_home_gp_stack_param(fn, p,
+                                   mir_incoming_stack_offset(abi, loc));
+  }
+  return enc_err(fn, "unsupported parameter location");
+}
+
+static int mir_home_float_stack_param(MirFunction *fn, const MirParam *p,
+                                      int offset) {
+  BinaryCodeBuffer *code = &fn->context->code;
+  MirVreg *vr = &fn->vregs[p->vreg];
+  int ok;
+
+  if (vr->in_register) {
+    ok = (p->width == 4) ? wcs_movss_xmm_mem(code, vr->phys, frame_base(fn),
+                                             frame_disp(fn, offset))
+                         : wcs_movsd_xmm_mem(code, vr->phys, frame_base(fn),
+                                             frame_disp(fn, offset));
+  } else {
+    ok = binary_emit_mov_reg_mem(code, SCRATCH_A, frame_base(fn),
+                                 frame_disp(fn, offset)) &&
+         binary_emit_mov_mem_reg(code, frame_base(fn),
+                                 frame_disp(fn, -vr->spill_offset), SCRATCH_A);
+  }
+  if (!ok) {
+    return enc_err(fn, "out of memory homing float stack parameter");
+  }
+  return 1;
+}
+
+static void mir_record_xmm_move(MirFunction *fn, const MirParam *p,
+                                const BinaryArgLocation *loc, MirXmmMove *xm,
+                                int *nxm) {
+  const MirVreg *vr = &fn->vregs[p->vreg];
+
+  xm[*nxm].src = loc->xmm_register;
+  xm[*nxm].width = p->width;
+  xm[*nxm].done = 0;
+  xm[*nxm].is_spill = vr->in_register ? 0 : 1;
+  xm[*nxm].dst = vr->in_register ? vr->phys : vr->spill_offset;
+  (*nxm)++;
+}
+
+static int mir_home_parameters(MirFunction *fn) {
+  const BinaryAbi *abi = code_generator_binary_active_abi();
   BinaryArgLocation locs[MIR_PARAM_SLOTS];
   size_t first_slot[MIR_MAX_PARAMS];
   size_t nslots = 0;
-  (void)hidden;
+  MirXmmMove xm[MIR_MAX_PARAMS];
+  const MirParam *fstack[MIR_MAX_PARAMS];
+  int fstack_off[MIR_MAX_PARAMS];
+  int nxm = 0;
+  int nfstack = 0;
+
+  if (!mir_home_indirect_return(fn, abi)) {
+    return 0;
+  }
+  if (fn->param_count == 0) {
+    return 1;
+  }
   if (!mir_param_layout(fn, abi, locs, first_slot, &nslots)) {
     return enc_err(fn, "failed to compute parameter layout");
   }
-
-  MirXmmMove xm[MIR_MAX_PARAMS];
-  int nxm = 0;
-  const MirParam *fstack[MIR_MAX_PARAMS];
-  int fstack_off[MIR_MAX_PARAMS];
-  int nfstack = 0;
-  for (size_t i = 0; i < pc; i++) {
+  for (size_t i = 0; i < fn->param_count; i++) {
     const MirParam *p = &fn->params[i];
-    if (!fn->vregs[p->vreg].assigned) {
-      continue; /* unused parameter */
-    }
     const BinaryArgLocation *loc = &locs[first_slot[i]];
+    int ok;
+
+    if (!fn->vregs[p->vreg].assigned) {
+      continue;
+    }
     if (p->sysv_in_memory) {
-      MirOperand dst = mir_op_vreg(p->vreg);
-      int rbp_offset = 16 + abi->shadow_space_size + loc->stack_offset;
-      if (loc->kind != BINARY_ARG_ON_STACK ||
-          !binary_emit_lea_reg_mem(&fn->context->code, SCRATCH_A,
-                                   frame_base(fn),
-                                   frame_disp(fn, rbp_offset)) ||
-          !store_from(fn, &dst, SCRATCH_A)) {
-        return enc_err(fn, "out of memory homing a memory-class parameter");
-      }
+      ok = mir_home_memory_param(fn, p, loc, abi);
+    } else if (p->sysv_eightbytes > 0) {
+      ok = mir_home_eightbyte_param(fn, p, loc, abi);
+    } else if (p->sysv_direct_sse && loc->kind == BINARY_ARG_IN_XMM_REGISTER) {
+      ok = mir_home_direct_sse_param(fn, p, loc);
+    } else if (!p->is_float) {
+      ok = mir_home_integer_param(fn, p, loc, abi);
+    } else if (loc->kind == BINARY_ARG_ON_STACK) {
+      fstack[nfstack] = p;
+      fstack_off[nfstack] = mir_incoming_stack_offset(abi, loc);
+      nfstack++;
       continue;
-    }
-    if (p->sysv_eightbytes > 0) {
-      MirOperand dst = mir_op_vreg(p->vreg);
-      BinaryCodeBuffer *code = &fn->context->code;
-      int soff = spill_off(&fn->vregs[p->sysv_storage]);
-      for (int e = 0; e < p->sysv_eightbytes; e++) {
-        const BinaryArgLocation *le = &locs[first_slot[i] + (size_t)e];
-        int d = frame_disp(fn, -soff) + 8 * e;
-        int ok;
-        if (le->kind == BINARY_ARG_IN_GP_REGISTER) {
-          ok = binary_emit_mov_mem_reg(code, frame_base(fn), d,
-                                       le->gp_register);
-        } else if (le->kind == BINARY_ARG_IN_XMM_REGISTER) {
-          ok = binary_emit_movq_reg_xmm(code, SCRATCH_A, le->xmm_register) &&
-               binary_emit_mov_mem_reg(code, frame_base(fn), d, SCRATCH_A);
-        } else {
-          int rbp_offset = 16 + abi->shadow_space_size + le->stack_offset;
-          ok = binary_emit_mov_reg_mem(code, SCRATCH_A, frame_base(fn),
-                                       frame_disp(fn, rbp_offset)) &&
-               binary_emit_mov_mem_reg(code, frame_base(fn), d, SCRATCH_A);
-        }
-        if (!ok) {
-          return enc_err(fn, "out of memory rebuilding an aggregate parameter");
-        }
-      }
-      if (!binary_emit_lea_reg_mem(code, SCRATCH_A, frame_base(fn),
-                                   frame_disp(fn, -soff)) ||
-          !store_from(fn, &dst, SCRATCH_A)) {
-        return enc_err(fn, "out of memory homing an aggregate parameter");
-      }
-      continue;
-    }
-    if (p->sysv_direct_sse && loc->kind == BINARY_ARG_IN_XMM_REGISTER) {
-      MirOperand dst = mir_op_vreg(p->vreg);
-      if (!binary_emit_movq_reg_xmm(&fn->context->code, SCRATCH_A,
-                                    loc->xmm_register) ||
-          !store_from(fn, &dst, SCRATCH_A)) {
-        return enc_err(fn, "out of memory homing a float-class aggregate");
-      }
-      continue;
-    }
-    if (!p->is_float) {
-      if (loc->kind == BINARY_ARG_IN_GP_REGISTER) {
-        if (!mir_home_gp_param(fn, p, loc->gp_register)) {
-          return 0;
-        }
-      } else if (loc->kind == BINARY_ARG_ON_STACK) {
-        int rbp_offset = 16 + abi->shadow_space_size + loc->stack_offset;
-        if (!mir_home_gp_stack_param(fn, p, rbp_offset)) {
-          return 0;
-        }
-      } else {
-        return enc_err(fn, "unsupported parameter location");
-      }
+    } else if (loc->kind != BINARY_ARG_IN_XMM_REGISTER) {
+      ok = enc_err(fn, "unsupported float parameter location");
     } else {
-      if (loc->kind == BINARY_ARG_ON_STACK) {
-        /* 5th+ float param. Deferred below: its destination register could be
-         * an XMM0-3 still holding a not-yet-homed incoming arg. */
-        fstack[nfstack] = p;
-        fstack_off[nfstack] = 16 + abi->shadow_space_size + loc->stack_offset;
-        nfstack++;
-        continue;
-      }
-      if (loc->kind != BINARY_ARG_IN_XMM_REGISTER) {
-        return enc_err(fn, "unsupported float parameter location");
-      }
-      MirVreg *vr = &fn->vregs[p->vreg];
-      xm[nxm].src = loc->xmm_register;
-      xm[nxm].width = p->width;
-      xm[nxm].done = 0;
-      if (vr->in_register) {
-        xm[nxm].is_spill = 0;
-        xm[nxm].dst = vr->phys;
-      } else {
-        xm[nxm].is_spill = 1;
-        xm[nxm].dst = vr->spill_offset;
-      }
-      nxm++;
+      mir_record_xmm_move(fn, p, loc, xm, &nxm);
+      continue;
+    }
+    if (!ok) {
+      return 0;
     }
   }
   if (!mir_home_float_params(fn, xm, nxm)) {
     return 0;
   }
   for (int i = 0; i < nfstack; i++) {
-    const MirParam *p = fstack[i];
-    MirVreg *vr = &fn->vregs[p->vreg];
-    int ok;
-    if (vr->in_register) {
-      ok = (p->width == 4)
-               ? wcs_movss_xmm_mem(&fn->context->code, vr->phys, frame_base(fn),
-                                   frame_disp(fn, fstack_off[i]))
-               : wcs_movsd_xmm_mem(&fn->context->code, vr->phys, frame_base(fn),
-                                   frame_disp(fn, fstack_off[i]));
-    } else {
-      ok = binary_emit_mov_reg_mem(&fn->context->code, SCRATCH_A,
-                                   frame_base(fn),
-                                   frame_disp(fn, fstack_off[i])) &&
-           binary_emit_mov_mem_reg(&fn->context->code, frame_base(fn),
-                                   frame_disp(fn, -vr->spill_offset),
-                                   SCRATCH_A);
-    }
-    if (!ok) {
-      return enc_err(fn, "out of memory homing float stack parameter");
+    if (!mir_home_float_stack_param(fn, fstack[i], fstack_off[i])) {
+      return 0;
     }
   }
   return 1;
@@ -2241,57 +2277,44 @@ static int mir_cmp_operand_reusable(const MirFunction *fn,
          fn->vregs[x->vreg].rclass == fn->vregs[y->vreg].rclass;
 }
 
-static int mir_encode_traced_trap(MirFunction *fn, const MirInst *in,
-                                  const IRInstruction *ir) {
+static int mir_trap_stage_details(MirFunction *fn, const MirInst *in) {
+  BinaryCodeBuffer *code = &fn->context->code;
+  MirOperand zero = mir_op_imm(0);
+  BinaryGpRegister first;
+  int ok = 1;
+
+  if (!binary_emit_push_reg(code, SCRATCH_A)) {
+    return enc_err(fn, "out of memory staging a trap detail");
+  }
+  first = value_reg(fn, in->b.kind == MIR_OPK_NONE ? &zero : &in->b, SCRATCH_A,
+                    &ok);
+  if (!ok) {
+    return 0;
+  }
+  if (first != SCRATCH_A &&
+      !binary_emit_mov_reg_reg(code, SCRATCH_A, first)) {
+    return enc_err(fn, "out of memory staging a trap detail");
+  }
+  if (!binary_emit_pop_reg(code, SCRATCH_B)) {
+    return enc_err(fn, "out of memory staging a trap detail");
+  }
+  return 1;
+}
+
+static int mir_trap_open_site(MirFunction *fn, const IRInstruction *ir,
+                              const char *filename, const char *pc_label,
+                              const char *trap_symbol, int is_ex) {
   CodeGenerator *g = fn->generator;
   BinaryFunctionContext *ctx = fn->context;
-  BinaryCodeBuffer *code = &ctx->code;
-  const BinaryAbi *abi = code_generator_binary_active_abi();
-  int is_ex = ir->text && strcmp(ir->text, "mettle_crash_trap_ex") == 0;
-  const char *trap_symbol =
-      is_ex ? "mettle_crash_trap_ex" : "mettle_crash_trap";
-  const char *filename =
-      code_generator_runtime_filename(g, ir->location.filename);
-  size_t disp = 0;
-  char *pc_label = NULL;
 
-  if (is_ex) {
-    int vok = 1;
-    BinaryGpRegister first;
-    if (!binary_emit_push_reg(code, SCRATCH_A)) {
-      return enc_err(fn, "out of memory staging a trap detail");
-    }
-    if (in->b.kind == MIR_OPK_NONE) {
-      MirOperand zero = mir_op_imm(0);
-      first = value_reg(fn, &zero, SCRATCH_A, &vok);
-    } else {
-      first = value_reg(fn, &in->b, SCRATCH_A, &vok);
-    }
-    if (!vok) {
-      return 0;
-    }
-    if (first != SCRATCH_A &&
-        !binary_emit_mov_reg_reg(code, SCRATCH_A, first)) {
-      return enc_err(fn, "out of memory staging a trap detail");
-    }
-    if (!binary_emit_pop_reg(code, SCRATCH_B)) {
-      return enc_err(fn, "out of memory staging a trap detail");
-    }
-  }
-  pc_label = code_generator_generate_label(g, "mettledbg_trap_pc");
-  if (!pc_label) {
-    return enc_err(fn, "out of memory creating a trap label");
-  }
-  if (!binary_label_table_define(&ctx->labels, pc_label, code->size) ||
+  if (!binary_label_table_define(&ctx->labels, pc_label, ctx->code.size) ||
       !code_generator_binary_record_debug_label_export(ctx, pc_label,
-                                                       code->size)) {
-    free(pc_label);
+                                                       ctx->code.size)) {
     return enc_err(fn, "out of memory recording a trap label");
   }
   if (ir->location.line > 0 &&
       !code_generator_binary_emit_runtime_location_marker(
           g, ctx, ir->location.line, ir->location.column, filename)) {
-    free(pc_label);
     return 0;
   }
   if (is_ex && ir->argument_count >= 4) {
@@ -2306,58 +2329,68 @@ static int mir_encode_traced_trap(MirFunction *fn, const MirInst *in,
                                             ir->location.column, filename,
                                             message, NULL);
   }
-  if (!code_generator_binary_declare_external_symbol(g, trap_symbol)) {
-    free(pc_label);
-    return 0;
+  return code_generator_binary_declare_external_symbol(g, trap_symbol);
+}
+
+static int mir_trap_pass_staged_detail(MirFunction *fn, const BinaryAbi *abi,
+                                       size_t index, BinaryGpRegister staged) {
+  BinaryCodeBuffer *code = &fn->context->code;
+
+  if (abi->int_param_count > index) {
+    return binary_emit_mov_reg_reg(code, abi->int_param_registers[index],
+                                   staged);
   }
-  if (is_ex) {
-    int stacked = abi->int_param_count < 6 ? 6 - (int)abi->int_param_count : 0;
-    uint32_t frame = (uint32_t)(abi->shadow_space_size + stacked * 8);
-    if ((frame > 0 && !binary_emit_sub_rsp_imm32(code, frame)) ||
-        !binary_emit_mov_reg_imm64(
-            code, abi->int_param_registers[0],
-            ir->arguments[0].kind == IR_OPERAND_INT
-                ? (uint64_t)ir->arguments[0].int_value
-                : 0u) ||
-        !code_generator_binary_emit_cstring_literal_address(
-            g, ctx, in->a.sym ? in->a.sym : "", abi->int_param_registers[1]) ||
-        !binary_emit_lea_reg_rip_placeholder(code, abi->int_param_registers[2],
-                                             &disp) ||
-        !binary_label_fixup_table_add(&ctx->label_fixups, pc_label, disp) ||
-        !binary_emit_mov_reg_reg(code, abi->int_param_registers[3],
-                                 BINARY_GP_RBP)) {
-      free(pc_label);
-      return enc_err(fn, "out of memory emitting a traced trap");
-    }
-    if (abi->int_param_count > 4
-            ? !binary_emit_mov_reg_reg(code, abi->int_param_registers[4],
-                                       SCRATCH_A)
-            : !binary_emit_mov_mem_reg(code, BINARY_GP_RSP,
-                                       abi->shadow_space_size, SCRATCH_A)) {
-      free(pc_label);
-      return enc_err(fn, "out of memory emitting a traced trap");
-    }
-    if (abi->int_param_count > 5
-            ? !binary_emit_mov_reg_reg(code, abi->int_param_registers[5],
-                                       SCRATCH_B)
-            : !binary_emit_mov_mem_reg(code, BINARY_GP_RSP,
-                                       abi->shadow_space_size + 8,
-                                       SCRATCH_B)) {
-      free(pc_label);
-      return enc_err(fn, "out of memory emitting a traced trap");
-    }
-    if (!binary_emit_call_placeholder(code, &disp) ||
-        !binary_call_relocation_table_add(&ctx->call_relocations, trap_symbol,
-                                          disp) ||
-        (frame > 0 && !binary_emit_add_rsp_imm32(code, frame))) {
-      free(pc_label);
-      return enc_err(fn, "out of memory emitting a traced trap");
-    }
-    free(pc_label);
-    return 1;
+  return binary_emit_mov_mem_reg(
+      code, BINARY_GP_RSP,
+      abi->shadow_space_size + (int)(index - 4) * 8, staged);
+}
+
+static int mir_trap_emit_detailed_call(MirFunction *fn, const MirInst *in,
+                                       const IRInstruction *ir,
+                                       const BinaryAbi *abi,
+                                       const char *trap_symbol,
+                                       const char *pc_label) {
+  BinaryFunctionContext *ctx = fn->context;
+  BinaryCodeBuffer *code = &ctx->code;
+  int stacked = abi->int_param_count < 6 ? 6 - (int)abi->int_param_count : 0;
+  uint32_t frame = (uint32_t)(abi->shadow_space_size + stacked * 8);
+  size_t disp = 0;
+
+  if ((frame > 0 && !binary_emit_sub_rsp_imm32(code, frame)) ||
+      !binary_emit_mov_reg_imm64(code, abi->int_param_registers[0],
+                                 ir->arguments[0].kind == IR_OPERAND_INT
+                                     ? (uint64_t)ir->arguments[0].int_value
+                                     : 0u) ||
+      !code_generator_binary_emit_cstring_literal_address(
+          fn->generator, ctx, in->a.sym ? in->a.sym : "",
+          abi->int_param_registers[1]) ||
+      !binary_emit_lea_reg_rip_placeholder(code, abi->int_param_registers[2],
+                                           &disp) ||
+      !binary_label_fixup_table_add(&ctx->label_fixups, pc_label, disp) ||
+      !binary_emit_mov_reg_reg(code, abi->int_param_registers[3],
+                               BINARY_GP_RBP) ||
+      !mir_trap_pass_staged_detail(fn, abi, 4, SCRATCH_A) ||
+      !mir_trap_pass_staged_detail(fn, abi, 5, SCRATCH_B) ||
+      !binary_emit_call_placeholder(code, &disp) ||
+      !binary_call_relocation_table_add(&ctx->call_relocations, trap_symbol,
+                                        disp) ||
+      (frame > 0 && !binary_emit_add_rsp_imm32(code, frame))) {
+    return enc_err(fn, "out of memory emitting a traced trap");
   }
+  return 1;
+}
+
+static int mir_trap_emit_message_call(MirFunction *fn, const MirInst *in,
+                                      const BinaryAbi *abi,
+                                      const char *trap_symbol,
+                                      const char *pc_label) {
+  BinaryFunctionContext *ctx = fn->context;
+  BinaryCodeBuffer *code = &ctx->code;
+  size_t disp = 0;
+
   if (!code_generator_binary_emit_cstring_literal_address(
-          g, ctx, in->a.sym ? in->a.sym : "", abi->int_param_registers[0]) ||
+          fn->generator, ctx, in->a.sym ? in->a.sym : "",
+          abi->int_param_registers[0]) ||
       !binary_emit_lea_reg_rip_placeholder(code, abi->int_param_registers[1],
                                            &disp) ||
       !binary_label_fixup_table_add(&ctx->label_fixups, pc_label, disp) ||
@@ -2366,11 +2399,39 @@ static int mir_encode_traced_trap(MirFunction *fn, const MirInst *in,
       !binary_emit_call_placeholder(code, &disp) ||
       !binary_call_relocation_table_add(&ctx->call_relocations, trap_symbol,
                                         disp)) {
-    free(pc_label);
     return enc_err(fn, "out of memory emitting a traced trap");
   }
-  free(pc_label);
   return 1;
+}
+
+static int mir_encode_traced_trap(MirFunction *fn, const MirInst *in,
+                                  const IRInstruction *ir) {
+  const BinaryAbi *abi = code_generator_binary_active_abi();
+  int is_ex = ir->text && strcmp(ir->text, "mettle_crash_trap_ex") == 0;
+  const char *trap_symbol =
+      is_ex ? "mettle_crash_trap_ex" : "mettle_crash_trap";
+  const char *filename =
+      code_generator_runtime_filename(fn->generator, ir->location.filename);
+  char *pc_label = NULL;
+  int ok;
+
+  if (is_ex && !mir_trap_stage_details(fn, in)) {
+    return 0;
+  }
+  pc_label = code_generator_generate_label(fn->generator,
+                                           "mettledbg_trap_pc");
+  if (!pc_label) {
+    return enc_err(fn, "out of memory creating a trap label");
+  }
+  ok = mir_trap_open_site(fn, ir, filename, pc_label, trap_symbol, is_ex);
+  if (ok) {
+    ok = is_ex ? mir_trap_emit_detailed_call(fn, in, ir, abi, trap_symbol,
+                                             pc_label)
+               : mir_trap_emit_message_call(fn, in, abi, trap_symbol,
+                                            pc_label);
+  }
+  free(pc_label);
+  return ok;
 }
 
 static int mir_emit_prologue(MirFunction *fn) {
@@ -2800,113 +2861,37 @@ static int mir_jump_is_fallthrough(const MirFunction *fn, size_t index) {
   return 0;
 }
 
-int mir_encode(MirFunction *fn) {
-  if (!fn || !fn->context) {
-    return 0;
-  }
+typedef struct {
+  size_t lea_off;
+  const MirJumpTable *table;
+} MirPendingTable;
+
+typedef struct {
+  MirFunction *fn;
+  size_t index;
+  size_t fused_byte_load;
+  size_t fused_mask_test;
+  size_t prev_cmpbr;
+  MirPendingTable pending_tables[MIR_MAX_JUMP_TABLES];
+  size_t pending_table_count;
+} MirEncodeState;
+
+typedef int (*MirEncodeHandler)(MirEncodeState *st, const MirInst *in);
+
+static int mir_encode_scalar(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
   BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
 
-  /* --annotate-asm: byte offsets are reported relative to this function's start
-   * (the context's code buffer may already hold earlier functions). */
-  size_t annot_base = ctx->code.size;
-  int annot = mir_annotate_enabled();
-  struct {
-    size_t lea_off;
-    const MirJumpTable *table;
-  } pending_tables[MIR_MAX_JUMP_TABLES];
-  size_t pending_table_count = 0;
-  size_t fused_byte_load = (size_t)-1;
-  size_t fused_mask_test = (size_t)-1;
-  size_t prev_cmpbr = (size_t)-1;
-
-  home_fwd_clear();
-  if (!mir_layout_frame(fn) || !mir_emit_prologue(fn)) {
-    return 0;
-  }
-  if (annot && ctx->code.size > annot_base) {
-    mir_annotate_record_synthetic("prologue", "frame", 0,
-                                  ctx->code.size - annot_base,
-                                  ctx->code.data + annot_base);
-  }
-
-  /* Loop-header alignment: a label that is the target of a BACKWARD branch is a
-   * loop top; pad it to BINARY_LOOP_ALIGN (like gcc -falign-loops) so the hot
-   * loop's instruction fetch does not depend on where the function happened to
-   * land. The pad NOPs sit BEFORE the label, so a back-edge (which jumps to the
-   * label, past the pad) never executes them; only a fall-through into the loop
-   * pays them, once. Pure performance -- it cannot change behaviour. */
-  char *align_label = (char *)calloc(fn->insn_count ? fn->insn_count : 1, 1);
-  if (align_label) {
-    for (size_t b = 0; b < fn->insn_count; b++) {
-      const MirInst *in = &fn->insns[b];
-      if (in->op != MIR_JMP && in->op != MIR_JCC && in->op != MIR_CMPBR &&
-          in->op != MIR_FCMPBR) {
-        continue;
-      }
-      if (in->dst.kind != MIR_OPK_LABEL || !in->dst.sym) {
-        continue;
-      }
-      int d = mir_encode_label_index(fn, in->dst.sym);
-      if (d >= 0 && (size_t)d < b) {
-        /* 1 = align, 2 = align wider: the body from here to this back-edge is
-         * big enough that the extra padding costs nothing next to it. The
-         * FURTHEST back-edge decides, so a nested loop sharing a header is
-         * measured at its full extent. */
-        if (b - (size_t)d >= BINARY_LOOP_BIG_MIR_INSTRUCTIONS ||
-            align_label[d] == 2) {
-          align_label[d] = 2;
-        } else if (b - (size_t)d <= BINARY_LOOP_TIGHT_MIR_INSTRUCTIONS &&
-                   align_label[d] != 1) {
-          align_label[d] = 3;
-        } else {
-          align_label[d] = 1;
-        }
-      }
-    }
-  }
-
-  for (size_t i = 0; i < fn->insn_count; i++) {
-    const MirInst *in = &fn->insns[i];
-    int ok = 1;
-    size_t annot_off = ctx->code.size;
-    home_fwd_note_boundary(in->op);
-    if (in->op == MIR_LABEL && align_label && align_label[i]) {
-      if (align_label[i] == 2) {
-        ctx->wants_wide_loop_alignment = 1;
-        ok = binary_emit_align_code(&ctx->code, BINARY_LOOP_ALIGN_BIG,
-                                    BINARY_LOOP_ALIGN_BIG_MAX_PAD);
-      } else if (align_label[i] == 3) {
-        ctx->wants_wide_loop_alignment = 1;
-        ok = binary_emit_align_code(&ctx->code, BINARY_LOOP_ALIGN_BIG,
-                                    BINARY_LOOP_ALIGN_BIG_MAX_PAD);
-      } else {
-        ok = binary_emit_align_code(&ctx->code, BINARY_LOOP_ALIGN,
-                                    BINARY_LOOP_ALIGN_MAX_PAD);
-      }
-    }
-    if (!ok) {
-      free(align_label);
-      return 0;
-    }
-    if (fn->generator->generate_stack_trace_support && fn->ir_function &&
-        in->ir_index >= 0 &&
-        (size_t)in->ir_index < fn->ir_function->instruction_count) {
-      const IRInstruction *src = &fn->ir_function->instructions[in->ir_index];
-      if (src->location.line > 0 &&
-          !code_generator_binary_emit_runtime_location_marker(
-              fn->generator, ctx, src->location.line, src->location.column,
-              code_generator_runtime_filename(fn->generator,
-                                              src->location.filename))) {
-        free(align_label);
-        return 0;
-      }
-    }
-    switch (in->op) {
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_NOP:
       break;
     case MIR_MOV:
       if (mir_byte_compare_fusable(fn, i)) {
-        fused_byte_load = i;
+        st->fused_byte_load = i;
         break;
       }
       ok = encode_mov(fn, in);
@@ -2917,7 +2902,7 @@ int mir_encode(MirFunction *fn) {
     case MIR_OR:
     case MIR_XOR:
       if (in->op == MIR_AND && mir_mask_test_fusable(fn, i)) {
-        fused_mask_test = i;
+        st->fused_mask_test = i;
         break;
       }
       ok = encode_alu(fn, in);
@@ -2952,6 +2937,21 @@ int mir_encode(MirFunction *fn) {
       ok = store_from(fn, &in->dst, SCRATCH_A);
       break;
     }
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static int mir_encode_divide_shift(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
+
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_IDIV:
       ok = encode_div(fn, in);
       break;
@@ -2970,12 +2970,42 @@ int mir_encode(MirFunction *fn) {
     case MIR_MOVSX:
       ok = encode_extend(fn, in);
       break;
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static int mir_encode_global_access(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
+
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_LOAD_GLOBAL:
       ok = encode_load_global(fn, in);
       break;
     case MIR_STORE_GLOBAL:
       ok = encode_store_global(fn, in);
       break;
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static int mir_encode_float_arith(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
+
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_FDUP:
     case MIR_FEXTHI: {
       /* vmovddup dst,a / vunpckhpd dst,a,a: whole-register writes, so a
@@ -3009,6 +3039,21 @@ int mir_encode(MirFunction *fn) {
     case MIR_FXOR:
       ok = encode_fbinop(fn, in);
       break;
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static int mir_encode_float_convert(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
+
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_CVTSI2F:
       ok = encode_cvtsi2f(fn, in);
       break;
@@ -3052,6 +3097,21 @@ int mir_encode(MirFunction *fn) {
       ok = dst_in_reg ? 1 : store_from(fn, &in->dst, target);
       break;
     }
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static int mir_encode_float_compare(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
+
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_FSETCC: {
       int rok;
       BinaryXmmRegister av = xmm_value(fn, &in->a, FSCRATCH_A, in->width, &rok);
@@ -3093,6 +3153,21 @@ int mir_encode(MirFunction *fn) {
       }
       break;
     }
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static int mir_encode_branch(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
+
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_LABEL:
       if (!binary_label_table_define(&ctx->labels, in->dst.sym,
                                      ctx->code.size)) {
@@ -3131,6 +3206,21 @@ int mir_encode(MirFunction *fn) {
       }
       break;
     }
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static int mir_encode_call(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
+
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_CALL: {
       /* rsp already points at the reserved shadow space (set by the prologue),
        * so just emit the relocated call. Arguments were moved into ABI
@@ -3196,6 +3286,32 @@ int mir_encode(MirFunction *fn) {
       }
       break;
     }
+    case MIR_CALL_INDIRECT: {
+      /* Same frame contract as MIR_CALL: the prologue reserved shadow/stack
+       * argument space, and regalloc kept the target out of any argument
+       * register clobbered by the preceding marshalling moves. */
+      int rok;
+      BinaryGpRegister target = value_reg(fn, &in->a, SCRATCH_A, &rok);
+      if (!rok || !binary_emit_call_reg(&ctx->code, target)) {
+        ok = enc_err(fn, "out of memory emitting indirect call");
+      }
+      break;
+    }
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static int mir_encode_string_op(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
+
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_REP_MOVSB:
     case MIR_REP_STOSB: {
       /* The argument marshalling ran already, so the first three integer
@@ -3249,17 +3365,21 @@ int mir_encode(MirFunction *fn) {
       }
       break;
     }
-    case MIR_CALL_INDIRECT: {
-      /* Same frame contract as MIR_CALL: the prologue reserved shadow/stack
-       * argument space, and regalloc kept the target out of any argument
-       * register clobbered by the preceding marshalling moves. */
-      int rok;
-      BinaryGpRegister target = value_reg(fn, &in->a, SCRATCH_A, &rok);
-      if (!rok || !binary_emit_call_reg(&ctx->code, target)) {
-        ok = enc_err(fn, "out of memory emitting indirect call");
-      }
-      break;
-    }
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static int mir_encode_kernel(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
+
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_SIMD_SLP_MAC: {
       /* Inline SLP MAC kernel. The preceding MIR_MOVs marshalled a/b/out element
        * pointers into RCX/RDX/R8, the k count into R9, and the byte row stride
@@ -3387,6 +3507,21 @@ int mir_encode(MirFunction *fn) {
       }
       break;
     }
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static int mir_encode_outgoing(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
+
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_STORE_OUTARG: {
       /* Store an outgoing stack call argument to [rsp + b.imm]. rsp is fixed
        * after the prologue and the outgoing region is reserved there, so this
@@ -3476,6 +3611,21 @@ int mir_encode(MirFunction *fn) {
       }
       break;
     }
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static int mir_encode_address(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
+
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_LEA: {
       /* dst <- address of [base + index*scale + disp]. base/index are vregs
        * (index optional). Mirrors the scaled-LOAD address staging but
@@ -3610,6 +3760,21 @@ int mir_encode(MirFunction *fn) {
       }
       break;
     }
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static int mir_encode_literal_address(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
+
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_LEA_LOCAL: {
       /* dst <- address of local vreg a's stack home. The allocator forces an
        * address-taken value to spill, so a is always memory-resident. */
@@ -3667,6 +3832,21 @@ int mir_encode(MirFunction *fn) {
       }
       break;
     }
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static int mir_encode_trap(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
+
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_TRAP: {
       if (fn->generator->generate_stack_trace_support && fn->ir_function &&
           in->ir_index >= 0 &&
@@ -3727,136 +3907,194 @@ int mir_encode(MirFunction *fn) {
       }
       break;
     }
-    case MIR_CMPBR: {
-      /* cmp a,b ; j<cc> label  (fused compare-and-branch). */
-      int rok;
-      BinaryGpRegister cbase;
-      int cdisp;
-      BinaryGpRegister areg;
-      /* `a < b || (a == b && ...)` -- a lexicographic compare, and the shape
-       * every comparator and heap sift-down is written in -- emits the same
-       * cmp twice with two condition codes. Only the first branch stands
-       * between them and a jcc leaves the flags alone, so the second compare
-       * is recomputing what the register already holds. */
-      {
-        size_t p = i;
-        while (p > 0 && prev_cmpbr != p - 1 &&
-               mir_cmp_gap_is_empty(fn, &fn->insns[p - 1])) {
-          p--;
-        }
-        if (p > 0 && prev_cmpbr == p - 1) {
-          const MirInst *pv = &fn->insns[prev_cmpbr];
-          if (pv->width == in->width && pv->is_unsigned == in->is_unsigned &&
-              !pv->is_float && !in->is_float &&
-              mir_cmp_operand_reusable(fn, &pv->a, &in->a) &&
-              mir_cmp_operand_reusable(fn, &pv->b, &in->b)) {
-            size_t reuse_off = 0;
-            if (!binary_emit_jcc_placeholder(&ctx->code, in->cc,
-                                             &reuse_off) ||
-                !binary_label_fixup_table_add(&ctx->label_fixups,
-                                              in->dst.sym, reuse_off)) {
-              ok = enc_err(fn, "out of memory in cmpbr");
-            }
-            prev_cmpbr = i;
-            break;
-          }
-        }
-      }
-      areg = value_reg(fn, &in->a, SCRATCH_A, &rok);
-      if (!rok) {
-        ok = 0;
-        break;
-      }
-      if (fused_mask_test != (size_t)-1 && fused_mask_test + 1 == i) {
-        const MirInst *and_op = &fn->insns[i - 1];
-        BinaryGpRegister src =
-            (BinaryGpRegister)fn->vregs[and_op->a.vreg].phys;
-        if (!binary_emit_test_reg_imm32(&ctx->code, src,
-                                        (uint32_t)and_op->b.imm)) {
-          ok = enc_err(fn, "out of memory in fused mask test");
-          break;
-        }
-      } else if (fused_byte_load != (size_t)-1 && fused_byte_load + 1 == i) {
-        const MirMem *m = &fn->insns[i - 1].a.mem;
-        BinaryGpRegister mb = (BinaryGpRegister)fn->vregs[m->base].phys;
-        int need_rex = (areg >= 4 && areg <= 7);
-        int emitted;
-        if (m->index != MIR_VREG_NONE) {
-          BinaryGpRegister mi = (BinaryGpRegister)fn->vregs[m->index].phys;
-          emitted = need_rex ? binary_emit_memory_access_sib_forced(
-                                   &ctx->code, 0, 0, 0x3A, 0, 0, areg, mb, mi,
-                                   m->scale, m->disp)
-                             : binary_emit_memory_access_sib(
-                                   &ctx->code, 0, 0, 0x3A, 0, 0, areg, mb, mi,
-                                   m->scale, m->disp);
-        } else {
-          emitted = need_rex ? binary_emit_memory_access_ex_forced(
-                                   &ctx->code, 0, 0, 0x3A, 0, 0, areg, mb,
-                                   m->disp)
-                             : binary_emit_memory_access_ex(&ctx->code, 0, 0,
-                                                            0x3A, 0, 0, areg,
-                                                            mb, m->disp);
-        }
-        if (!emitted) {
-          ok = enc_err(fn, "out of memory in fused byte compare");
-          break;
-        }
-      } else if (in->width == 4) {
-        /* 4-byte (int32/uint32) compare: 32-bit cmp ignores garbage high bits a
-         * 64-bit MIR value may carry (see encode_setcc). An immediate folds into
-         * the 32-bit cmp directly (its low 32 bits are the constant); only a
-         * register operand needs the reg-reg form. */
-        if (in->b.kind == MIR_OPK_IMM) {
-          if (!binary_emit_cmp_reg_imm_w32(&ctx->code, areg,
-                                           (uint32_t)in->b.imm)) {
-            ok = enc_err(fn, "out of memory in cmpbr32 imm");
-            break;
-          }
-        } else if (gp_home_mem(fn, &in->b, &cbase, &cdisp)) {
-          if (!binary_emit_alu_reg_mem(&ctx->code, 0x39, areg, cbase, cdisp,
-                                       4)) {
-            ok = enc_err(fn, "out of memory in cmpbr32 mem");
-            break;
-          }
-        } else {
-          BinaryGpRegister breg = value_reg(fn, &in->b, SCRATCH_B, &rok);
-          if (!rok || !binary_emit_cmp_reg_reg32(&ctx->code, areg, breg)) {
-            ok = enc_err(fn, "out of memory in cmpbr32");
-            break;
-          }
-        }
-      } else if (in->b.kind == MIR_OPK_IMM &&
-                 code_generator_binary_immediate_fits_signed_32(in->b.imm)) {
-        if (!binary_emit_cmp_reg_imm32(&ctx->code, areg, (uint32_t)in->b.imm)) {
-          ok = enc_err(fn, "out of memory in cmpbr");
-          break;
-        }
-      } else if (gp_home_mem(fn, &in->b, &cbase, &cdisp)) {
-        if (!binary_emit_alu_reg_mem(&ctx->code, 0x39, areg, cbase, cdisp, 8)) {
-          ok = enc_err(fn, "out of memory in cmpbr mem");
-          break;
-        }
-      } else {
-        BinaryGpRegister breg = value_reg(fn, &in->b, SCRATCH_B, &rok);
-        if (!rok || !binary_emit_cmp_reg_reg(&ctx->code, areg, breg)) {
-          ok = enc_err(fn, "out of memory in cmpbr");
-          break;
-        }
-      }
-      size_t off = 0;
-      if (!binary_emit_jcc_placeholder(&ctx->code, in->cc, &off) ||
-          !binary_label_fixup_table_add(&ctx->label_fixups, in->dst.sym, off)) {
-        ok = enc_err(fn, "out of memory in cmpbr");
-      }
-      prev_cmpbr = i;
-      break;
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static int mir_cmpbr_reuses_flags(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  const MirInst *prev;
+  size_t p = st->index;
+
+  while (p > 0 && st->prev_cmpbr != p - 1 &&
+         mir_cmp_gap_is_empty(fn, &fn->insns[p - 1])) {
+    p--;
+  }
+  if (p == 0 || st->prev_cmpbr != p - 1) {
+    return 0;
+  }
+  prev = &fn->insns[st->prev_cmpbr];
+  return prev->width == in->width && prev->is_unsigned == in->is_unsigned &&
+         !prev->is_float && !in->is_float &&
+         mir_cmp_operand_reusable(fn, &prev->a, &in->a) &&
+         mir_cmp_operand_reusable(fn, &prev->b, &in->b);
+}
+
+static int mir_cmpbr_emit_branch(MirEncodeState *st, const MirInst *in) {
+  BinaryFunctionContext *ctx = st->fn->context;
+  size_t off = 0;
+
+  if (!binary_emit_jcc_placeholder(&ctx->code, in->cc, &off) ||
+      !binary_label_fixup_table_add(&ctx->label_fixups, in->dst.sym, off)) {
+    return enc_err(st->fn, "out of memory in cmpbr");
+  }
+  return 1;
+}
+
+static int mir_cmpbr_fused_mask_test(MirEncodeState *st) {
+  MirFunction *fn = st->fn;
+  const MirInst *and_op = &fn->insns[st->index - 1];
+  BinaryGpRegister src = (BinaryGpRegister)fn->vregs[and_op->a.vreg].phys;
+
+  if (!binary_emit_test_reg_imm32(&fn->context->code, src,
+                                  (uint32_t)and_op->b.imm)) {
+    return enc_err(fn, "out of memory in fused mask test");
+  }
+  return 1;
+}
+
+static int mir_cmpbr_fused_byte_load(MirEncodeState *st,
+                                     BinaryGpRegister areg) {
+  MirFunction *fn = st->fn;
+  BinaryCodeBuffer *code = &fn->context->code;
+  const MirMem *m = &fn->insns[st->index - 1].a.mem;
+  BinaryGpRegister base = (BinaryGpRegister)fn->vregs[m->base].phys;
+  int need_rex = areg >= 4 && areg <= 7;
+  int emitted;
+
+  if (m->index != MIR_VREG_NONE) {
+    BinaryGpRegister index = (BinaryGpRegister)fn->vregs[m->index].phys;
+    emitted = need_rex ? binary_emit_memory_access_sib_forced(
+                             code, 0, 0, 0x3A, 0, 0, areg, base, index,
+                             m->scale, m->disp)
+                       : binary_emit_memory_access_sib(code, 0, 0, 0x3A, 0, 0,
+                                                       areg, base, index,
+                                                       m->scale, m->disp);
+  } else {
+    emitted = need_rex ? binary_emit_memory_access_ex_forced(
+                             code, 0, 0, 0x3A, 0, 0, areg, base, m->disp)
+                       : binary_emit_memory_access_ex(code, 0, 0, 0x3A, 0, 0,
+                                                      areg, base, m->disp);
+  }
+  if (!emitted) {
+    return enc_err(fn, "out of memory in fused byte compare");
+  }
+  return 1;
+}
+
+static int mir_cmpbr_narrow_compare(MirEncodeState *st, const MirInst *in,
+                                    BinaryGpRegister areg) {
+  MirFunction *fn = st->fn;
+  BinaryCodeBuffer *code = &fn->context->code;
+  BinaryGpRegister base;
+  int disp;
+  int rok = 1;
+
+  if (in->b.kind == MIR_OPK_IMM) {
+    if (!binary_emit_cmp_reg_imm_w32(code, areg, (uint32_t)in->b.imm)) {
+      return enc_err(fn, "out of memory in cmpbr32 imm");
     }
+    return 1;
+  }
+  if (gp_home_mem(fn, &in->b, &base, &disp)) {
+    if (!binary_emit_alu_reg_mem(code, 0x39, areg, base, disp, 4)) {
+      return enc_err(fn, "out of memory in cmpbr32 mem");
+    }
+    return 1;
+  }
+  {
+    BinaryGpRegister breg = value_reg(fn, &in->b, SCRATCH_B, &rok);
+    if (!rok || !binary_emit_cmp_reg_reg32(code, areg, breg)) {
+      return enc_err(fn, "out of memory in cmpbr32");
+    }
+  }
+  return 1;
+}
+
+static int mir_cmpbr_wide_compare(MirEncodeState *st, const MirInst *in,
+                                  BinaryGpRegister areg) {
+  MirFunction *fn = st->fn;
+  BinaryCodeBuffer *code = &fn->context->code;
+  BinaryGpRegister base;
+  int disp;
+  int rok = 1;
+
+  if (in->b.kind == MIR_OPK_IMM &&
+      code_generator_binary_immediate_fits_signed_32(in->b.imm)) {
+    if (!binary_emit_cmp_reg_imm32(code, areg, (uint32_t)in->b.imm)) {
+      return enc_err(fn, "out of memory in cmpbr");
+    }
+    return 1;
+  }
+  if (gp_home_mem(fn, &in->b, &base, &disp)) {
+    if (!binary_emit_alu_reg_mem(code, 0x39, areg, base, disp, 8)) {
+      return enc_err(fn, "out of memory in cmpbr mem");
+    }
+    return 1;
+  }
+  {
+    BinaryGpRegister breg = value_reg(fn, &in->b, SCRATCH_B, &rok);
+    if (!rok || !binary_emit_cmp_reg_reg(code, areg, breg)) {
+      return enc_err(fn, "out of memory in cmpbr");
+    }
+  }
+  return 1;
+}
+
+static int mir_encode_compare_branch(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  size_t i = st->index;
+  BinaryGpRegister areg;
+  int rok = 1;
+  int ok;
+
+  if (in->op != MIR_CMPBR) {
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  if (mir_cmpbr_reuses_flags(st, in)) {
+    ok = mir_cmpbr_emit_branch(st, in);
+    st->prev_cmpbr = i;
+    return ok;
+  }
+  areg = value_reg(fn, &in->a, SCRATCH_A, &rok);
+  if (!rok) {
+    return 0;
+  }
+  if (st->fused_mask_test != (size_t)-1 && st->fused_mask_test + 1 == i) {
+    ok = mir_cmpbr_fused_mask_test(st);
+  } else if (st->fused_byte_load != (size_t)-1 &&
+             st->fused_byte_load + 1 == i) {
+    ok = mir_cmpbr_fused_byte_load(st, areg);
+  } else if (in->width == 4) {
+    ok = mir_cmpbr_narrow_compare(st, in, areg);
+  } else {
+    ok = mir_cmpbr_wide_compare(st, in, areg);
+  }
+  if (!ok) {
+    return 0;
+  }
+  ok = mir_cmpbr_emit_branch(st, in);
+  st->prev_cmpbr = i;
+  return ok;
+}
+
+static int mir_encode_jump_table(MirEncodeState *st, const MirInst *in) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+  size_t i = st->index;
+  int ok = 1;
+
+  (void)ctx;
+  (void)i;
+  switch (in->op) {
     case MIR_JMP_TABLE: {
       const MirJumpTable *tbl = (const MirJumpTable *)in->aux;
       int rok;
       BinaryGpRegister idx;
       size_t lea_off = 0;
-      if (!tbl || pending_table_count >= MIR_MAX_JUMP_TABLES) {
+      if (!tbl || st->pending_table_count >= MIR_MAX_JUMP_TABLES) {
         ok = enc_err(fn, "jump table without a target list");
         break;
       }
@@ -3873,9 +4111,9 @@ int mir_encode(MirFunction *fn) {
         ok = enc_err(fn, "out of memory in jump table");
         break;
       }
-      pending_tables[pending_table_count].lea_off = lea_off;
-      pending_tables[pending_table_count].table = tbl;
-      pending_table_count++;
+      st->pending_tables[st->pending_table_count].lea_off = lea_off;
+      st->pending_tables[st->pending_table_count].table = tbl;
+      st->pending_table_count++;
       break;
     }
     case MIR_RET:
@@ -3884,39 +4122,169 @@ int mir_encode(MirFunction *fn) {
     case MIR_INLINE_ASM:
       ok = mir_encode_inline_asm(fn, in);
       break;
-    default:
-      ok = enc_err(fn, "unsupported MIR opcode in encoder");
-      break;
+  default:
+    return enc_err(fn, "unsupported MIR opcode in encoder");
+  }
+  return ok;
+}
+
+static const MirEncodeHandler MIR_ENCODERS[MIR_OPCODE_COUNT] = {
+    [MIR_NOP] = mir_encode_scalar,
+    [MIR_MOV] = mir_encode_scalar,
+    [MIR_ADD] = mir_encode_scalar,
+    [MIR_SUB] = mir_encode_scalar,
+    [MIR_AND] = mir_encode_scalar,
+    [MIR_OR] = mir_encode_scalar,
+    [MIR_XOR] = mir_encode_scalar,
+    [MIR_IMUL] = mir_encode_scalar,
+    [MIR_NEG] = mir_encode_scalar,
+    [MIR_NOT] = mir_encode_scalar,
+    [MIR_POPCNT] = mir_encode_scalar,
+    [MIR_IDIV] = mir_encode_divide_shift,
+    [MIR_MULHI] = mir_encode_divide_shift,
+    [MIR_SHL] = mir_encode_divide_shift,
+    [MIR_SHR] = mir_encode_divide_shift,
+    [MIR_SAR] = mir_encode_divide_shift,
+    [MIR_SETCC] = mir_encode_divide_shift,
+    [MIR_MOVZX] = mir_encode_divide_shift,
+    [MIR_MOVSX] = mir_encode_divide_shift,
+    [MIR_LOAD_GLOBAL] = mir_encode_global_access,
+    [MIR_STORE_GLOBAL] = mir_encode_global_access,
+    [MIR_FDUP] = mir_encode_float_arith,
+    [MIR_FEXTHI] = mir_encode_float_arith,
+    [MIR_FADD] = mir_encode_float_arith,
+    [MIR_FSUB] = mir_encode_float_arith,
+    [MIR_FMUL] = mir_encode_float_arith,
+    [MIR_FDIV] = mir_encode_float_arith,
+    [MIR_FXOR] = mir_encode_float_arith,
+    [MIR_CVTSI2F] = mir_encode_float_convert,
+    [MIR_CVTF2SI] = mir_encode_float_convert,
+    [MIR_CVTF2F] = mir_encode_float_convert,
+    [MIR_CVTPH2PS] = mir_encode_float_convert,
+    [MIR_CVTPS2PH] = mir_encode_float_convert,
+    [MIR_MOVD_TO_XMM] = mir_encode_float_convert,
+    [MIR_MOVD_TO_GP] = mir_encode_float_convert,
+    [MIR_FSETCC] = mir_encode_float_compare,
+    [MIR_FCMPBR] = mir_encode_float_compare,
+    [MIR_LABEL] = mir_encode_branch,
+    [MIR_JMP] = mir_encode_branch,
+    [MIR_JCC] = mir_encode_branch,
+    [MIR_CALL] = mir_encode_call,
+    [MIR_HEAP_NEW] = mir_encode_call,
+    [MIR_SYSCALL] = mir_encode_call,
+    [MIR_CALL_INDIRECT] = mir_encode_call,
+    [MIR_REP_MOVSB] = mir_encode_string_op,
+    [MIR_REP_STOSB] = mir_encode_string_op,
+    [MIR_SIMD_SLP_MAC] = mir_encode_kernel,
+    [MIR_SIMD_FILL] = mir_encode_kernel,
+    [MIR_SIMD_AFFINE_MAP_F32] = mir_encode_kernel,
+    [MIR_SIMD_AFFINE_MAP_F64] = mir_encode_kernel,
+    [MIR_SIMD_VLOOP] = mir_encode_kernel,
+    [MIR_IR_KERNEL] = mir_encode_kernel,
+    [MIR_SIMD_SILU_F32] = mir_encode_kernel,
+    [MIR_STORE_OUTARG] = mir_encode_outgoing,
+    [MIR_CMOV] = mir_encode_outgoing,
+    [MIR_PREFETCH] = mir_encode_outgoing,
+    [MIR_LEA] = mir_encode_address,
+    [MIR_LEA_OUTARG] = mir_encode_address,
+    [MIR_LEA_GLOBAL] = mir_encode_address,
+    [MIR_LEA_FUNC] = mir_encode_address,
+    [MIR_LEA_LOCAL] = mir_encode_literal_address,
+    [MIR_LEA_CSTR] = mir_encode_literal_address,
+    [MIR_LEA_STRLIT] = mir_encode_literal_address,
+    [MIR_TRAP] = mir_encode_trap,
+    [MIR_CMPBR] = mir_encode_compare_branch,
+    [MIR_JMP_TABLE] = mir_encode_jump_table,
+    [MIR_RET] = mir_encode_jump_table,
+    [MIR_INLINE_ASM] = mir_encode_jump_table,
+};
+
+static char *mir_scan_loop_alignment(const MirFunction *fn) {
+  char *align_label = (char *)calloc(fn->insn_count ? fn->insn_count : 1, 1);
+
+  if (!align_label) {
+    return NULL;
+  }
+  for (size_t b = 0; b < fn->insn_count; b++) {
+    const MirInst *in = &fn->insns[b];
+    int header;
+
+    if (in->op != MIR_JMP && in->op != MIR_JCC && in->op != MIR_CMPBR &&
+        in->op != MIR_FCMPBR) {
+      continue;
     }
-    if (annot && ok && ctx->code.size > annot_off) {
-      mir_annotate_record(fn, in, (int)i, annot_off - annot_base,
-                          ctx->code.size - annot_off,
-                          ctx->code.data + annot_off);
+    if (in->dst.kind != MIR_OPK_LABEL || !in->dst.sym) {
+      continue;
     }
-    if (!ok) {
-      free(align_label);
-      return 0;
+    header = mir_encode_label_index(fn, in->dst.sym);
+    if (header < 0 || (size_t)header >= b) {
+      continue;
+    }
+    if (b - (size_t)header >= BINARY_LOOP_BIG_MIR_INSTRUCTIONS ||
+        align_label[header] == 2) {
+      align_label[header] = 2;
+    } else if (b - (size_t)header <= BINARY_LOOP_TIGHT_MIR_INSTRUCTIONS &&
+               align_label[header] != 1) {
+      align_label[header] = 3;
+    } else {
+      align_label[header] = 1;
     }
   }
-  free(align_label);
+  return align_label;
+}
 
-  for (size_t t = 0; t < pending_table_count; t++) {
-    const MirJumpTable *tbl = pending_tables[t].table;
+static int mir_encode_loop_alignment(MirFunction *fn, char wanted) {
+  BinaryFunctionContext *ctx = fn->context;
+
+  if (wanted != 2 && wanted != 3) {
+    return binary_emit_align_code(&ctx->code, BINARY_LOOP_ALIGN,
+                                  BINARY_LOOP_ALIGN_MAX_PAD);
+  }
+  ctx->wants_wide_loop_alignment = 1;
+  return binary_emit_align_code(&ctx->code, BINARY_LOOP_ALIGN_BIG,
+                                BINARY_LOOP_ALIGN_BIG_MAX_PAD);
+}
+
+static int mir_encode_location_marker(MirFunction *fn, const MirInst *in) {
+  const IRInstruction *src;
+
+  if (!fn->generator->generate_stack_trace_support || !fn->ir_function ||
+      in->ir_index < 0 ||
+      (size_t)in->ir_index >= fn->ir_function->instruction_count) {
+    return 1;
+  }
+  src = &fn->ir_function->instructions[in->ir_index];
+  if (src->location.line <= 0) {
+    return 1;
+  }
+  return code_generator_binary_emit_runtime_location_marker(
+      fn->generator, fn->context, src->location.line, src->location.column,
+      code_generator_runtime_filename(fn->generator, src->location.filename));
+}
+
+static int mir_encode_jump_tables(MirEncodeState *st) {
+  MirFunction *fn = st->fn;
+  BinaryFunctionContext *ctx = fn->context;
+
+  for (size_t t = 0; t < st->pending_table_count; t++) {
+    const MirJumpTable *tbl = st->pending_tables[t].table;
     size_t table_off;
+
     while ((ctx->code.size & 3u) != 0u) {
       if (!binary_code_buffer_append_u8(&ctx->code, 0xCC)) {
         return enc_err(fn, "out of memory in jump table");
       }
     }
     table_off = ctx->code.size;
-    if (!binary_function_context_patch_rel32(ctx, pending_tables[t].lea_off,
+    if (!binary_function_context_patch_rel32(ctx, st->pending_tables[t].lea_off,
                                              table_off)) {
       return enc_err(fn, "jump table out of range");
     }
     for (size_t e = 0; e < tbl->count; e++) {
-      BinaryLabelEntry *label = binary_label_table_get(&ctx->labels,
-                                                       tbl->labels[e]);
+      BinaryLabelEntry *label =
+          binary_label_table_get(&ctx->labels, tbl->labels[e]);
       long long delta;
+
       if (!label) {
         return enc_err(fn, "undefined jump table target");
       }
@@ -3928,11 +4296,78 @@ int mir_encode(MirFunction *fn) {
       }
     }
   }
-
-  /* Resolve label/jump rel32 fixups against the defined labels. */
-  if (!code_generator_binary_resolve_fixups(fn->generator, ctx,
-                                            ctx->code.size)) {
-    return 0;
-  }
   return 1;
 }
+
+static int mir_encode_instruction(MirEncodeState *st, const MirInst *in) {
+  MirEncodeHandler handler = (unsigned)in->op < (unsigned)MIR_OPCODE_COUNT
+                                 ? MIR_ENCODERS[in->op]
+                                 : NULL;
+
+  if (!handler) {
+    return enc_err(st->fn, "unsupported MIR opcode in encoder");
+  }
+  return handler(st, in);
+}
+
+int mir_encode(MirFunction *fn) {
+  BinaryFunctionContext *ctx = NULL;
+  MirEncodeState st;
+  size_t annot_base;
+  char *align_label = NULL;
+  int annot;
+  int ok = 1;
+
+  if (!fn || !fn->context) {
+    return 0;
+  }
+  ctx = fn->context;
+  annot_base = ctx->code.size;
+  annot = mir_annotate_enabled();
+  memset(&st, 0, sizeof(st));
+  st.fn = fn;
+  st.fused_byte_load = (size_t)-1;
+  st.fused_mask_test = (size_t)-1;
+  st.prev_cmpbr = (size_t)-1;
+
+  home_fwd_clear();
+  if (!mir_layout_frame(fn) || !mir_emit_prologue(fn)) {
+    return 0;
+  }
+  if (annot && ctx->code.size > annot_base) {
+    mir_annotate_record_synthetic("prologue", "frame", 0,
+                                  ctx->code.size - annot_base,
+                                  ctx->code.data + annot_base);
+  }
+  align_label = mir_scan_loop_alignment(fn);
+
+  for (size_t i = 0; i < fn->insn_count && ok; i++) {
+    const MirInst *in = &fn->insns[i];
+    size_t annot_off = ctx->code.size;
+
+    st.index = i;
+    home_fwd_note_boundary(in->op);
+    if (in->op == MIR_LABEL && align_label && align_label[i] &&
+        !mir_encode_loop_alignment(fn, align_label[i])) {
+      ok = 0;
+      break;
+    }
+    if (!mir_encode_location_marker(fn, in)) {
+      ok = 0;
+      break;
+    }
+    ok = mir_encode_instruction(&st, in);
+    if (annot && ok && ctx->code.size > annot_off) {
+      mir_annotate_record(fn, in, (int)i, annot_off - annot_base,
+                          ctx->code.size - annot_off,
+                          ctx->code.data + annot_off);
+    }
+  }
+  free(align_label);
+  if (!ok || !mir_encode_jump_tables(&st)) {
+    return 0;
+  }
+  return code_generator_binary_resolve_fixups(fn->generator, ctx,
+                                              ctx->code.size);
+}
+
