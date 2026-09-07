@@ -1720,12 +1720,6 @@ static int mir_call_is_supported(CodeGenerator *g,
       mir_call_trace("arg_aggregate_scalar_param");
       return 0;
     }
-    if (arg->kind == IR_OPERAND_STRING &&
-        !code_generator_binary_type_is_cstring(pt) &&
-        !code_generator_binary_type_is_string(pt)) {
-      mir_call_trace("arg_string_non_cstring");
-      return 0;
-    }
   }
   if (in->dest.kind != IR_OPERAND_NONE && in->dest.kind != IR_OPERAND_TEMP &&
       in->dest.kind != IR_OPERAND_SYMBOL) {
@@ -2126,7 +2120,12 @@ static int mir_gate_select(CodeGenerator *generator,
      * machinery can source: a struct LOCAL or TEMP home (a call result
      * lands in the temp's home via the hidden pointer), a by-ref param's
      * pointee, a global aggregate, or a string literal. */
-    if (mir_type_is_indirect_aggregate(generator,
+    /* A RETURN carrying no value in a struct-returning function is the
+     * fall-through the lowering appends after the real `return x`: there is
+     * nothing to copy, so it is just the epilogue. The baseline emits it the
+     * same way. */
+    if (in->lhs.kind != IR_OPERAND_NONE &&
+        mir_type_is_indirect_aggregate(generator,
                                        ir_function->return_type_name) &&
         !mir_indirect_source_is_supported(generator, ir_function, &in->lhs)) {
       return mir_trace_bail(ir_function, "return:indirect_nonlocal");
@@ -5500,6 +5499,22 @@ static int mir_lower_return(MirFunction *fn, CodeGenerator *g,
       return mir_emit1(fn, MIR_RET, mir_op_none(), mir_op_none(), mir_op_none(),
                        8, 0, 0);
     }
+    /* The valueless fall-through of a struct-returning function: hand back the
+     * out-pointer the caller gave us, which is all the ABI asks for, and let
+     * the epilogue run. Nothing was computed to copy. */
+    if (fn->returns_indirect && in->lhs.kind == IR_OPERAND_NONE) {
+      if (!mir_emit_global_writebacks(fn, g, map, wb)) {
+        return 0;
+      }
+      if (fn->indirect_return_vreg != MIR_VREG_NONE &&
+          !mir_emit1(fn, MIR_MOV, mir_op_phys(BINARY_GP_RAX, MIR_RC_GP),
+                     mir_op_vreg(fn->indirect_return_vreg), mir_op_none(), 8,
+                     0, 0)) {
+        return 0;
+      }
+      return mir_emit1(fn, MIR_RET, mir_op_none(), mir_op_none(),
+                       mir_op_none(), 8, 0, 0);
+    }
     if (fn->returns_indirect && (in->lhs.kind == IR_OPERAND_SYMBOL ||
                                  in->lhs.kind == IR_OPERAND_TEMP ||
                                  in->lhs.kind == IR_OPERAND_STRING)) {
@@ -5780,6 +5795,29 @@ static int mir_emit_string_literal_arg(MirFunction *fn, const IROperand *arg,
   return mir_emit1(fn, MIR_LEA_STRLIT, dst, lit, mir_op_none(), 8, 0, 0);
 }
 
+/* The value of a call argument. A string LOCAL is the one operand whose value
+ * is not what its vreg holds: under this backend's convention an 8-byte string
+ * VALUE is the address of its {chars,length} record, so the argument is a LEA
+ * of the local's home. Reading the vreg instead hands over the first field,
+ * the characters pointer, which is a different address entirely. The address
+ * path (mir_address_operand) already knew this; the call path did not, and
+ * `--safe` caught it by registering an origin against the wrong slot. */
+static MirOperand mir_call_arg_operand(MirFunction *fn, CodeGenerator *g,
+                                       BinaryFunctionContext *ctx,
+                                       MirNameMap *map, const IROperand *arg) {
+  if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
+      mir_name_is_string_local(g, fn->ir_function, arg->name)) {
+    MirVregId home = mir_emit_indirect_source_addr(fn, g, ctx, map,
+                                                   fn->ir_function, arg, 16);
+    if (home == MIR_VREG_NONE) {
+      fn->has_error = 1;
+      return mir_op_none();
+    }
+    return mir_op_vreg(home);
+  }
+  return mir_gp_value_operand(fn, g, ctx, map, arg);
+}
+
 static int mir_marshal_stack_args(const MirCallArgs *c) {
   MirFunction *fn = c->fn;
   CodeGenerator *g = c->g;
@@ -5879,7 +5917,7 @@ static int mir_marshal_stack_args(const MirCallArgs *c) {
       }
       val = mir_op_vreg(t);
     } else {
-      val = mir_gp_value_operand(fn, g, ctx, map, &in->arguments[a]);
+      val = mir_call_arg_operand(fn, g, ctx, map, &in->arguments[a]);
     }
     if (!mir_emit1(fn, MIR_STORE_OUTARG, mir_op_none(), val,
                    mir_op_imm(slot), 8, 0, 0)) {
@@ -5950,7 +5988,7 @@ static int mir_marshal_gp_args(const MirCallArgs *c) {
       }
       continue;
     }
-    MirOperand arg = mir_gp_value_operand(fn, g, ctx, map, &in->arguments[a]);
+    MirOperand arg = mir_call_arg_operand(fn, g, ctx, map, &in->arguments[a]);
     if (!mir_emit1(fn, MIR_MOV, mir_op_phys(reg, MIR_RC_GP), arg,
                    mir_op_none(), 8, 0, 0)) {
       return 0;
@@ -6598,7 +6636,7 @@ static int mir_marshal_indirect_gp(MirFunction *fn, CodeGenerator *g,
       }
       continue;
     }
-    MirOperand arg = mir_gp_value_operand(fn, g, ctx, map, &in->arguments[a]);
+    MirOperand arg = mir_call_arg_operand(fn, g, ctx, map, &in->arguments[a]);
     if (!mir_emit1(fn, MIR_MOV, mir_op_phys(reg, MIR_RC_GP), arg,
                    mir_op_none(), 8, 0, 0)) {
       return 0;
