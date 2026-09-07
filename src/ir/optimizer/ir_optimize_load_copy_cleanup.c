@@ -771,107 +771,115 @@ static int ir_chain_index_less(const void *a, const void *b) {
   return x < y ? -1 : x > y ? 1 : 0;
 }
 
+static int ir_hoist_invariant_at_header(IRFunction *function,
+                                        size_t header, int *changed) {
+  char loop_label[128];
+  size_t latch = 0;
+  {
+    const IRInstruction *label = &function->instructions[header];
+    if (label->op != IR_OP_LABEL ||
+        !ir_cleanup_label_is_loop_header(label->text) ||
+        snprintf(loop_label, sizeof(loop_label), "%s", label->text) >=
+            (int)sizeof(loop_label)) {
+      return 1;
+    }
+  }
+  latch = ir_cleanup_loop_latch(function, header, loop_label);
+  if (!latch || header == 0) {
+    return 1;
+  }
+  {
+    size_t p = header - 1;
+    while (p > 0 && function->instructions[p].op == IR_OP_NOP) {
+      p--;
+    }
+    IROpcode prev = function->instructions[p].op;
+    if (prev == IR_OP_JUMP || prev == IR_OP_RETURN ||
+        prev == IR_OP_BRANCH_ZERO || prev == IR_OP_BRANCH_EQ) {
+      return 1;
+    }
+  }
+  for (size_t i = header + 1; i < latch; i++) {
+    const IRInstruction *ins = &function->instructions[i];
+    const char *name = NULL;
+    size_t writes = 0;
+    int read_before = 0;
+    size_t chain[IR_ASSIGN_CHAIN_MAX];
+    size_t chain_count = 0;
+    size_t moved = 0;
+    if (ins->op != IR_OP_ASSIGN || ins->dest.kind != IR_OPERAND_SYMBOL ||
+        !ins->dest.name || ins->is_volatile) {
+      continue;
+    }
+    name = ins->dest.name;
+    if (ir_function_local_declared_type(function, name) == NULL ||
+        ir_symbol_address_taken(function, name) ||
+        (strncmp(name, "ir_row_", 7) != 0 &&
+         strncmp(name, "ir_view_", 8) != 0)) {
+      continue;
+    }
+    for (size_t k = 0; k < function->instruction_count; k++) {
+      const IRInstruction *other = &function->instructions[k];
+      if (ir_instruction_writes_destination(other) &&
+          ir_operand_is_symbol_named(&other->dest, name)) {
+        writes++;
+      }
+    }
+    if (writes != 1) {
+      continue;
+    }
+    for (size_t k = header; k < i && !read_before; k++) {
+      const IRInstruction *other = &function->instructions[k];
+      read_before = ir_operand_is_symbol_named(&other->lhs, name) ||
+                    ir_operand_is_symbol_named(&other->rhs, name) ||
+                    (other->op == IR_OP_STORE &&
+                     ir_operand_is_symbol_named(&other->dest, name));
+      for (size_t a = 0; a < other->argument_count && !read_before; a++) {
+        read_before = ir_operand_is_symbol_named(&other->arguments[a], name);
+      }
+    }
+    if (read_before || ir_symbol_live_after_loop(function, latch + 1, name)) {
+      continue;
+    }
+    if (!ir_chain_collect(function, header, latch, &ins->lhs, chain,
+                          &chain_count, 0)) {
+      continue;
+    }
+    chain[chain_count++] = i;
+    qsort(chain, chain_count, sizeof(chain[0]), ir_chain_index_less);
+    for (size_t k = 0; k < chain_count; k++) {
+      IRInstruction hoisted;
+      size_t at = chain[k] + moved;
+      if (!ir_clone_instruction_plain(&function->instructions[at],
+                                      &hoisted)) {
+        return 0;
+      }
+      ir_instruction_make_nop(&function->instructions[at]);
+      if (!ir_function_insert_instruction(function, header + moved,
+                                          &hoisted)) {
+        ir_instruction_destroy_storage(&hoisted);
+        return 0;
+      }
+      ir_instruction_destroy_storage(&hoisted);
+      moved++;
+    }
+    header += moved;
+    latch += moved;
+    i += moved;
+    if (changed) {
+      *changed = 1;
+    }
+  }
+  return 1;
+}
+
 int ir_hoist_invariant_assigns_pass(IRFunction *function, int *changed) {
   if (!function) {
     return 0;
   }
   for (size_t header = 0; header < function->instruction_count; header++) {
-    char loop_label[128];
-    size_t latch = 0;
-    {
-      const IRInstruction *label = &function->instructions[header];
-      if (label->op != IR_OP_LABEL ||
-          !ir_cleanup_label_is_loop_header(label->text) ||
-          snprintf(loop_label, sizeof(loop_label), "%s", label->text) >=
-              (int)sizeof(loop_label)) {
-        continue;
-      }
-    }
-    latch = ir_cleanup_loop_latch(function, header, loop_label);
-    if (!latch || header == 0) {
-      continue;
-    }
-    {
-      size_t p = header - 1;
-      while (p > 0 && function->instructions[p].op == IR_OP_NOP) {
-        p--;
-      }
-      IROpcode prev = function->instructions[p].op;
-      if (prev == IR_OP_JUMP || prev == IR_OP_RETURN ||
-          prev == IR_OP_BRANCH_ZERO || prev == IR_OP_BRANCH_EQ) {
-        continue;
-      }
-    }
-    for (size_t i = header + 1; i < latch; i++) {
-      const IRInstruction *ins = &function->instructions[i];
-      const char *name = NULL;
-      size_t writes = 0;
-      int read_before = 0;
-      size_t chain[IR_ASSIGN_CHAIN_MAX];
-      size_t chain_count = 0;
-      size_t moved = 0;
-      if (ins->op != IR_OP_ASSIGN || ins->dest.kind != IR_OPERAND_SYMBOL ||
-          !ins->dest.name || ins->is_volatile) {
-        continue;
-      }
-      name = ins->dest.name;
-      if (ir_function_local_declared_type(function, name) == NULL ||
-          ir_symbol_address_taken(function, name) ||
-          (strncmp(name, "ir_row_", 7) != 0 &&
-           strncmp(name, "ir_view_", 8) != 0)) {
-        continue;
-      }
-      for (size_t k = 0; k < function->instruction_count; k++) {
-        const IRInstruction *other = &function->instructions[k];
-        if (ir_instruction_writes_destination(other) &&
-            ir_operand_is_symbol_named(&other->dest, name)) {
-          writes++;
-        }
-      }
-      if (writes != 1) {
-        continue;
-      }
-      for (size_t k = header; k < i && !read_before; k++) {
-        const IRInstruction *other = &function->instructions[k];
-        read_before = ir_operand_is_symbol_named(&other->lhs, name) ||
-                      ir_operand_is_symbol_named(&other->rhs, name) ||
-                      (other->op == IR_OP_STORE &&
-                       ir_operand_is_symbol_named(&other->dest, name));
-        for (size_t a = 0; a < other->argument_count && !read_before; a++) {
-          read_before = ir_operand_is_symbol_named(&other->arguments[a], name);
-        }
-      }
-      if (read_before || ir_symbol_live_after_loop(function, latch + 1, name)) {
-        continue;
-      }
-      if (!ir_chain_collect(function, header, latch, &ins->lhs, chain,
-                            &chain_count, 0)) {
-        continue;
-      }
-      chain[chain_count++] = i;
-      qsort(chain, chain_count, sizeof(chain[0]), ir_chain_index_less);
-      for (size_t k = 0; k < chain_count; k++) {
-        IRInstruction hoisted;
-        size_t at = chain[k] + moved;
-        if (!ir_clone_instruction_plain(&function->instructions[at],
-                                        &hoisted)) {
-          return 0;
-        }
-        ir_instruction_make_nop(&function->instructions[at]);
-        if (!ir_function_insert_instruction(function, header + moved,
-                                            &hoisted)) {
-          ir_instruction_destroy_storage(&hoisted);
-          return 0;
-        }
-        ir_instruction_destroy_storage(&hoisted);
-        moved++;
-      }
-      header += moved;
-      latch += moved;
-      i += moved;
-      if (changed) {
-        *changed = 1;
-      }
+    if (!ir_hoist_invariant_at_header(function, header, changed)) {
+      return 0;
     }
   }
   return 1;

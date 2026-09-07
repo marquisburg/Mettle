@@ -1609,6 +1609,47 @@ static int safety_iv_start_at_header(const IRFunction *function,
   return 0;
 }
 
+static int safety_hoist_masked(IRFunction *function,
+                               const SafetyLoopList *loops,
+                               size_t check_index,
+                               const SafetyAccess *access, long long stride,
+                               long long upper, SafetyHoist *out) {
+  const SafetyLoopForm *innermost = safety_enclosing_loop(loops, check_index);
+  if (!innermost) {
+    safety_trace("the index is bounded but there is no loop to lift the "
+                 "check out of",
+                 access->location.line);
+    return 0;
+  }
+  long long start = 0;
+  const IROperand *start_operand = NULL;
+  if (!innermost->has_index ||
+      !safety_iv_start_at_header(function, innermost->header_index,
+          &innermost->bounds, innermost->iv, &start, &start_operand) ||
+      start_operand ||
+      (innermost->adjust < 0 && start > LLONG_MAX + innermost->adjust) ||
+      (innermost->adjust > 0 && start < LLONG_MIN + innermost->adjust) ||
+      stride <= 0 || upper < 0 ||
+      upper > (LLONG_MAX - access->size) / stride ||
+      !safety_operand_invariant_in(function, innermost->header_index,
+          innermost->bounds.jump_index, innermost->bound) ||
+      !safety_body_runs_access_every_iteration(function, &innermost->bounds,
+                                               check_index) ||
+      !safety_operand_invariant_in(function, innermost->header_index,
+                                   innermost->bounds.jump_index,
+                                   access->base)) {
+    return 0;
+  }
+  out->header_index = innermost->header_index;
+  out->primary_start = start;
+  out->adjust = innermost->adjust;
+  if (!ir_operand_clone(innermost->bound, &out->bound)) return 0;
+  out->constant_length = upper * stride + access->size;
+  out->access_kind = access->access_kind;
+  out->location = access->location;
+  return ir_operand_clone(access->base, &out->base);
+}
+
 static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
                             size_t check_index, const SafetyAccess *access,
                             SafetyHoist *out) {
@@ -1643,40 +1684,8 @@ static int safety_try_hoist(IRFunction *function, const SafetyLoopList *loops,
   }
 
   if (masked) {
-    const SafetyLoopForm *innermost = safety_enclosing_loop(loops, check_index);
-    if (!innermost) {
-      safety_trace("the index is bounded but there is no loop to lift the "
-                   "check out of",
-                   access->location.line);
-      return 0;
-    }
-    long long start = 0;
-    const IROperand *start_operand = NULL;
-    if (!innermost->has_index ||
-        !safety_iv_start_at_header(function, innermost->header_index,
-            &innermost->bounds, innermost->iv, &start, &start_operand) ||
-        start_operand ||
-        (innermost->adjust < 0 && start > LLONG_MAX + innermost->adjust) ||
-        (innermost->adjust > 0 && start < LLONG_MIN + innermost->adjust) ||
-        masked_stride <= 0 || masked_upper < 0 ||
-        masked_upper > (LLONG_MAX - access->size) / masked_stride ||
-        !safety_operand_invariant_in(function, innermost->header_index,
-            innermost->bounds.jump_index, innermost->bound) ||
-        !safety_body_runs_access_every_iteration(function, &innermost->bounds,
-                                                 check_index) ||
-        !safety_operand_invariant_in(function, innermost->header_index,
-                                     innermost->bounds.jump_index,
-                                     access->base)) {
-      return 0;
-    }
-    out->header_index = innermost->header_index;
-    out->primary_start = start;
-    out->adjust = innermost->adjust;
-    if (!ir_operand_clone(innermost->bound, &out->bound)) return 0;
-    out->constant_length = masked_upper * masked_stride + access->size;
-    out->access_kind = access->access_kind;
-    out->location = access->location;
-    return ir_operand_clone(access->base, &out->base);
+    return safety_hoist_masked(function, loops, check_index, access,
+                               masked_stride, masked_upper, out);
   }
 
   int saw_loop = 0;
@@ -3672,6 +3681,36 @@ typedef struct {
  * At entry rather than where the declaration appears, because the slot exists
  * for the whole frame either way, and a declaration inside a loop would
  * otherwise re-register once per iteration. */
+static int safety_describe_local(IRProgram *program, IRFunction *function,
+                                 size_t i, SafetyStackLocal *locals,
+                                 size_t *count) {
+  const IRInstruction *instruction = &function->instructions[i];
+  if (instruction->op != IR_OP_DECLARE_LOCAL ||
+      instruction->dest.kind != IR_OPERAND_SYMBOL || !instruction->dest.name ||
+      !instruction->text) {
+    return 1;
+  }
+  MtlcType *type = instruction->value_type
+                       ? instruction->value_type
+                       : ir_program_lookup_type(program, instruction->text);
+  if (!type || type->size == 0) {
+    return 1;
+  }
+  if (!safety_local_address_escapes(function, instruction->dest.name)) {
+    return 1;
+  }
+  locals[*count].name = instruction->dest.name;
+  locals[*count].size = (long long)type->size;
+  locals[*count].location = instruction->location;
+  (*count)++;
+  if (safety_trace_enabled()) {
+    fprintf(stderr, "safety: describing local %s (%zu bytes) in %s\n",
+            instruction->dest.name, type->size,
+            function->name ? function->name : "?");
+  }
+  return 1;
+}
+
 static int safety_describe_stack(IRProgram *program, IRFunction *function) {
   size_t declared = 0;
   for (size_t i = 0; i < function->instruction_count; i++) {
@@ -3699,29 +3738,8 @@ static int safety_describe_stack(IRProgram *program, IRFunction *function) {
   size_t count = 0;
 
   for (size_t i = 0; i < function->instruction_count; i++) {
-    const IRInstruction *instruction = &function->instructions[i];
-    if (instruction->op != IR_OP_DECLARE_LOCAL ||
-        instruction->dest.kind != IR_OPERAND_SYMBOL || !instruction->dest.name ||
-        !instruction->text) {
-      continue;
-    }
-    MtlcType *type = instruction->value_type
-                         ? instruction->value_type
-                         : ir_program_lookup_type(program, instruction->text);
-    if (!type || type->size == 0) {
-      continue;
-    }
-    if (!safety_local_address_escapes(function, instruction->dest.name)) {
-      continue;
-    }
-    locals[count].name = instruction->dest.name;
-    locals[count].size = (long long)type->size;
-    locals[count].location = instruction->location;
-    count++;
-    if (safety_trace_enabled()) {
-      fprintf(stderr, "safety: describing local %s (%zu bytes) in %s\n",
-              instruction->dest.name, type->size,
-              function->name ? function->name : "?");
+    if (!safety_describe_local(program, function, i, locals, &count)) {
+      return 0;
     }
   }
 
