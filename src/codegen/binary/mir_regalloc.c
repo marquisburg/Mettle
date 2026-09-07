@@ -1607,6 +1607,9 @@ static uint32_t mir_color_reg_mask(const MirFunction *fn, MirVregId v,
      * lanes above, not these. */
     if (!vr->crosses_call) {
       for (size_t i = 0; i < MIR_XMM_NONVOL_POOL_COUNT; i++) {
+        if (mir_xmm_is_encoder_scratch(MIR_XMM_NONVOL_POOL[i])) {
+          continue;
+        }
         m |= 1u << MIR_XMM_NONVOL_POOL[i];
       }
     }

@@ -760,8 +760,28 @@ const char *mir_opcode_name(MirOpcode op);
  * 0 on failure (sets fn->has_error). Defined in mir_regalloc.c. */
 int mir_regalloc(MirFunction *fn);
 
+/* The two XMM registers the encoder stages values through. They must be
+ * volatile and must not be argument registers, or a value staged for one
+ * argument lands in the register an earlier one was marshalled into.
+ *
+ * MS-x64 carries float arguments in xmm0-3, so xmm4/xmm5 are free. SysV
+ * carries EIGHT, xmm0-7, so those two are arguments there and the scratch pair
+ * moves up to xmm8/xmm9, which neither convention passes anything in. The
+ * allocator drops whichever pair is live from its non-volatile float pool. */
+static inline BinaryXmmRegister mir_xmm_scratch_a(void) {
+  return code_generator_binary_active_abi()->counts_classes_separately
+             ? BINARY_XMM8
+             : BINARY_XMM4;
+}
+
+static inline BinaryXmmRegister mir_xmm_scratch_b(void) {
+  return code_generator_binary_active_abi()->counts_classes_separately
+             ? BINARY_XMM9
+             : BINARY_XMM5;
+}
+
 static inline int mir_xmm_is_encoder_scratch(BinaryXmmRegister reg) {
-  return reg == BINARY_XMM4 || reg == BINARY_XMM5;
+  return reg == mir_xmm_scratch_a() || reg == mir_xmm_scratch_b();
 }
 
 static inline int mir_fsetcc_unordered_cc(unsigned char cc) {

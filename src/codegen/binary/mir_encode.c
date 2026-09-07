@@ -28,8 +28,8 @@ long long mir_encode_last_spills = 0;
 #define SCRATCH_A BINARY_GP_R10
 #define SCRATCH_B BINARY_GP_R11
 /* Float scratch (see MIR_XMM_POOL): XMM4 primary, XMM5 secondary. */
-#define FSCRATCH_A BINARY_XMM4
-#define FSCRATCH_B BINARY_XMM5
+#define FSCRATCH_A mir_xmm_scratch_a()
+#define FSCRATCH_B mir_xmm_scratch_b()
 
 static int enc_err(MirFunction *fn, const char *msg) {
   if (fn->generator && !fn->generator->has_error) {
