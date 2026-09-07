@@ -1062,6 +1062,10 @@ static int mir_untyped_float_bits(CodeGenerator *g, const IRFunction *irf,
 static int mir_emit_string_literal_arg(MirFunction *fn, const IROperand *arg,
                                        MtlcType *pt, MirOperand dst);
 
+static int mir_untyped_aggregate_arg_size(CodeGenerator *g,
+                                          const IRFunction *irf,
+                                          const IROperand *op);
+
 static int mir_asm_next_binding(const char **cursor, char *name,
                                 size_t capacity) {
   const char *at = *cursor ? strchr(*cursor, '{') : NULL;
@@ -1712,11 +1716,14 @@ static int mir_call_is_supported(CodeGenerator *g,
                            mir_operand_kind_name((int)arg->kind));
       return 0;
     }
-    /* A global AGGREGATE has no cached value vreg; it may only feed an
-     * INDIRECT param (handled above, by address). Reaching here with one
-     * means a scalar param, which the value path cannot serve. */
+    /* A global AGGREGATE has no cached value vreg: memory is authoritative and
+     * its VALUE is its address, which is what a pointer-shaped parameter wants
+     * (a global `string` handed to the safety runtime, an array decaying to a
+     * pointer). The marshalling materializes that address, so admit it wherever
+     * the indirect-source machinery can produce one. */
     if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
-        mir_name_is_global_aggregate(g, ir_function, arg->name)) {
+        mir_name_is_global_aggregate(g, ir_function, arg->name) &&
+        !mir_indirect_source_is_supported(g, ir_function, arg)) {
       mir_call_trace("arg_aggregate_scalar_param");
       return 0;
     }
@@ -5806,9 +5813,12 @@ static MirOperand mir_call_arg_operand(MirFunction *fn, CodeGenerator *g,
                                        BinaryFunctionContext *ctx,
                                        MirNameMap *map, const IROperand *arg) {
   if (arg->kind == IR_OPERAND_SYMBOL && arg->name &&
-      mir_name_is_string_local(g, fn->ir_function, arg->name)) {
+      (mir_name_is_string_local(g, fn->ir_function, arg->name) ||
+       mir_name_is_global_aggregate(g, fn->ir_function, arg->name))) {
+    int size = mir_untyped_aggregate_arg_size(g, fn->ir_function, arg);
     MirVregId home = mir_emit_indirect_source_addr(fn, g, ctx, map,
-                                                   fn->ir_function, arg, 16);
+                                                   fn->ir_function, arg,
+                                                   size > 0 ? size : 16);
     if (home == MIR_VREG_NONE) {
       fn->has_error = 1;
       return mir_op_none();
